@@ -10,7 +10,6 @@ import com.elghayesh.gallerybackup.data.drive.DriveAuthResult
 import com.elghayesh.gallerybackup.data.media.FolderNode
 import com.elghayesh.gallerybackup.data.media.MediaItem
 import com.elghayesh.gallerybackup.data.media.MediaRepository
-import com.elghayesh.gallerybackup.data.media.findNode
 import com.elghayesh.gallerybackup.data.settings.SettingsRepository
 import kotlinx.coroutines.flow.first
 
@@ -27,6 +26,12 @@ class BackupRepository(private val context: Context) {
     private val db = BackupDatabase.get(context)
     private val settings = SettingsRepository(context)
 
+    /**
+     * Every folder is an independent on/off flag -- selecting "DCIM" does *not* pull in
+     * "DCIM/Screenshots" for free, and picking a subfolder doesn't require its parent to
+     * be selected too. This matches [com.elghayesh.gallerybackup.data.settings.GalleryPreferencesRepository]'s
+     * exclude/hide folders, which use the same "flat set of paths at any depth" model.
+     */
     suspend fun sync(onProgress: suspend (String) -> Unit = {}): SyncOutcome {
         val authResult = authManager.authorize()
         val accessToken = (authResult as? DriveAuthResult.Granted)?.accessToken
@@ -36,40 +41,34 @@ class BackupRepository(private val context: Context) {
         if (selectedFolders.isEmpty()) return SyncOutcome.NothingSelected
 
         val tree = mediaRepository.scanFolderTree()
-
-        var uploaded = 0
-        var failed = 0
-        for (topPath in selectedFolders) {
-            val node = tree.findNode(topPath) ?: continue
-            onProgress(node.name)
-            val (u, f) = syncFolder(accessToken, node, onProgress)
-            uploaded += u
-            failed += f
-        }
+        val (uploaded, failed) = syncTree(accessToken, tree, selectedFolders, onProgress)
         return SyncOutcome.Completed(uploaded = uploaded, failed = failed)
     }
 
-    private suspend fun syncFolder(
+    private suspend fun syncTree(
         accessToken: String,
         node: FolderNode,
+        selectedFolders: Set<String>,
         onProgress: suspend (String) -> Unit,
     ): Pair<Int, Int> {
-        val driveFolderId = ensureDriveFolderId(accessToken, node.path)
         var uploaded = 0
         var failed = 0
 
-        for (item in node.items) {
-            try {
-                if (uploadIfNeeded(accessToken, driveFolderId, item)) {
-                    uploaded++
-                    onProgress(item.displayName)
+        if (node.path.isNotEmpty() && node.path in selectedFolders) {
+            val driveFolderId = ensureDriveFolderId(accessToken, node.path)
+            for (item in node.items) {
+                try {
+                    if (uploadIfNeeded(accessToken, driveFolderId, item)) {
+                        uploaded++
+                        onProgress(item.displayName)
+                    }
+                } catch (e: Exception) {
+                    failed++
                 }
-            } catch (e: Exception) {
-                failed++
             }
         }
         for (child in node.children.values) {
-            val (u, f) = syncFolder(accessToken, child, onProgress)
+            val (u, f) = syncTree(accessToken, child, selectedFolders, onProgress)
             uploaded += u
             failed += f
         }

@@ -151,6 +151,12 @@ private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: Back
                 path = path,
                 startIndex = index,
                 viewModel = galleryViewModel,
+                onEditPhoto = { folderPath, itemIndex ->
+                    navController.navigate("editPhoto/${URLEncoder.encode(folderPath, "UTF-8")}/$itemIndex")
+                },
+                onEditVideo = { folderPath, itemIndex ->
+                    navController.navigate("trimVideo/${URLEncoder.encode(folderPath, "UTF-8")}/$itemIndex")
+                },
                 onBack = { navController.popBackStack() },
             )
         }

@@ -33,7 +33,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.elghayesh.gallerybackup.data.media.flattenAllFolders
 import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
 import java.text.DateFormat
 import java.util.Date
@@ -101,15 +103,16 @@ fun BackupSettingsScreen(
                 Column(Modifier.padding(16.dp)) {
                     Text("Folders to back up", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        "Everything inside a checked folder is mirrored into Drive, subfolders included.",
+                        "Each folder is independent -- checking a folder does not automatically " +
+                            "include its subfolders. Check exactly the ones you want, at any level.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
 
-            val topLevelFolders = root?.children?.values?.sortedBy { it.name.lowercase() } ?: emptyList()
-            items(topLevelFolders, key = { it.path }) { folder ->
+            val allFolders = root?.flattenAllFolders()?.sortedBy { it.path.lowercase() } ?: emptyList()
+            items(allFolders, key = { it.path }) { folder ->
                 Row(
                     Modifier
                         .fillMaxWidth()
@@ -120,10 +123,10 @@ fun BackupSettingsScreen(
                         checked = selectedFolders.contains(folder.path),
                         onCheckedChange = { checked -> backupViewModel.toggleFolder(folder.path, checked) },
                     )
-                    Column(Modifier.padding(start = 8.dp)) {
-                        Text(folder.name)
+                    Column(Modifier.padding(start = 8.dp).weight(1f)) {
+                        Text(folder.path, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(
-                            "${folder.totalItemCount()} items",
+                            "${folder.items.size} items directly inside",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

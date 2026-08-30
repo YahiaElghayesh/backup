@@ -15,16 +15,22 @@ sealed class DeleteResult {
 /**
  * Deletes media. On Android 11+ this uses MediaStore's real trash -- recoverable for
  * about 30 days, the same trash Google Photos/Files use -- via a one-time system
- * confirmation dialog. There is no OS-level trash API before Android 11, so on those
- * versions this falls back to permanent deletion after an in-app confirmation; that is
- * a real platform limitation, not an oversight.
+ * confirmation dialog; passing [skipTrash] uses MediaStore's permanent-delete request
+ * instead (still one system confirmation, but no recovery afterwards). There is no
+ * OS-level trash API before Android 11, so on those versions this always deletes
+ * permanently after an in-app confirmation regardless of [skipTrash]; that is a real
+ * platform limitation, not an oversight.
  */
 class TrashManager(private val context: Context) {
 
-    fun requestDelete(uris: List<Uri>): DeleteResult {
+    fun requestDelete(uris: List<Uri>, skipTrash: Boolean = false): DeleteResult {
         if (uris.isEmpty()) return DeleteResult.Deleted
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val pendingIntent = MediaStore.createTrashRequest(context.contentResolver, uris, true)
+            val pendingIntent = if (skipTrash) {
+                MediaStore.createDeleteRequest(context.contentResolver, uris)
+            } else {
+                MediaStore.createTrashRequest(context.contentResolver, uris, true)
+            }
             DeleteResult.ConsentRequired(pendingIntent)
         } else {
             try {

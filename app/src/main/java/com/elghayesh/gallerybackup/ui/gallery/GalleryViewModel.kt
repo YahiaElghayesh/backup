@@ -2,6 +2,7 @@ package com.elghayesh.gallerybackup.ui.gallery
 
 import android.app.Application
 import android.app.PendingIntent
+import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.elghayesh.gallerybackup.data.media.DeleteResult
@@ -9,6 +10,7 @@ import com.elghayesh.gallerybackup.data.media.FolderNode
 import com.elghayesh.gallerybackup.data.media.MediaItem
 import com.elghayesh.gallerybackup.data.media.MediaRepository
 import com.elghayesh.gallerybackup.data.media.TrashManager
+import com.elghayesh.gallerybackup.data.media.copyMediaTo
 import com.elghayesh.gallerybackup.data.media.filtered
 import com.elghayesh.gallerybackup.data.settings.AccentColor
 import com.elghayesh.gallerybackup.data.settings.FolderSortOrder
@@ -34,6 +36,15 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
 
     private val deleteConsentChannel = Channel<PendingIntent>(Channel.CONFLATED)
     val deleteConsentRequests: Flow<PendingIntent> = deleteConsentChannel.receiveAsFlow()
+
+    private val _selectedMediaIds = MutableStateFlow<Set<Long>>(emptySet())
+    val selectedMediaIds: StateFlow<Set<Long>> = _selectedMediaIds.asStateFlow()
+
+    /** Session-only (not persisted) delete-confirmation preferences -- reset if the app process dies. */
+    private val _dontAskAgainDelete = MutableStateFlow(false)
+    val dontAskAgainDelete: StateFlow<Boolean> = _dontAskAgainDelete.asStateFlow()
+    private val _skipRecycleBinDefault = MutableStateFlow(false)
+    val skipRecycleBinDefault: StateFlow<Boolean> = _skipRecycleBinDefault.asStateFlow()
 
     private val _rawRoot = MutableStateFlow<FolderNode?>(null)
 
@@ -99,24 +110,73 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { prefs.setMediaHidden(id, hidden) }
     fun setShowHidden(show: Boolean) = viewModelScope.launch { prefs.setShowHidden(show) }
 
+    fun toggleMediaSelection(id: Long) {
+        _selectedMediaIds.value =
+            if (id in _selectedMediaIds.value) _selectedMediaIds.value - id else _selectedMediaIds.value + id
+    }
+
+    fun clearSelection() {
+        _selectedMediaIds.value = emptySet()
+    }
+
+    fun setDontAskAgainDelete(value: Boolean) {
+        _dontAskAgainDelete.value = value
+    }
+
+    fun setSkipRecycleBinDefault(value: Boolean) {
+        _skipRecycleBinDefault.value = value
+    }
+
     /**
-     * Deletes [item]. On Android 11+ this always needs one round trip through a system
+     * Deletes [items]. On Android 11+ this always needs one round trip through a system
      * confirmation dialog (see [TrashManager]) -- the caller (an Activity) must launch
      * the [PendingIntent] sent on [deleteConsentRequests] and report back via
-     * [onDeleteConfirmed]. Below Android 11 it deletes immediately.
+     * [onDeleteConfirmed]. Below Android 11 it deletes immediately. [skipTrash] permanently
+     * deletes instead of using the recoverable trash.
      */
-    fun deleteMedia(item: MediaItem) {
+    fun deleteMediaItems(items: List<MediaItem>, skipTrash: Boolean) {
         viewModelScope.launch {
-            when (val result = trashManager.requestDelete(listOf(item.uri))) {
+            when (val result = trashManager.requestDelete(items.map { it.uri }, skipTrash)) {
                 is DeleteResult.ConsentRequired -> deleteConsentChannel.send(result.pendingIntent)
-                DeleteResult.Deleted -> refresh()
+                DeleteResult.Deleted -> {
+                    refresh()
+                    clearSelection()
+                }
                 is DeleteResult.Error -> Unit
             }
         }
     }
 
-    /** Call after the user approves the system trash-confirmation dialog launched from [deleteConsentRequests]. */
+    /** Call after the user approves (or cancels) the system dialog launched from [deleteConsentRequests]. */
     fun onDeleteConfirmed() {
         refresh()
+        clearSelection()
+    }
+
+    /** Copies [items] into [destinationFolderPath], leaving the originals in place. */
+    fun copyMediaItems(items: List<MediaItem>, destinationFolderPath: String) {
+        viewModelScope.launch {
+            val context: Context = getApplication()
+            for (item in items) copyMediaTo(context, item, destinationFolderPath)
+            refresh()
+            clearSelection()
+        }
+    }
+
+    /** Copies [items] into [destinationFolderPath], then moves the originals to the trash. */
+    fun moveMediaItems(items: List<MediaItem>, destinationFolderPath: String) {
+        viewModelScope.launch {
+            val context: Context = getApplication()
+            val copied = items.filter { copyMediaTo(context, it, destinationFolderPath) != null }
+            if (copied.isNotEmpty()) {
+                when (val result = trashManager.requestDelete(copied.map { it.uri }, skipTrash = false)) {
+                    is DeleteResult.ConsentRequired -> deleteConsentChannel.send(result.pendingIntent)
+                    DeleteResult.Deleted -> Unit
+                    is DeleteResult.Error -> Unit
+                }
+            }
+            refresh()
+            clearSelection()
+        }
     }
 }

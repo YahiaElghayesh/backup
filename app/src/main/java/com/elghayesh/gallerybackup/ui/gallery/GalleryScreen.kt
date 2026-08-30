@@ -27,6 +27,8 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.MoreVert
@@ -60,6 +62,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
@@ -69,7 +72,14 @@ import com.elghayesh.gallerybackup.data.media.findNode
 import com.elghayesh.gallerybackup.data.media.latestModifiedSec
 import com.elghayesh.gallerybackup.data.settings.FolderSortOrder
 import com.elghayesh.gallerybackup.data.settings.ViewType
+import com.elghayesh.gallerybackup.ui.common.FolderPickerDialog
+import com.elghayesh.gallerybackup.ui.common.MediaActionBar
+import com.elghayesh.gallerybackup.ui.common.PropertiesDialog
+import com.elghayesh.gallerybackup.ui.common.rememberDeleteRequester
+import com.elghayesh.gallerybackup.ui.common.shareMedia
 import java.util.concurrent.TimeUnit
+
+private enum class FolderTransferMode { MOVE, COPY }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -85,8 +95,11 @@ fun GalleryScreen(
     onNavigateUp: () -> Unit,
 ) {
     LaunchedEffect(Unit) { viewModel.loadIfNeeded() }
+    LaunchedEffect(path) { viewModel.clearSelection() }
+    val context = LocalContext.current
 
     val visibleRoot by viewModel.visibleRoot.collectAsState()
+    val rawRoot by viewModel.root.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     val viewType by viewModel.viewType.collectAsState()
     val gridColumns by viewModel.gridColumns.collectAsState()
@@ -94,64 +107,126 @@ fun GalleryScreen(
     val showHidden by viewModel.showHidden.collectAsState()
     val hiddenFolders by viewModel.hiddenFolders.collectAsState()
     val hiddenMediaIds by viewModel.hiddenMediaIds.collectAsState()
+    val selectedMediaIds by viewModel.selectedMediaIds.collectAsState()
     val node = visibleRoot?.findNode(path)
+
+    val folders = node?.let { sortedFolders(it.children.values.toList(), folderSort) } ?: emptyList()
+    val media = node?.items?.sortedByDescending { it.dateModifiedSec } ?: emptyList()
+    val selectedItems = media.filter { it.id in selectedMediaIds }
+    val isSelectionMode = selectedMediaIds.isNotEmpty()
 
     var overflowExpanded by remember { mutableStateOf(false) }
     var showSortDialog by remember { mutableStateOf(false) }
+    var transferMode by remember { mutableStateOf<FolderTransferMode?>(null) }
+    var showProperties by remember { mutableStateOf(false) }
+
+    val requestDelete = rememberDeleteRequester(viewModel)
 
     if (showSortDialog) {
         SortDialog(current = folderSort, onSelect = { viewModel.setFolderSort(it) }, onDismiss = { showSortDialog = false })
     }
+    transferMode?.let { mode ->
+        FolderPickerDialog(
+            root = rawRoot,
+            title = if (mode == FolderTransferMode.MOVE) "Move to..." else "Copy to...",
+            onPick = { destination ->
+                if (mode == FolderTransferMode.MOVE) {
+                    viewModel.moveMediaItems(selectedItems, destination)
+                } else {
+                    viewModel.copyMediaItems(selectedItems, destination)
+                }
+                transferMode = null
+            },
+            onDismiss = { transferMode = null },
+        )
+    }
+    if (showProperties && selectedItems.isNotEmpty()) {
+        PropertiesDialog(items = selectedItems, onDismiss = { showProperties = false })
+    }
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text(breadcrumbTitle(path)) },
-                navigationIcon = {
-                    if (path.isNotEmpty()) {
-                        IconButton(onClick = onNavigateUp) {
-                            Icon(Icons.Filled.ArrowBack, contentDescription = "Up")
+            if (isSelectionMode) {
+                TopAppBar(
+                    title = { Text("${selectedItems.size} selected") },
+                    navigationIcon = {
+                        IconButton(onClick = { viewModel.clearSelection() }) {
+                            Icon(Icons.Filled.Close, contentDescription = "Cancel selection")
                         }
-                    }
-                },
-                actions = {
-                    IconButton(onClick = {
-                        viewModel.setViewType(if (viewType == ViewType.GRID) ViewType.LIST else ViewType.GRID)
-                    }) {
-                        Icon(
-                            if (viewType == ViewType.GRID) Icons.Filled.ViewList else Icons.Filled.GridView,
-                            contentDescription = "Toggle view type",
+                    },
+                    actions = {
+                        val allSelectedHidden = selectedItems.isNotEmpty() && selectedItems.all { it.id in hiddenMediaIds }
+                        MediaActionBar(
+                            onEdit = if (selectedItems.size == 1) {
+                                {
+                                    val only = selectedItems.first()
+                                    val index = media.indexOf(only)
+                                    if (only.isVideo) onEditVideo(path, index) else onEditPhoto(path, index)
+                                }
+                            } else {
+                                null
+                            },
+                            onShare = { shareMedia(context, selectedItems) },
+                            onDelete = { requestDelete(selectedItems) },
+                            onMoveTo = { transferMode = FolderTransferMode.MOVE },
+                            onCopyTo = { transferMode = FolderTransferMode.COPY },
+                            onProperties = { showProperties = true },
+                            hideLabel = if (allSelectedHidden) "Unhide" else "Hide",
+                            onToggleHidden = {
+                                selectedItems.forEach { viewModel.setMediaHidden(it.id, !allSelectedHidden) }
+                            },
                         )
-                    }
-                    Box {
-                        IconButton(onClick = { overflowExpanded = true }) {
-                            Icon(Icons.Filled.MoreVert, contentDescription = "More options")
+                    },
+                )
+            } else {
+                TopAppBar(
+                    title = { Text(breadcrumbTitle(path)) },
+                    navigationIcon = {
+                        if (path.isNotEmpty()) {
+                            IconButton(onClick = onNavigateUp) {
+                                Icon(Icons.Filled.ArrowBack, contentDescription = "Up")
+                            }
                         }
-                        DropdownMenu(expanded = overflowExpanded, onDismissRequest = { overflowExpanded = false }) {
-                            DropdownMenuItem(
-                                text = { Text("Sort by...") },
-                                onClick = { overflowExpanded = false; showSortDialog = true },
-                            )
-                            DropdownMenuItem(
-                                text = { Text(if (showHidden) "Hide hidden items" else "Show hidden items") },
-                                onClick = { viewModel.setShowHidden(!showHidden); overflowExpanded = false },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Rescan device") },
-                                onClick = { viewModel.refresh(); overflowExpanded = false },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Gallery settings") },
-                                onClick = { overflowExpanded = false; onOpenGallerySettings() },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Backup settings") },
-                                onClick = { overflowExpanded = false; onOpenBackupSettings() },
+                    },
+                    actions = {
+                        IconButton(onClick = {
+                            viewModel.setViewType(if (viewType == ViewType.GRID) ViewType.LIST else ViewType.GRID)
+                        }) {
+                            Icon(
+                                if (viewType == ViewType.GRID) Icons.Filled.ViewList else Icons.Filled.GridView,
+                                contentDescription = "Toggle view type",
                             )
                         }
-                    }
-                },
-            )
+                        Box {
+                            IconButton(onClick = { overflowExpanded = true }) {
+                                Icon(Icons.Filled.MoreVert, contentDescription = "More options")
+                            }
+                            DropdownMenu(expanded = overflowExpanded, onDismissRequest = { overflowExpanded = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("Sort by...") },
+                                    onClick = { overflowExpanded = false; showSortDialog = true },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(if (showHidden) "Hide hidden items" else "Show hidden items") },
+                                    onClick = { viewModel.setShowHidden(!showHidden); overflowExpanded = false },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Rescan device") },
+                                    onClick = { viewModel.refresh(); overflowExpanded = false },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Gallery settings") },
+                                    onClick = { overflowExpanded = false; onOpenGallerySettings() },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Backup settings") },
+                                    onClick = { overflowExpanded = false; onOpenBackupSettings() },
+                                )
+                            }
+                        }
+                    },
+                )
+            }
         },
     ) { padding ->
         Box(Modifier.padding(padding).fillMaxSize()) {
@@ -174,9 +249,6 @@ fun GalleryScreen(
                     )
                 }
                 else -> {
-                    val folders = sortedFolders(node.children.values.toList(), folderSort)
-                    val media = node.items.sortedByDescending { it.dateModifiedSec }
-
                     if (viewType == ViewType.GRID) {
                         LazyVerticalGrid(
                             columns = GridCells.Fixed(gridColumns),
@@ -200,12 +272,15 @@ fun GalleryScreen(
                                 MediaGridTile(
                                     item = item,
                                     isHidden = item.id in hiddenMediaIds,
-                                    onClick = { onOpenMedia(path, index) },
-                                    onToggleHidden = {
-                                        viewModel.setMediaHidden(item.id, item.id !in hiddenMediaIds)
+                                    isSelected = item.id in selectedMediaIds,
+                                    onClick = {
+                                        if (isSelectionMode) {
+                                            viewModel.toggleMediaSelection(item.id)
+                                        } else {
+                                            onOpenMedia(path, index)
+                                        }
                                     },
-                                    onDelete = { viewModel.deleteMedia(item) },
-                                    onEdit = { if (item.isVideo) onEditVideo(path, index) else onEditPhoto(path, index) },
+                                    onLongClick = { viewModel.toggleMediaSelection(item.id) },
                                 )
                             }
                         }
@@ -226,12 +301,15 @@ fun GalleryScreen(
                                 MediaListRow(
                                     item = item,
                                     isHidden = item.id in hiddenMediaIds,
-                                    onClick = { onOpenMedia(path, index) },
-                                    onToggleHidden = {
-                                        viewModel.setMediaHidden(item.id, item.id !in hiddenMediaIds)
+                                    isSelected = item.id in selectedMediaIds,
+                                    onClick = {
+                                        if (isSelectionMode) {
+                                            viewModel.toggleMediaSelection(item.id)
+                                        } else {
+                                            onOpenMedia(path, index)
+                                        }
                                     },
-                                    onDelete = { viewModel.deleteMedia(item) },
-                                    onEdit = { if (item.isVideo) onEditVideo(path, index) else onEditPhoto(path, index) },
+                                    onLongClick = { viewModel.toggleMediaSelection(item.id) },
                                 )
                             }
                         }
@@ -291,23 +369,6 @@ private fun ColumnScope.FolderMenuItems(
 ) {
     DropdownMenuItem(text = { Text(if (isHidden) "Unhide" else "Hide") }, onClick = { onToggleHidden(); onDismiss() })
     DropdownMenuItem(text = { Text("Exclude from gallery") }, onClick = { onExclude(); onDismiss() })
-}
-
-@Composable
-private fun ColumnScope.MediaMenuItems(
-    item: MediaItem,
-    isHidden: Boolean,
-    onToggleHidden: () -> Unit,
-    onEdit: () -> Unit,
-    onDelete: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    DropdownMenuItem(text = { Text(if (isHidden) "Unhide" else "Hide") }, onClick = { onToggleHidden(); onDismiss() })
-    DropdownMenuItem(
-        text = { Text(if (item.isVideo) "Trim video" else "Edit photo") },
-        onClick = { onEdit(); onDismiss() },
-    )
-    DropdownMenuItem(text = { Text("Delete") }, onClick = { onDelete(); onDismiss() })
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -373,18 +434,16 @@ private fun FolderGridTile(
 private fun MediaGridTile(
     item: MediaItem,
     isHidden: Boolean,
+    isSelected: Boolean,
     onClick: () -> Unit,
-    onToggleHidden: () -> Unit,
-    onDelete: () -> Unit,
-    onEdit: () -> Unit,
+    onLongClick: () -> Unit,
 ) {
-    var menuExpanded by remember { mutableStateOf(false) }
     Box(
         Modifier
             .aspectRatio(1f)
             .clip(RoundedCornerShape(8.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .combinedClickable(onClick = onClick, onLongClick = { menuExpanded = true })
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .alpha(if (isHidden) 0.5f else 1f),
     ) {
         AsyncImage(
@@ -415,8 +474,14 @@ private fun MediaGridTile(
                 modifier = Modifier.align(Alignment.TopEnd).padding(4.dp),
             )
         }
-        DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-            MediaMenuItems(item, isHidden, onToggleHidden, onEdit, onDelete, onDismiss = { menuExpanded = false })
+        if (isSelected) {
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f)))
+            Icon(
+                Icons.Filled.CheckCircle,
+                contentDescription = "Selected",
+                tint = Color.White,
+                modifier = Modifier.align(Alignment.TopStart).padding(4.dp),
+            )
         }
     }
 }
@@ -429,17 +494,24 @@ private fun GalleryListItem(
     title: String,
     subtitle: String,
     isHidden: Boolean,
+    isSelected: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
-    menuExpanded: Boolean,
-    onDismissMenu: () -> Unit,
-    menuContent: @Composable ColumnScope.() -> Unit,
+    menuContent: (@Composable ColumnScope.(closeMenu: () -> Unit) -> Unit)? = null,
 ) {
-    Box {
+    var menuExpanded by remember { mutableStateOf(false) }
+    Box(
+        Modifier.background(
+            if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f) else Color.Transparent,
+        ),
+    ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                .combinedClickable(
+                    onClick = onClick,
+                    onLongClick = { if (menuContent != null) menuExpanded = true else onLongClick() },
+                )
                 .alpha(if (isHidden) 0.5f else 1f)
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -466,11 +538,17 @@ private fun GalleryListItem(
                 Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            if (isHidden) {
+            if (isSelected) {
+                Icon(Icons.Filled.CheckCircle, contentDescription = "Selected", tint = MaterialTheme.colorScheme.primary)
+            } else if (isHidden) {
                 Icon(Icons.Filled.VisibilityOff, contentDescription = "Hidden", modifier = Modifier.padding(start = 8.dp))
             }
         }
-        DropdownMenu(expanded = menuExpanded, onDismissRequest = onDismissMenu, content = menuContent)
+        if (menuContent != null) {
+            DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                menuContent(closeMenu = { menuExpanded = false })
+            }
+        }
     }
 }
 
@@ -482,18 +560,16 @@ private fun FolderListRow(
     onToggleHidden: () -> Unit,
     onExclude: () -> Unit,
 ) {
-    var menuExpanded by remember { mutableStateOf(false) }
     GalleryListItem(
         thumbnailModel = folder.coverUri(),
         icon = Icons.Filled.Folder,
         title = folder.name,
         subtitle = "${folder.totalItemCount()} items",
         isHidden = isHidden,
+        isSelected = false,
         onClick = onClick,
-        onLongClick = { menuExpanded = true },
-        menuExpanded = menuExpanded,
-        onDismissMenu = { menuExpanded = false },
-        menuContent = { FolderMenuItems(isHidden, onToggleHidden, onExclude, onDismiss = { menuExpanded = false }) },
+        onLongClick = {},
+        menuContent = { closeMenu -> FolderMenuItems(isHidden, onToggleHidden, onExclude, onDismiss = closeMenu) },
     )
 }
 
@@ -501,25 +577,20 @@ private fun FolderListRow(
 private fun MediaListRow(
     item: MediaItem,
     isHidden: Boolean,
+    isSelected: Boolean,
     onClick: () -> Unit,
-    onToggleHidden: () -> Unit,
-    onDelete: () -> Unit,
-    onEdit: () -> Unit,
+    onLongClick: () -> Unit,
 ) {
-    var menuExpanded by remember { mutableStateOf(false) }
     GalleryListItem(
         thumbnailModel = item.uri,
         icon = null,
         title = item.displayName,
         subtitle = if (item.isVideo) "Video - ${formatDuration(item.durationMs)}" else "Photo",
         isHidden = isHidden,
+        isSelected = isSelected,
         onClick = onClick,
-        onLongClick = { menuExpanded = true },
-        menuExpanded = menuExpanded,
-        onDismissMenu = { menuExpanded = false },
-        menuContent = {
-            MediaMenuItems(item, isHidden, onToggleHidden, onEdit, onDelete, onDismiss = { menuExpanded = false })
-        },
+        onLongClick = onLongClick,
+        menuContent = null,
     )
 }
 
