@@ -27,7 +27,7 @@ class BackupRepository(private val context: Context) {
     private val db = BackupDatabase.get(context)
     private val settings = SettingsRepository(context)
 
-    suspend fun sync(onProgress: (String) -> Unit = {}): SyncOutcome {
+    suspend fun sync(onProgress: suspend (String) -> Unit = {}): SyncOutcome {
         val authResult = authManager.authorize()
         val accessToken = (authResult as? DriveAuthResult.Granted)?.accessToken
             ?: return SyncOutcome.NotConnected
@@ -52,7 +52,7 @@ class BackupRepository(private val context: Context) {
     private suspend fun syncFolder(
         accessToken: String,
         node: FolderNode,
-        onProgress: (String) -> Unit,
+        onProgress: suspend (String) -> Unit,
     ): Pair<Int, Int> {
         val driveFolderId = ensureDriveFolderId(accessToken, node.path)
         var uploaded = 0
