@@ -13,5 +13,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "GalleryBackup"
+rootProject.name = "MediaHub"
 include(":app")

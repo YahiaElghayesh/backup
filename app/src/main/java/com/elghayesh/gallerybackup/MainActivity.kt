@@ -18,11 +18,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -36,10 +36,15 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.elghayesh.gallerybackup.data.media.findNode
+import com.elghayesh.gallerybackup.ui.edit.PhotoEditScreen
+import com.elghayesh.gallerybackup.ui.edit.VideoTrimScreen
 import com.elghayesh.gallerybackup.ui.gallery.GalleryScreen
+import com.elghayesh.gallerybackup.ui.gallery.GallerySettingsScreen
 import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
 import com.elghayesh.gallerybackup.ui.settings.BackupSettingsScreen
 import com.elghayesh.gallerybackup.ui.settings.BackupViewModel
+import com.elghayesh.gallerybackup.ui.theme.AppTheme
 import com.elghayesh.gallerybackup.ui.viewer.MediaViewerScreen
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -49,20 +54,35 @@ class MainActivity : ComponentActivity() {
     private val galleryViewModel: GalleryViewModel by viewModels()
     private val backupViewModel: BackupViewModel by viewModels()
 
-    private val consentLauncher = registerForActivityResult(
+    private val driveConsentLauncher = registerForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult(),
     ) { result ->
         backupViewModel.onConsentResult(result.data)
     }
 
+    private val deleteConsentLauncher = registerForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult(),
+    ) {
+        // Whether confirmed or cancelled, a rescan is harmless and keeps the gallery in sync.
+        galleryViewModel.onDeleteConfirmed()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme {
+            val themeMode by galleryViewModel.themeMode.collectAsState()
+            val accentColor by galleryViewModel.accentColor.collectAsState()
+
+            AppTheme(themeMode = themeMode, accentColor = accentColor) {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     LaunchedEffect(Unit) {
                         backupViewModel.consentRequests.collect { pendingIntent ->
-                            consentLauncher.launch(IntentSenderRequest.Builder(pendingIntent).build())
+                            driveConsentLauncher.launch(IntentSenderRequest.Builder(pendingIntent).build())
+                        }
+                    }
+                    LaunchedEffect(Unit) {
+                        galleryViewModel.deleteConsentRequests.collect { pendingIntent ->
+                            deleteConsentLauncher.launch(IntentSenderRequest.Builder(pendingIntent).build())
                         }
                     }
 
@@ -107,7 +127,14 @@ private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: Back
                 onOpenMedia = { folderPath, index ->
                     navController.navigate("viewer/${URLEncoder.encode(folderPath, "UTF-8")}/$index")
                 },
-                onOpenSettings = { navController.navigate("settings") },
+                onOpenGallerySettings = { navController.navigate("gallerySettings") },
+                onOpenBackupSettings = { navController.navigate("backupSettings") },
+                onEditPhoto = { folderPath, index ->
+                    navController.navigate("editPhoto/${URLEncoder.encode(folderPath, "UTF-8")}/$index")
+                },
+                onEditVideo = { folderPath, index ->
+                    navController.navigate("trimVideo/${URLEncoder.encode(folderPath, "UTF-8")}/$index")
+                },
                 onNavigateUp = { navController.popBackStack() },
             )
         }
@@ -127,12 +154,48 @@ private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: Back
                 onBack = { navController.popBackStack() },
             )
         }
-        composable("settings") {
+        composable("backupSettings") {
             BackupSettingsScreen(
                 galleryViewModel = galleryViewModel,
                 backupViewModel = backupViewModel,
                 onBack = { navController.popBackStack() },
             )
+        }
+        composable("gallerySettings") {
+            GallerySettingsScreen(
+                viewModel = galleryViewModel,
+                onBack = { navController.popBackStack() },
+            )
+        }
+        composable(
+            route = "editPhoto/{path}/{index}",
+            arguments = listOf(
+                navArgument("path") { type = NavType.StringType },
+                navArgument("index") { type = NavType.IntType },
+            ),
+        ) { backStackEntry ->
+            val path = URLDecoder.decode(backStackEntry.arguments?.getString("path") ?: "", "UTF-8")
+            val index = backStackEntry.arguments?.getInt("index") ?: 0
+            val root by galleryViewModel.visibleRoot.collectAsState()
+            val item = root?.findNode(path)?.items?.sortedByDescending { it.dateModifiedSec }?.getOrNull(index)
+            if (item != null) {
+                PhotoEditScreen(item = item, onDone = { navController.popBackStack() })
+            }
+        }
+        composable(
+            route = "trimVideo/{path}/{index}",
+            arguments = listOf(
+                navArgument("path") { type = NavType.StringType },
+                navArgument("index") { type = NavType.IntType },
+            ),
+        ) { backStackEntry ->
+            val path = URLDecoder.decode(backStackEntry.arguments?.getString("path") ?: "", "UTF-8")
+            val index = backStackEntry.arguments?.getInt("index") ?: 0
+            val root by galleryViewModel.visibleRoot.collectAsState()
+            val item = root?.findNode(path)?.items?.sortedByDescending { it.dateModifiedSec }?.getOrNull(index)
+            if (item != null) {
+                VideoTrimScreen(item = item, onDone = { navController.popBackStack() })
+            }
         }
     }
 }
@@ -144,7 +207,7 @@ private fun PermissionRationaleScreen(onRequestPermission: () -> Unit) {
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text("Gallery Backup needs permission to see your photos and videos to display and back them up.")
+        Text("MediaHub needs permission to see your photos and videos to display and back them up.")
         Spacer(Modifier.height(12.dp))
         Button(onClick = onRequestPermission) {
             Text("Grant access")

@@ -44,9 +44,11 @@ fun MediaViewerScreen(
     viewModel: GalleryViewModel,
     onBack: () -> Unit,
 ) {
-    val root by viewModel.root.collectAsState()
-    val media = remember(root, path) {
-        root?.findNode(path)?.items?.sortedByDescending { it.dateModifiedSec } ?: emptyList()
+    // Must match the same (filtered) list GalleryScreen computed indices from -- otherwise
+    // an index picked from the visible grid could resolve to a different, hidden item here.
+    val visibleRoot by viewModel.visibleRoot.collectAsState()
+    val media = remember(visibleRoot, path) {
+        visibleRoot?.findNode(path)?.items?.sortedByDescending { it.dateModifiedSec } ?: emptyList()
     }
 
     if (media.isEmpty()) {

@@ -80,6 +80,8 @@ dependencies {
     implementation("io.coil-kt:coil-video:2.6.0")
     implementation("androidx.media3:media3-exoplayer:1.3.1")
     implementation("androidx.media3:media3-ui:1.3.1")
+    implementation("androidx.media3:media3-transformer:1.3.1")
+    implementation("androidx.media3:media3-effect:1.3.1")
 
     // Google sign-in / OAuth authorization (works without Play Store publishing)
     implementation("com.google.android.gms:play-services-auth:21.2.0")

@@ -1,4 +1,4 @@
-# Gallery Backup
+# MediaHub
 
 An Android gallery app that browses your phone's photos/videos in their real,
 nested folder structure, and backs up whichever folders you choose into a

@@ -70,3 +70,43 @@ fun FolderNode.findNode(path: String): FolderNode? {
     }
     return node
 }
+
+/** Every folder in this tree (any depth), not including this node itself. */
+fun FolderNode.flattenAllFolders(): List<FolderNode> {
+    val result = mutableListOf<FolderNode>()
+    for (child in children.values) {
+        result.add(child)
+        result.addAll(child.flattenAllFolders())
+    }
+    return result
+}
+
+/** Most recent [MediaItem.dateModifiedSec] anywhere in this folder or its subfolders; 0 if empty. */
+fun FolderNode.latestModifiedSec(): Long {
+    val ownMax = items.maxOfOrNull { it.dateModifiedSec } ?: 0L
+    val childMax = children.values.maxOfOrNull { it.latestModifiedSec() } ?: 0L
+    return maxOf(ownMax, childMax)
+}
+
+/**
+ * Returns a copy of this tree with [excludedFolders] removed entirely, and with folders in
+ * [hiddenFolders] / items in [hiddenMediaIds] removed unless [showHidden] is true.
+ */
+fun FolderNode.filtered(
+    excludedFolders: Set<String>,
+    hiddenFolders: Set<String>,
+    hiddenMediaIds: Set<Long>,
+    showHidden: Boolean,
+): FolderNode {
+    val result = FolderNode(path, name)
+    for ((childName, child) in children) {
+        if (child.path in excludedFolders) continue
+        if (!showHidden && child.path in hiddenFolders) continue
+        result.children[childName] = child.filtered(excludedFolders, hiddenFolders, hiddenMediaIds, showHidden)
+    }
+    for (item in items) {
+        if (!showHidden && item.id in hiddenMediaIds) continue
+        result.items.add(item)
+    }
+    return result
+}
