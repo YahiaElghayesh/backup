@@ -23,20 +23,17 @@ import androidx.compose.ui.Modifier
 
 /**
  * The action row shared by the media viewer (acting on the single open item) and the
- * gallery's multi-select toolbar (acting on every selected item). Move/Copy/Properties
- * live behind an overflow menu -- kept to text labels rather than icons, since there
- * isn't a Material icon name for "move to folder" this codebase can be fully sure of.
+ * gallery's multi-select toolbar (acting on every selected item/folder). Every action
+ * beyond Edit/Share/Delete lives behind the overflow menu as a plain text label -- the
+ * exact set of what's applicable (Rename, Set cover, Exclude, ...) changes depending on
+ * what's selected, so the caller builds that list rather than this component guessing.
  */
 @Composable
 fun MediaActionBar(
     onEdit: (() -> Unit)?,
     onShare: () -> Unit,
     onDelete: () -> Unit,
-    onMoveTo: () -> Unit,
-    onCopyTo: () -> Unit,
-    onProperties: () -> Unit,
-    hideLabel: String? = null,
-    onToggleHidden: (() -> Unit)? = null,
+    overflowActions: List<Pair<String, () -> Unit>>,
     modifier: Modifier = Modifier,
 ) {
     var overflowExpanded by remember { mutableStateOf(false) }
@@ -46,20 +43,19 @@ fun MediaActionBar(
         }
         IconButton(onClick = onShare) { Icon(Icons.Filled.Share, contentDescription = "Share") }
         IconButton(onClick = onDelete) { Icon(Icons.Filled.Delete, contentDescription = "Delete") }
-        Box {
-            IconButton(onClick = { overflowExpanded = true }) {
-                Icon(Icons.Filled.MoreVert, contentDescription = "More")
-            }
-            DropdownMenu(expanded = overflowExpanded, onDismissRequest = { overflowExpanded = false }) {
-                if (onToggleHidden != null && hideLabel != null) {
-                    DropdownMenuItem(
-                        text = { Text(hideLabel) },
-                        onClick = { overflowExpanded = false; onToggleHidden() },
-                    )
+        if (overflowActions.isNotEmpty()) {
+            Box {
+                IconButton(onClick = { overflowExpanded = true }) {
+                    Icon(Icons.Filled.MoreVert, contentDescription = "More")
                 }
-                DropdownMenuItem(text = { Text("Move to...") }, onClick = { overflowExpanded = false; onMoveTo() })
-                DropdownMenuItem(text = { Text("Copy to...") }, onClick = { overflowExpanded = false; onCopyTo() })
-                DropdownMenuItem(text = { Text("Properties") }, onClick = { overflowExpanded = false; onProperties() })
+                DropdownMenu(expanded = overflowExpanded, onDismissRequest = { overflowExpanded = false }) {
+                    overflowActions.forEach { (label, action) ->
+                        DropdownMenuItem(
+                            text = { Text(label) },
+                            onClick = { overflowExpanded = false; action() },
+                        )
+                    }
+                }
             }
         }
     }

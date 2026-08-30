@@ -37,6 +37,9 @@ enum class AccentColor(val seed: Long) {
     INDIGO(0xFF3949AB),
 }
 
+/** A custom folder tile: solid [colorSeed] background with [text] instead of a photo thumbnail. */
+data class FolderCover(val text: String, val colorSeed: Long)
+
 /**
  * Gallery display/browsing preferences: how folders look and sort, theming, and which
  * folders/items are excluded or hidden from view. Separate from [SettingsRepository],
@@ -55,6 +58,9 @@ class GalleryPreferencesRepository(private val context: Context) {
         val HIDDEN_FOLDERS = stringSetPreferencesKey("hidden_folders")
         val HIDDEN_MEDIA_IDS = stringSetPreferencesKey("hidden_media_ids")
         val SHOW_HIDDEN = booleanPreferencesKey("show_hidden")
+        val TRASH_RETENTION_DAYS = intPreferencesKey("trash_retention_days")
+        val VIRTUAL_FOLDERS = stringSetPreferencesKey("virtual_folders")
+        val FOLDER_COVERS_JSON = stringPreferencesKey("folder_covers_json")
     }
 
     val viewType: Flow<ViewType> = context.galleryPrefsStore.data.map { prefs ->
@@ -90,6 +96,15 @@ class GalleryPreferencesRepository(private val context: Context) {
 
     val showHidden: Flow<Boolean> =
         context.galleryPrefsStore.data.map { it[Keys.SHOW_HIDDEN] ?: false }
+
+    val trashRetentionDays: Flow<Int> =
+        context.galleryPrefsStore.data.map { (it[Keys.TRASH_RETENTION_DAYS] ?: 30).coerceIn(1, 365) }
+
+    val virtualFolders: Flow<Set<String>> =
+        context.galleryPrefsStore.data.map { it[Keys.VIRTUAL_FOLDERS] ?: emptySet() }
+
+    val folderCovers: Flow<Map<String, FolderCover>> =
+        context.galleryPrefsStore.data.map { parseFolderCovers(it[Keys.FOLDER_COVERS_JSON]) }
 
     suspend fun setViewType(type: ViewType) {
         context.galleryPrefsStore.edit { it[Keys.VIEW_TYPE] = type.name }
@@ -135,5 +150,59 @@ class GalleryPreferencesRepository(private val context: Context) {
 
     suspend fun setShowHidden(show: Boolean) {
         context.galleryPrefsStore.edit { it[Keys.SHOW_HIDDEN] = show }
+    }
+
+    suspend fun setTrashRetentionDays(days: Int) {
+        context.galleryPrefsStore.edit { it[Keys.TRASH_RETENTION_DAYS] = days.coerceIn(1, 365) }
+    }
+
+    suspend fun addVirtualFolder(path: String) {
+        context.galleryPrefsStore.edit { prefs ->
+            prefs[Keys.VIRTUAL_FOLDERS] = (prefs[Keys.VIRTUAL_FOLDERS] ?: emptySet()) + path
+        }
+    }
+
+    /** Called once a virtual folder gets its first real file, so it stops being tracked as virtual. */
+    suspend fun removeVirtualFolder(path: String) {
+        context.galleryPrefsStore.edit { prefs ->
+            prefs[Keys.VIRTUAL_FOLDERS] = (prefs[Keys.VIRTUAL_FOLDERS] ?: emptySet()) - path
+        }
+    }
+
+    suspend fun setFolderCover(path: String, cover: FolderCover?) {
+        context.galleryPrefsStore.edit { prefs ->
+            val current = parseFolderCovers(prefs[Keys.FOLDER_COVERS_JSON]).toMutableMap()
+            if (cover == null) current.remove(path) else current[path] = cover
+            prefs[Keys.FOLDER_COVERS_JSON] = serializeFolderCovers(current)
+        }
+    }
+
+    private fun parseFolderCovers(json: String?): Map<String, FolderCover> {
+        if (json.isNullOrBlank()) return emptyMap()
+        return try {
+            val array = org.json.JSONArray(json)
+            buildMap {
+                for (i in 0 until array.length()) {
+                    val obj = array.getJSONObject(i)
+                    put(obj.getString("path"), FolderCover(obj.getString("text"), obj.getLong("color")))
+                }
+            }
+        } catch (e: Exception) {
+            emptyMap()
+        }
+    }
+
+    private fun serializeFolderCovers(map: Map<String, FolderCover>): String {
+        val array = org.json.JSONArray()
+        for ((path, cover) in map) {
+            array.put(
+                org.json.JSONObject().apply {
+                    put("path", path)
+                    put("text", cover.text)
+                    put("color", cover.colorSeed)
+                },
+            )
+        }
+        return array.toString()
     }
 }

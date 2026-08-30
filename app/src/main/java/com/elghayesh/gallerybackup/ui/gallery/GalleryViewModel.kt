@@ -10,9 +10,13 @@ import com.elghayesh.gallerybackup.data.media.FolderNode
 import com.elghayesh.gallerybackup.data.media.MediaItem
 import com.elghayesh.gallerybackup.data.media.MediaRepository
 import com.elghayesh.gallerybackup.data.media.TrashManager
+import com.elghayesh.gallerybackup.data.media.TrashRepository
+import com.elghayesh.gallerybackup.data.media.allItemsRecursive
 import com.elghayesh.gallerybackup.data.media.copyMediaTo
 import com.elghayesh.gallerybackup.data.media.filtered
+import com.elghayesh.gallerybackup.data.media.withVirtualFolders
 import com.elghayesh.gallerybackup.data.settings.AccentColor
+import com.elghayesh.gallerybackup.data.settings.FolderCover
 import com.elghayesh.gallerybackup.data.settings.FolderSortOrder
 import com.elghayesh.gallerybackup.data.settings.GalleryPreferencesRepository
 import com.elghayesh.gallerybackup.data.settings.ThemeMode
@@ -28,17 +32,29 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
+private data class RootFilterInputs(
+    val raw: FolderNode?,
+    val excluded: Set<String>,
+    val hiddenFolders: Set<String>,
+    val hiddenMedia: Set<Long>,
+    val showHidden: Boolean,
+)
+
 class GalleryViewModel(app: Application) : AndroidViewModel(app) {
 
     private val repository = MediaRepository(app)
     private val prefs = GalleryPreferencesRepository(app)
     private val trashManager = TrashManager(app)
+    private val trashRepository = TrashRepository(app)
 
     private val deleteConsentChannel = Channel<PendingIntent>(Channel.CONFLATED)
     val deleteConsentRequests: Flow<PendingIntent> = deleteConsentChannel.receiveAsFlow()
+    private var pendingPermanentDeleteIds: List<Long> = emptyList()
 
     private val _selectedMediaIds = MutableStateFlow<Set<Long>>(emptySet())
     val selectedMediaIds: StateFlow<Set<Long>> = _selectedMediaIds.asStateFlow()
+    private val _selectedFolderPaths = MutableStateFlow<Set<String>>(emptySet())
+    val selectedFolderPaths: StateFlow<Set<String>> = _selectedFolderPaths.asStateFlow()
 
     /** Session-only (not persisted) delete-confirmation preferences -- reset if the app process dies. */
     private val _dontAskAgainDelete = MutableStateFlow(false)
@@ -72,17 +88,36 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         prefs.hiddenMediaIds.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
     val showHidden: StateFlow<Boolean> =
         prefs.showHidden.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val folderCovers: StateFlow<Map<String, FolderCover>> =
+        prefs.folderCovers.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+    val trashRetentionDays: StateFlow<Int> =
+        prefs.trashRetentionDays.stateIn(viewModelScope, SharingStarted.Eagerly, 30)
+    val trashedEntries: StateFlow<Map<Long, Long>> =
+        trashRepository.trashedEntries.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
 
-    /** [root] with excluded folders always removed, and hidden folders/items removed unless [showHidden] is on. */
+    /** [root] with excluded/hidden/trashed content removed, plus any still-empty user-created folders added in. */
     val visibleRoot: StateFlow<FolderNode?> = combine(
-        _rawRoot,
-        prefs.excludedFolders,
-        prefs.hiddenFolders,
-        prefs.hiddenMediaIds,
-        prefs.showHidden,
-    ) { raw, excluded, hiddenFolders, hiddenMedia, showHidden ->
-        raw?.filtered(excluded, hiddenFolders, hiddenMedia, showHidden)
+        combine(
+            _rawRoot,
+            prefs.excludedFolders,
+            prefs.hiddenFolders,
+            prefs.hiddenMediaIds,
+            prefs.showHidden,
+        ) { raw, excluded, hiddenFolders, hiddenMedia, showHidden ->
+            RootFilterInputs(raw, excluded, hiddenFolders, hiddenMedia, showHidden)
+        },
+        trashRepository.trashedIds,
+        prefs.virtualFolders,
+    ) { inputs, trashedIds, virtualFolders ->
+        inputs.raw
+            ?.filtered(inputs.excluded, inputs.hiddenFolders, inputs.hiddenMedia, inputs.showHidden, trashedIds)
+            ?.withVirtualFolders(virtualFolders)
     }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    /** Every trashed item, resolved from the raw scan (the file itself is never moved on trash). */
+    val trashedItems: StateFlow<List<MediaItem>> = combine(_rawRoot, trashedEntries) { raw, entries ->
+        raw?.allItemsRecursive()?.filter { it.id in entries.keys } ?: emptyList()
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     fun loadIfNeeded() {
         if (_rawRoot.value != null || _isLoading.value) return
@@ -109,14 +144,37 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     fun setMediaHidden(id: Long, hidden: Boolean) =
         viewModelScope.launch { prefs.setMediaHidden(id, hidden) }
     fun setShowHidden(show: Boolean) = viewModelScope.launch { prefs.setShowHidden(show) }
+    fun setTrashRetentionDays(days: Int) = viewModelScope.launch { prefs.setTrashRetentionDays(days) }
+    fun setFolderCover(path: String, cover: FolderCover?) = viewModelScope.launch { prefs.setFolderCover(path, cover) }
+
+    fun createFolder(parentPath: String, name: String) {
+        viewModelScope.launch {
+            val newPath = if (parentPath.isEmpty()) name else "$parentPath/$name"
+            prefs.addVirtualFolder(newPath)
+        }
+    }
 
     fun toggleMediaSelection(id: Long) {
         _selectedMediaIds.value =
             if (id in _selectedMediaIds.value) _selectedMediaIds.value - id else _selectedMediaIds.value + id
     }
 
+    fun setMediaSelected(id: Long, selected: Boolean) {
+        _selectedMediaIds.value = if (selected) _selectedMediaIds.value + id else _selectedMediaIds.value - id
+    }
+
+    fun toggleFolderSelection(path: String) {
+        _selectedFolderPaths.value =
+            if (path in _selectedFolderPaths.value) _selectedFolderPaths.value - path else _selectedFolderPaths.value + path
+    }
+
+    fun setFolderSelected(path: String, selected: Boolean) {
+        _selectedFolderPaths.value = if (selected) _selectedFolderPaths.value + path else _selectedFolderPaths.value - path
+    }
+
     fun clearSelection() {
         _selectedMediaIds.value = emptySet()
+        _selectedFolderPaths.value = emptySet()
     }
 
     fun setDontAskAgainDelete(value: Boolean) {
@@ -128,17 +186,24 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Deletes [items]. On Android 11+ this always needs one round trip through a system
-     * confirmation dialog (see [TrashManager]) -- the caller (an Activity) must launch
-     * the [PendingIntent] sent on [deleteConsentRequests] and report back via
-     * [onDeleteConfirmed]. Below Android 11 it deletes immediately. [skipTrash] permanently
-     * deletes instead of using the recoverable trash.
+     * Deletes [items]. By default this is pure local bookkeeping (MediaHub's own trash --
+     * no OS interaction at all). [skipTrash] permanently deletes instead, which on Android
+     * 11+ always needs one round trip through a system confirmation dialog (see
+     * [TrashManager]) -- the caller (an Activity) must launch the [PendingIntent] sent on
+     * [deleteConsentRequests] and report back via [onDeleteConfirmed].
      */
     fun deleteMediaItems(items: List<MediaItem>, skipTrash: Boolean) {
         viewModelScope.launch {
-            when (val result = trashManager.requestDelete(items.map { it.uri }, skipTrash)) {
+            if (!skipTrash) {
+                trashRepository.trash(items.map { it.id })
+                clearSelection()
+                return@launch
+            }
+            pendingPermanentDeleteIds = items.map { it.id }
+            when (val result = trashManager.requestDelete(items.map { it.uri }, skipTrash = true)) {
                 is DeleteResult.ConsentRequired -> deleteConsentChannel.send(result.pendingIntent)
                 DeleteResult.Deleted -> {
+                    trashRepository.forget(pendingPermanentDeleteIds)
                     refresh()
                     clearSelection()
                 }
@@ -149,8 +214,24 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Call after the user approves (or cancels) the system dialog launched from [deleteConsentRequests]. */
     fun onDeleteConfirmed() {
-        refresh()
-        clearSelection()
+        viewModelScope.launch {
+            trashRepository.forget(pendingPermanentDeleteIds)
+            pendingPermanentDeleteIds = emptyList()
+            refresh()
+            clearSelection()
+        }
+    }
+
+    fun restoreFromTrash(ids: List<Long>) = viewModelScope.launch { trashRepository.restore(ids) }
+
+    /** Checks for trash past [trashRetentionDays] and, if any, starts permanently deleting it. */
+    fun purgeExpiredTrash() {
+        viewModelScope.launch {
+            val expiredIds = trashRepository.expiredIds(trashRetentionDays.value)
+            if (expiredIds.isEmpty()) return@launch
+            val items = _rawRoot.value?.allItemsRecursive()?.filter { it.id in expiredIds } ?: return@launch
+            if (items.isNotEmpty()) deleteMediaItems(items, skipTrash = true)
+        }
     }
 
     /** Copies [items] into [destinationFolderPath], leaving the originals in place. */
@@ -163,20 +244,108 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Copies [items] into [destinationFolderPath], then moves the originals to the trash. */
+    /** Copies [items] into [destinationFolderPath], then trashes the originals. */
     fun moveMediaItems(items: List<MediaItem>, destinationFolderPath: String) {
         viewModelScope.launch {
             val context: Context = getApplication()
-            val copied = items.filter { copyMediaTo(context, it, destinationFolderPath) != null }
-            if (copied.isNotEmpty()) {
-                when (val result = trashManager.requestDelete(copied.map { it.uri }, skipTrash = false)) {
-                    is DeleteResult.ConsentRequired -> deleteConsentChannel.send(result.pendingIntent)
-                    DeleteResult.Deleted -> Unit
-                    is DeleteResult.Error -> Unit
-                }
+            val copiedIds = items.mapNotNull { item ->
+                if (copyMediaTo(context, item, destinationFolderPath) != null) item.id else null
+            }
+            if (copiedIds.isNotEmpty()) trashRepository.trash(copiedIds)
+            refresh()
+            clearSelection()
+        }
+    }
+
+    /** Renames [item] by copying its bytes into a new file with [newDisplayName] and trashing the original. */
+    fun renameMediaItem(item: MediaItem, newDisplayName: String) {
+        viewModelScope.launch {
+            val context: Context = getApplication()
+            val ext = item.displayName.substringAfterLast('.', "")
+            val finalName = if (ext.isNotEmpty() && !newDisplayName.endsWith(".$ext", ignoreCase = true)) {
+                "$newDisplayName.$ext"
+            } else {
+                newDisplayName
+            }
+            val renamed = item.copy(displayName = finalName)
+            if (copyMediaTo(context, renamed, item.folderPath) != null) {
+                trashRepository.trash(listOf(item.id))
             }
             refresh()
             clearSelection()
         }
     }
+
+    fun deleteFolder(folder: FolderNode, skipTrash: Boolean) {
+        deleteMediaItems(folder.allItemsRecursive(), skipTrash)
+        viewModelScope.launch { prefs.setFolderCover(folder.path, null) }
+    }
+
+    fun copyFolder(folder: FolderNode, destinationParentPath: String) {
+        viewModelScope.launch {
+            val context: Context = getApplication()
+            val newFolderPath = if (destinationParentPath.isEmpty()) folder.name else "$destinationParentPath/${folder.name}"
+            for (item in folder.allItemsRecursive()) {
+                copyMediaTo(context, item, remapFolderPath(item.folderPath, folder.path, newFolderPath))
+            }
+            refresh()
+            clearSelection()
+        }
+    }
+
+    fun moveFolder(folder: FolderNode, destinationParentPath: String) {
+        viewModelScope.launch {
+            val context: Context = getApplication()
+            val newFolderPath = if (destinationParentPath.isEmpty()) folder.name else "$destinationParentPath/${folder.name}"
+            val copiedIds = folder.allItemsRecursive().mapNotNull { item ->
+                val target = remapFolderPath(item.folderPath, folder.path, newFolderPath)
+                if (copyMediaTo(context, item, target) != null) item.id else null
+            }
+            if (copiedIds.isNotEmpty()) trashRepository.trash(copiedIds)
+            refresh()
+            clearSelection()
+        }
+    }
+
+    fun renameFolder(folder: FolderNode, newName: String) {
+        viewModelScope.launch {
+            val context: Context = getApplication()
+            val lastSlash = folder.path.lastIndexOf('/')
+            val parentPath = if (lastSlash < 0) "" else folder.path.substring(0, lastSlash)
+            val newFolderPath = if (parentPath.isEmpty()) newName else "$parentPath/$newName"
+
+            val copiedIds = folder.allItemsRecursive().mapNotNull { item ->
+                val target = remapFolderPath(item.folderPath, folder.path, newFolderPath)
+                if (copyMediaTo(context, item, target) != null) item.id else null
+            }
+            if (copiedIds.isNotEmpty()) trashRepository.trash(copiedIds)
+
+            folderCovers.value[folder.path]?.let { cover ->
+                prefs.setFolderCover(folder.path, null)
+                prefs.setFolderCover(newFolderPath, cover)
+            }
+            refresh()
+            clearSelection()
+        }
+    }
+
+    /** Combined move covering both selected media items and selected folders in one destination pick. */
+    fun moveSelectionTo(mediaItems: List<MediaItem>, folders: List<FolderNode>, destinationPath: String) {
+        if (mediaItems.isNotEmpty()) moveMediaItems(mediaItems, destinationPath)
+        folders.forEach { moveFolder(it, destinationPath) }
+    }
+
+    fun copySelectionTo(mediaItems: List<MediaItem>, folders: List<FolderNode>, destinationPath: String) {
+        if (mediaItems.isNotEmpty()) copyMediaItems(mediaItems, destinationPath)
+        folders.forEach { copyFolder(it, destinationPath) }
+    }
+
+    fun deleteSelection(mediaItems: List<MediaItem>, folders: List<FolderNode>, skipTrash: Boolean) {
+        val allItems = mediaItems + folders.flatMap { it.allItemsRecursive() }
+        deleteMediaItems(allItems, skipTrash)
+        viewModelScope.launch { folders.forEach { prefs.setFolderCover(it.path, null) } }
+    }
+
+    private fun remapFolderPath(itemFolderPath: String, oldPrefix: String, newPrefix: String): String =
+        if (itemFolderPath == oldPrefix) newPrefix else newPrefix + itemFolderPath.removePrefix(oldPrefix)
 }

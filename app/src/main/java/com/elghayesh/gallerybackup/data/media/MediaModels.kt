@@ -90,23 +90,63 @@ fun FolderNode.latestModifiedSec(): Long {
 
 /**
  * Returns a copy of this tree with [excludedFolders] removed entirely, and with folders in
- * [hiddenFolders] / items in [hiddenMediaIds] removed unless [showHidden] is true.
+ * [hiddenFolders] / items in [hiddenMediaIds] removed unless [showHidden] is true. Items in
+ * [trashedMediaIds] are always removed regardless of [showHidden] -- trash is a separate
+ * concept from hidden, with its own screen.
  */
 fun FolderNode.filtered(
     excludedFolders: Set<String>,
     hiddenFolders: Set<String>,
     hiddenMediaIds: Set<Long>,
     showHidden: Boolean,
+    trashedMediaIds: Set<Long> = emptySet(),
 ): FolderNode {
     val result = FolderNode(path, name)
     for ((childName, child) in children) {
         if (child.path in excludedFolders) continue
         if (!showHidden && child.path in hiddenFolders) continue
-        result.children[childName] = child.filtered(excludedFolders, hiddenFolders, hiddenMediaIds, showHidden)
+        result.children[childName] =
+            child.filtered(excludedFolders, hiddenFolders, hiddenMediaIds, showHidden, trashedMediaIds)
     }
     for (item in items) {
+        if (item.id in trashedMediaIds) continue
         if (!showHidden && item.id in hiddenMediaIds) continue
         result.items.add(item)
+    }
+    return result
+}
+
+/** Every [MediaItem] in this folder and all its subfolders. */
+fun FolderNode.allItemsRecursive(): List<MediaItem> =
+    items + children.values.flatMap { it.allItemsRecursive() }
+
+/**
+ * Returns a copy of this tree with an empty [FolderNode] added for each path in
+ * [virtualPaths] that doesn't already exist -- lets a just-created, still-empty folder
+ * show up in the gallery before any media has been moved/copied into it.
+ */
+fun FolderNode.withVirtualFolders(virtualPaths: Set<String>): FolderNode {
+    if (virtualPaths.isEmpty()) return this
+    val result = FolderNode(path, name)
+    result.children.putAll(children)
+    result.items.addAll(items)
+    for (virtualPath in virtualPaths) {
+        var node = result
+        var builtPath = ""
+        for (segment in virtualPath.trim('/').split(FolderNode.PATH_SEPARATOR).filter { it.isNotBlank() }) {
+            builtPath = if (builtPath.isEmpty()) segment else "$builtPath/$segment"
+            val existing = node.children[segment]
+            val next = if (existing != null) {
+                FolderNode(builtPath, segment).apply {
+                    children.putAll(existing.children)
+                    items.addAll(existing.items)
+                }
+            } else {
+                FolderNode(builtPath, segment)
+            }
+            node.children[segment] = next
+            node = next
+        }
     }
     return result
 }

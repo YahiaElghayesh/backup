@@ -3,11 +3,10 @@ package com.elghayesh.gallerybackup.ui.gallery
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -19,9 +18,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -29,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.MoreVert
@@ -36,10 +38,12 @@ import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.ViewList
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -59,22 +63,30 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.elghayesh.gallerybackup.data.media.FolderNode
 import com.elghayesh.gallerybackup.data.media.MediaItem
+import com.elghayesh.gallerybackup.data.media.allItemsRecursive
 import com.elghayesh.gallerybackup.data.media.findNode
 import com.elghayesh.gallerybackup.data.media.latestModifiedSec
+import com.elghayesh.gallerybackup.data.settings.FolderCover
 import com.elghayesh.gallerybackup.data.settings.FolderSortOrder
 import com.elghayesh.gallerybackup.data.settings.ViewType
+import com.elghayesh.gallerybackup.ui.common.CreateFolderDialog
+import com.elghayesh.gallerybackup.ui.common.FolderCoverDialog
 import com.elghayesh.gallerybackup.ui.common.FolderPickerDialog
 import com.elghayesh.gallerybackup.ui.common.MediaActionBar
 import com.elghayesh.gallerybackup.ui.common.PropertiesDialog
+import com.elghayesh.gallerybackup.ui.common.RenameDialog
 import com.elghayesh.gallerybackup.ui.common.rememberDeleteRequester
 import com.elghayesh.gallerybackup.ui.common.shareMedia
 import java.util.concurrent.TimeUnit
@@ -90,6 +102,7 @@ fun GalleryScreen(
     onOpenMedia: (path: String, index: Int) -> Unit,
     onOpenGallerySettings: () -> Unit,
     onOpenBackupSettings: () -> Unit,
+    onOpenTrash: () -> Unit,
     onEditPhoto: (path: String, index: Int) -> Unit,
     onEditVideo: (path: String, index: Int) -> Unit,
     onNavigateUp: () -> Unit,
@@ -108,22 +121,65 @@ fun GalleryScreen(
     val hiddenFolders by viewModel.hiddenFolders.collectAsState()
     val hiddenMediaIds by viewModel.hiddenMediaIds.collectAsState()
     val selectedMediaIds by viewModel.selectedMediaIds.collectAsState()
+    val selectedFolderPaths by viewModel.selectedFolderPaths.collectAsState()
+    val folderCovers by viewModel.folderCovers.collectAsState()
     val node = visibleRoot?.findNode(path)
 
     val folders = node?.let { sortedFolders(it.children.values.toList(), folderSort) } ?: emptyList()
     val media = node?.items?.sortedByDescending { it.dateModifiedSec } ?: emptyList()
     val selectedItems = media.filter { it.id in selectedMediaIds }
-    val isSelectionMode = selectedMediaIds.isNotEmpty()
+    val selectedFolderNodes = folders.filter { it.path in selectedFolderPaths }
+    val isSelectionMode = selectedMediaIds.isNotEmpty() || selectedFolderPaths.isNotEmpty()
+    val totalSelectedCount = selectedItems.size + selectedFolderNodes.size
 
     var overflowExpanded by remember { mutableStateOf(false) }
     var showSortDialog by remember { mutableStateOf(false) }
     var transferMode by remember { mutableStateOf<FolderTransferMode?>(null) }
     var showProperties by remember { mutableStateOf(false) }
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var showCreateFolderDialog by remember { mutableStateOf(false) }
+    var coverDialogFor by remember { mutableStateOf<FolderNode?>(null) }
 
     val requestDelete = rememberDeleteRequester(viewModel)
+    val gridState = rememberLazyGridState()
 
     if (showSortDialog) {
         SortDialog(current = folderSort, onSelect = { viewModel.setFolderSort(it) }, onDismiss = { showSortDialog = false })
+    }
+    if (showCreateFolderDialog) {
+        CreateFolderDialog(
+            onConfirm = { name -> viewModel.createFolder(path, name); showCreateFolderDialog = false },
+            onDismiss = { showCreateFolderDialog = false },
+        )
+    }
+    coverDialogFor?.let { folder ->
+        FolderCoverDialog(
+            folderName = folder.name,
+            current = folderCovers[folder.path],
+            onConfirm = { cover -> viewModel.setFolderCover(folder.path, cover); coverDialogFor = null },
+            onDismiss = { coverDialogFor = null },
+        )
+    }
+    if (showRenameDialog) {
+        val initialName = when {
+            selectedItems.size == 1 && selectedFolderNodes.isEmpty() ->
+                selectedItems.first().displayName.substringBeforeLast('.', selectedItems.first().displayName)
+            selectedFolderNodes.size == 1 && selectedItems.isEmpty() -> selectedFolderNodes.first().name
+            else -> ""
+        }
+        RenameDialog(
+            title = "Rename",
+            initialName = initialName,
+            onConfirm = { newName ->
+                if (selectedItems.size == 1 && selectedFolderNodes.isEmpty()) {
+                    viewModel.renameMediaItem(selectedItems.first(), newName)
+                } else if (selectedFolderNodes.size == 1 && selectedItems.isEmpty()) {
+                    viewModel.renameFolder(selectedFolderNodes.first(), newName)
+                }
+                showRenameDialog = false
+            },
+            onDismiss = { showRenameDialog = false },
+        )
     }
     transferMode?.let { mode ->
         FolderPickerDialog(
@@ -131,54 +187,23 @@ fun GalleryScreen(
             title = if (mode == FolderTransferMode.MOVE) "Move to..." else "Copy to...",
             onPick = { destination ->
                 if (mode == FolderTransferMode.MOVE) {
-                    viewModel.moveMediaItems(selectedItems, destination)
+                    viewModel.moveSelectionTo(selectedItems, selectedFolderNodes, destination)
                 } else {
-                    viewModel.copyMediaItems(selectedItems, destination)
+                    viewModel.copySelectionTo(selectedItems, selectedFolderNodes, destination)
                 }
                 transferMode = null
             },
             onDismiss = { transferMode = null },
         )
     }
-    if (showProperties && selectedItems.isNotEmpty()) {
-        PropertiesDialog(items = selectedItems, onDismiss = { showProperties = false })
+    if (showProperties && totalSelectedCount > 0) {
+        val allItemsForProperties = selectedItems + selectedFolderNodes.flatMap { it.allItemsRecursive() }
+        PropertiesDialog(items = allItemsForProperties, onDismiss = { showProperties = false })
     }
 
     Scaffold(
         topBar = {
-            if (isSelectionMode) {
-                TopAppBar(
-                    title = { Text("${selectedItems.size} selected") },
-                    navigationIcon = {
-                        IconButton(onClick = { viewModel.clearSelection() }) {
-                            Icon(Icons.Filled.Close, contentDescription = "Cancel selection")
-                        }
-                    },
-                    actions = {
-                        val allSelectedHidden = selectedItems.isNotEmpty() && selectedItems.all { it.id in hiddenMediaIds }
-                        MediaActionBar(
-                            onEdit = if (selectedItems.size == 1) {
-                                {
-                                    val only = selectedItems.first()
-                                    val index = media.indexOf(only)
-                                    if (only.isVideo) onEditVideo(path, index) else onEditPhoto(path, index)
-                                }
-                            } else {
-                                null
-                            },
-                            onShare = { shareMedia(context, selectedItems) },
-                            onDelete = { requestDelete(selectedItems) },
-                            onMoveTo = { transferMode = FolderTransferMode.MOVE },
-                            onCopyTo = { transferMode = FolderTransferMode.COPY },
-                            onProperties = { showProperties = true },
-                            hideLabel = if (allSelectedHidden) "Unhide" else "Hide",
-                            onToggleHidden = {
-                                selectedItems.forEach { viewModel.setMediaHidden(it.id, !allSelectedHidden) }
-                            },
-                        )
-                    },
-                )
-            } else {
+            if (!isSelectionMode) {
                 TopAppBar(
                     title = { Text(breadcrumbTitle(path)) },
                     navigationIcon = {
@@ -211,6 +236,10 @@ fun GalleryScreen(
                                     onClick = { viewModel.setShowHidden(!showHidden); overflowExpanded = false },
                                 )
                                 DropdownMenuItem(
+                                    text = { Text("New folder here") },
+                                    onClick = { overflowExpanded = false; showCreateFolderDialog = true },
+                                )
+                                DropdownMenuItem(
                                     text = { Text("Rescan device") },
                                     onClick = { viewModel.refresh(); overflowExpanded = false },
                                 )
@@ -226,6 +255,71 @@ fun GalleryScreen(
                         }
                     },
                 )
+            } else {
+                TopAppBar(
+                    title = { Text("$totalSelectedCount selected") },
+                    navigationIcon = {
+                        IconButton(onClick = { viewModel.clearSelection() }) {
+                            Icon(Icons.Filled.Close, contentDescription = "Cancel selection")
+                        }
+                    },
+                )
+            }
+        },
+        bottomBar = {
+            if (isSelectionMode) {
+                val allSelectedHidden = totalSelectedCount > 0 &&
+                    selectedItems.all { it.id in hiddenMediaIds } &&
+                    selectedFolderNodes.all { it.path in hiddenFolders }
+                BottomAppBar {
+                    MediaActionBar(
+                        onEdit = if (selectedItems.size == 1 && selectedFolderNodes.isEmpty()) {
+                            {
+                                val only = selectedItems.first()
+                                val index = media.indexOf(only)
+                                if (only.isVideo) onEditVideo(path, index) else onEditPhoto(path, index)
+                            }
+                        } else {
+                            null
+                        },
+                        onShare = { shareMedia(context, selectedItems) },
+                        onDelete = {
+                            selectedFolderNodes.forEach { viewModel.setFolderCover(it.path, null) }
+                            requestDelete(selectedItems + selectedFolderNodes.flatMap { it.allItemsRecursive() })
+                        },
+                        overflowActions = buildList {
+                            add(
+                                (if (allSelectedHidden) "Unhide" else "Hide") to {
+                                    selectedItems.forEach { viewModel.setMediaHidden(it.id, !allSelectedHidden) }
+                                    selectedFolderNodes.forEach { viewModel.setFolderHidden(it.path, !allSelectedHidden) }
+                                },
+                            )
+                            if (selectedFolderNodes.isNotEmpty()) {
+                                add(
+                                    "Exclude from gallery" to {
+                                        selectedFolderNodes.forEach { viewModel.setFolderExcluded(it.path, true) }
+                                    },
+                                )
+                            }
+                            if (totalSelectedCount == 1) {
+                                add("Rename" to { showRenameDialog = true })
+                            }
+                            if (selectedFolderNodes.size == 1 && selectedItems.isEmpty()) {
+                                add("Set cover" to { coverDialogFor = selectedFolderNodes.first() })
+                            }
+                            add("Move to..." to { transferMode = FolderTransferMode.MOVE })
+                            add("Copy to..." to { transferMode = FolderTransferMode.COPY })
+                            add("Properties" to { showProperties = true })
+                        },
+                    )
+                }
+            }
+        },
+        floatingActionButton = {
+            if (!isSelectionMode) {
+                FloatingActionButton(onClick = onOpenTrash) {
+                    Icon(Icons.Filled.Delete, contentDescription = "Trash")
+                }
             }
         },
     ) { padding ->
@@ -250,38 +344,60 @@ fun GalleryScreen(
                 }
                 else -> {
                     if (viewType == ViewType.GRID) {
-                        LazyVerticalGrid(
-                            columns = GridCells.Fixed(gridColumns),
-                            contentPadding = PaddingValues(4.dp),
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
-                            modifier = Modifier.fillMaxSize(),
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .pointerInput(folders, media) {
+                                    detectDragGesturesAfterLongPress(
+                                        onDragStart = { offset ->
+                                            itemIndexAt(gridState, offset)
+                                                ?.let { selectAt(it, folders, media, viewModel) }
+                                        },
+                                        onDrag = { change, _ ->
+                                            change.consume()
+                                            itemIndexAt(gridState, change.position)
+                                                ?.let { selectAt(it, folders, media, viewModel) }
+                                        },
+                                    )
+                                },
                         ) {
-                            gridItems(folders, key = { "folder:${it.path}" }) { folder ->
-                                FolderGridTile(
-                                    folder = folder,
-                                    isHidden = folder.path in hiddenFolders,
-                                    onClick = { onOpenFolder(folder.path) },
-                                    onToggleHidden = {
-                                        viewModel.setFolderHidden(folder.path, folder.path !in hiddenFolders)
-                                    },
-                                    onExclude = { viewModel.setFolderExcluded(folder.path, true) },
-                                )
-                            }
-                            gridItemsIndexed(media, key = { _, item -> "media:${item.id}" }) { index, item ->
-                                MediaGridTile(
-                                    item = item,
-                                    isHidden = item.id in hiddenMediaIds,
-                                    isSelected = item.id in selectedMediaIds,
-                                    onClick = {
-                                        if (isSelectionMode) {
-                                            viewModel.toggleMediaSelection(item.id)
-                                        } else {
-                                            onOpenMedia(path, index)
-                                        }
-                                    },
-                                    onLongClick = { viewModel.toggleMediaSelection(item.id) },
-                                )
+                            LazyVerticalGrid(
+                                state = gridState,
+                                columns = GridCells.Fixed(gridColumns),
+                                contentPadding = PaddingValues(4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                                modifier = Modifier.fillMaxSize(),
+                            ) {
+                                gridItems(folders, key = { "folder:${it.path}" }) { folder ->
+                                    FolderGridTile(
+                                        folder = folder,
+                                        isHidden = folder.path in hiddenFolders,
+                                        isSelected = folder.path in selectedFolderPaths,
+                                        cover = folderCovers[folder.path],
+                                        onClick = {
+                                            if (isSelectionMode) {
+                                                viewModel.toggleFolderSelection(folder.path)
+                                            } else {
+                                                onOpenFolder(folder.path)
+                                            }
+                                        },
+                                    )
+                                }
+                                gridItemsIndexed(media, key = { _, item -> "media:${item.id}" }) { index, item ->
+                                    MediaGridTile(
+                                        item = item,
+                                        isHidden = item.id in hiddenMediaIds,
+                                        isSelected = item.id in selectedMediaIds,
+                                        onClick = {
+                                            if (isSelectionMode) {
+                                                viewModel.toggleMediaSelection(item.id)
+                                            } else {
+                                                onOpenMedia(path, index)
+                                            }
+                                        },
+                                    )
+                                }
                             }
                         }
                     } else {
@@ -290,11 +406,15 @@ fun GalleryScreen(
                                 FolderListRow(
                                     folder = folder,
                                     isHidden = folder.path in hiddenFolders,
-                                    onClick = { onOpenFolder(folder.path) },
-                                    onToggleHidden = {
-                                        viewModel.setFolderHidden(folder.path, folder.path !in hiddenFolders)
+                                    isSelected = folder.path in selectedFolderPaths,
+                                    cover = folderCovers[folder.path],
+                                    onClick = {
+                                        if (isSelectionMode) {
+                                            viewModel.toggleFolderSelection(folder.path)
+                                        } else {
+                                            onOpenFolder(folder.path)
+                                        }
                                     },
-                                    onExclude = { viewModel.setFolderExcluded(folder.path, true) },
                                 )
                             }
                             itemsIndexed(media, key = { _, item -> "media:${item.id}" }) { index, item ->
@@ -309,7 +429,6 @@ fun GalleryScreen(
                                             onOpenMedia(path, index)
                                         }
                                     },
-                                    onLongClick = { viewModel.toggleMediaSelection(item.id) },
                                 )
                             }
                         }
@@ -317,6 +436,27 @@ fun GalleryScreen(
                 }
             }
         }
+    }
+}
+
+/** Maps a drag/long-press position to which grid item (by its flattened Compose index) sits under it. */
+private fun itemIndexAt(gridState: LazyGridState, position: Offset): Int? {
+    for (info in gridState.layoutInfo.visibleItemsInfo) {
+        val x = info.offset.x
+        val y = info.offset.y
+        if (position.x >= x && position.x <= x + info.size.width && position.y >= y && position.y <= y + info.size.height) {
+            return info.index
+        }
+    }
+    return null
+}
+
+/** Folders are declared first in the grid, then media -- this mirrors that ordering to resolve a flat index. */
+private fun selectAt(flatIndex: Int, folders: List<FolderNode>, media: List<MediaItem>, viewModel: GalleryViewModel) {
+    if (flatIndex < folders.size) {
+        viewModel.setFolderSelected(folders[flatIndex].path, true)
+    } else {
+        media.getOrNull(flatIndex - folders.size)?.let { viewModel.setMediaSelected(it.id, true) }
     }
 }
 
@@ -361,14 +501,36 @@ private fun SortDialog(current: FolderSortOrder, onSelect: (FolderSortOrder) -> 
 }
 
 @Composable
-private fun ColumnScope.FolderMenuItems(
-    isHidden: Boolean,
-    onToggleHidden: () -> Unit,
-    onExclude: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    DropdownMenuItem(text = { Text(if (isHidden) "Unhide" else "Hide") }, onClick = { onToggleHidden(); onDismiss() })
-    DropdownMenuItem(text = { Text("Exclude from gallery") }, onClick = { onExclude(); onDismiss() })
+private fun FolderCoverContent(folder: FolderNode, cover: FolderCover?) {
+    if (cover != null) {
+        Box(Modifier.fillMaxSize().background(Color(cover.colorSeed)), contentAlignment = Alignment.Center) {
+            Text(
+                text = cover.text,
+                color = Color.White,
+                style = MaterialTheme.typography.titleMedium,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(8.dp),
+            )
+        }
+        return
+    }
+    val coverUri = folder.coverUri()
+    if (coverUri != null) {
+        AsyncImage(
+            model = coverUri,
+            contentDescription = folder.name,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize(),
+        )
+        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.25f)))
+    } else {
+        Icon(
+            Icons.Filled.Folder,
+            contentDescription = null,
+            modifier = Modifier.fillMaxSize().padding(24.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -376,36 +538,19 @@ private fun ColumnScope.FolderMenuItems(
 private fun FolderGridTile(
     folder: FolderNode,
     isHidden: Boolean,
+    isSelected: Boolean,
+    cover: FolderCover?,
     onClick: () -> Unit,
-    onToggleHidden: () -> Unit,
-    onExclude: () -> Unit,
 ) {
-    var menuExpanded by remember { mutableStateOf(false) }
     Box(
         Modifier
             .aspectRatio(1f)
             .clip(RoundedCornerShape(12.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .combinedClickable(onClick = onClick, onLongClick = { menuExpanded = true })
+            .clickable(onClick = onClick)
             .alpha(if (isHidden) 0.5f else 1f),
     ) {
-        val cover = folder.coverUri()
-        if (cover != null) {
-            AsyncImage(
-                model = cover,
-                contentDescription = folder.name,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
-            )
-            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.25f)))
-        } else {
-            Icon(
-                Icons.Filled.Folder,
-                contentDescription = null,
-                modifier = Modifier.align(Alignment.Center),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
+        FolderCoverContent(folder, cover)
         Text(
             text = "${folder.name}  (${folder.totalItemCount()})",
             color = Color.White,
@@ -413,6 +558,7 @@ private fun FolderGridTile(
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .fillMaxWidth()
+                .background(Color.Black.copy(alpha = 0.3f))
                 .padding(6.dp),
         )
         if (isHidden) {
@@ -423,8 +569,14 @@ private fun FolderGridTile(
                 modifier = Modifier.align(Alignment.TopEnd).padding(6.dp),
             )
         }
-        DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-            FolderMenuItems(isHidden, onToggleHidden, onExclude, onDismiss = { menuExpanded = false })
+        if (isSelected) {
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f)))
+            Icon(
+                Icons.Filled.CheckCircle,
+                contentDescription = "Selected",
+                tint = Color.White,
+                modifier = Modifier.align(Alignment.TopStart).padding(6.dp),
+            )
         }
     }
 }
@@ -436,14 +588,13 @@ private fun MediaGridTile(
     isHidden: Boolean,
     isSelected: Boolean,
     onClick: () -> Unit,
-    onLongClick: () -> Unit,
 ) {
     Box(
         Modifier
             .aspectRatio(1f)
             .clip(RoundedCornerShape(8.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            .clickable(onClick = onClick)
             .alpha(if (isHidden) 0.5f else 1f),
     ) {
         AsyncImage(
@@ -486,20 +637,17 @@ private fun MediaGridTile(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun GalleryListItem(
     thumbnailModel: Any?,
     icon: ImageVector?,
+    cover: FolderCover?,
     title: String,
     subtitle: String,
     isHidden: Boolean,
     isSelected: Boolean,
     onClick: () -> Unit,
-    onLongClick: () -> Unit,
-    menuContent: (@Composable ColumnScope.(closeMenu: () -> Unit) -> Unit)? = null,
 ) {
-    var menuExpanded by remember { mutableStateOf(false) }
     Box(
         Modifier.background(
             if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f) else Color.Transparent,
@@ -508,10 +656,7 @@ private fun GalleryListItem(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .combinedClickable(
-                    onClick = onClick,
-                    onLongClick = { if (menuContent != null) menuExpanded = true else onLongClick() },
-                )
+                .clickable(onClick = onClick)
                 .alpha(if (isHidden) 0.5f else 1f)
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -520,17 +665,23 @@ private fun GalleryListItem(
                 Modifier
                     .size(48.dp)
                     .clip(RoundedCornerShape(8.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                    .background(cover?.let { Color(it.colorSeed) } ?: MaterialTheme.colorScheme.surfaceVariant),
             ) {
-                if (thumbnailModel != null) {
-                    AsyncImage(
+                when {
+                    cover != null -> Text(
+                        cover.text,
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.align(Alignment.Center).padding(2.dp),
+                        textAlign = TextAlign.Center,
+                    )
+                    thumbnailModel != null -> AsyncImage(
                         model = thumbnailModel,
                         contentDescription = title,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize(),
                     )
-                } else if (icon != null) {
-                    Icon(icon, contentDescription = null, modifier = Modifier.align(Alignment.Center))
+                    icon != null -> Icon(icon, contentDescription = null, modifier = Modifier.align(Alignment.Center))
                 }
             }
             Spacer(Modifier.width(12.dp))
@@ -544,11 +695,6 @@ private fun GalleryListItem(
                 Icon(Icons.Filled.VisibilityOff, contentDescription = "Hidden", modifier = Modifier.padding(start = 8.dp))
             }
         }
-        if (menuContent != null) {
-            DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-                menuContent(closeMenu = { menuExpanded = false })
-            }
-        }
     }
 }
 
@@ -556,20 +702,19 @@ private fun GalleryListItem(
 private fun FolderListRow(
     folder: FolderNode,
     isHidden: Boolean,
+    isSelected: Boolean,
+    cover: FolderCover?,
     onClick: () -> Unit,
-    onToggleHidden: () -> Unit,
-    onExclude: () -> Unit,
 ) {
     GalleryListItem(
         thumbnailModel = folder.coverUri(),
         icon = Icons.Filled.Folder,
+        cover = cover,
         title = folder.name,
         subtitle = "${folder.totalItemCount()} items",
         isHidden = isHidden,
-        isSelected = false,
+        isSelected = isSelected,
         onClick = onClick,
-        onLongClick = {},
-        menuContent = { closeMenu -> FolderMenuItems(isHidden, onToggleHidden, onExclude, onDismiss = closeMenu) },
     )
 }
 
@@ -579,18 +724,16 @@ private fun MediaListRow(
     isHidden: Boolean,
     isSelected: Boolean,
     onClick: () -> Unit,
-    onLongClick: () -> Unit,
 ) {
     GalleryListItem(
         thumbnailModel = item.uri,
         icon = null,
+        cover = null,
         title = item.displayName,
         subtitle = if (item.isVideo) "Video - ${formatDuration(item.durationMs)}" else "Photo",
         isHidden = isHidden,
         isSelected = isSelected,
         onClick = onClick,
-        onLongClick = onLongClick,
-        menuContent = null,
     )
 }
 

@@ -48,6 +48,7 @@ import com.elghayesh.gallerybackup.data.media.findNode
 import com.elghayesh.gallerybackup.ui.common.FolderPickerDialog
 import com.elghayesh.gallerybackup.ui.common.MediaActionBar
 import com.elghayesh.gallerybackup.ui.common.PropertiesDialog
+import com.elghayesh.gallerybackup.ui.common.RenameDialog
 import com.elghayesh.gallerybackup.ui.common.rememberDeleteRequester
 import com.elghayesh.gallerybackup.ui.common.shareMedia
 import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
@@ -89,10 +90,22 @@ fun MediaViewerScreen(
 
     var transferMode by remember { mutableStateOf<ViewerTransferMode?>(null) }
     var showProperties by remember { mutableStateOf(false) }
+    var showRenameDialog by remember { mutableStateOf(false) }
     val requestDelete = rememberDeleteRequester(viewModel)
 
     val currentItem = media.getOrNull(pagerState.currentPage)
 
+    if (showRenameDialog && currentItem != null) {
+        RenameDialog(
+            title = "Rename",
+            initialName = currentItem.displayName.substringBeforeLast('.', currentItem.displayName),
+            onConfirm = { newName ->
+                viewModel.renameMediaItem(currentItem, newName)
+                showRenameDialog = false
+            },
+            onDismiss = { showRenameDialog = false },
+        )
+    }
     transferMode?.let { mode ->
         FolderPickerDialog(
             root = rawRoot,
@@ -141,11 +154,13 @@ fun MediaViewerScreen(
                         },
                         onShare = { shareMedia(context, listOf(item)) },
                         onDelete = { requestDelete(listOf(item)) },
-                        onMoveTo = { transferMode = ViewerTransferMode.MOVE },
-                        onCopyTo = { transferMode = ViewerTransferMode.COPY },
-                        onProperties = { showProperties = true },
-                        hideLabel = if (isHidden) "Unhide" else "Hide",
-                        onToggleHidden = { viewModel.setMediaHidden(item.id, !isHidden) },
+                        overflowActions = listOf(
+                            (if (isHidden) "Unhide" else "Hide") to { viewModel.setMediaHidden(item.id, !isHidden) },
+                            "Rename" to { showRenameDialog = true },
+                            "Move to..." to { transferMode = ViewerTransferMode.MOVE },
+                            "Copy to..." to { transferMode = ViewerTransferMode.COPY },
+                            "Properties" to { showProperties = true },
+                        ),
                     )
                 }
             }

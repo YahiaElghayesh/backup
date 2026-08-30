@@ -45,6 +45,7 @@ import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
 import com.elghayesh.gallerybackup.ui.settings.BackupSettingsScreen
 import com.elghayesh.gallerybackup.ui.settings.BackupViewModel
 import com.elghayesh.gallerybackup.ui.theme.AppTheme
+import com.elghayesh.gallerybackup.ui.trash.TrashScreen
 import com.elghayesh.gallerybackup.ui.viewer.MediaViewerScreen
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -129,6 +130,7 @@ private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: Back
                 },
                 onOpenGallerySettings = { navController.navigate("gallerySettings") },
                 onOpenBackupSettings = { navController.navigate("backupSettings") },
+                onOpenTrash = { navController.navigate("trash") },
                 onEditPhoto = { folderPath, index ->
                     navController.navigate("editPhoto/${URLEncoder.encode(folderPath, "UTF-8")}/$index")
                 },
@@ -169,6 +171,12 @@ private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: Back
         }
         composable("gallerySettings") {
             GallerySettingsScreen(
+                viewModel = galleryViewModel,
+                onBack = { navController.popBackStack() },
+            )
+        }
+        composable("trash") {
+            TrashScreen(
                 viewModel = galleryViewModel,
                 onBack = { navController.popBackStack() },
             )
