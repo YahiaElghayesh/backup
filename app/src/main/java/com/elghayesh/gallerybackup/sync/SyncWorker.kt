@@ -7,7 +7,9 @@ import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
+import com.elghayesh.gallerybackup.data.onedrive.OneDriveSettingsRepository
 import com.elghayesh.gallerybackup.data.settings.SettingsRepository
+import kotlinx.coroutines.flow.first
 
 /**
  * Runs one backup pass: scans the device, uploads whatever changed under the user's
@@ -27,25 +29,32 @@ class SyncWorker(
 
         val repository = BackupRepository(applicationContext)
         val settings = SettingsRepository(applicationContext)
+        val oneDriveSettings = OneDriveSettingsRepository(applicationContext)
+        val oneDriveActive = oneDriveSettings.enabled.first() && oneDriveSettings.connected.first()
+
+        suspend fun recordResult(message: String) {
+            settings.recordSyncResult(message)
+            if (oneDriveActive) oneDriveSettings.recordSyncResult(message)
+        }
 
         return try {
             val outcome = repository.sync { name -> maybeUpdateNotification(name) }
             when (outcome) {
                 is SyncOutcome.Completed -> {
-                    settings.recordSyncResult("Uploaded ${outcome.uploaded}, failed ${outcome.failed}")
+                    recordResult("Uploaded ${outcome.uploaded}, failed ${outcome.failed}")
                     Result.success()
                 }
                 SyncOutcome.NotConnected -> {
-                    settings.recordSyncResult("Not connected to Google Drive")
+                    recordResult("Not connected to Google Drive or OneDrive")
                     Result.failure()
                 }
                 SyncOutcome.NothingSelected -> {
-                    settings.recordSyncResult("No folders selected for backup")
+                    recordResult("No folders selected for backup")
                     Result.success()
                 }
             }
         } catch (e: Exception) {
-            settings.recordSyncResult("Error: ${e.message}")
+            recordResult("Error: ${e.message}")
             Result.retry()
         }
     }

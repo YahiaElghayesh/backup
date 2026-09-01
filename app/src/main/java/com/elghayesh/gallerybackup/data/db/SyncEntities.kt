@@ -77,15 +77,43 @@ interface TrashedMediaDao {
     suspend fun getExpiredIds(cutoffEpochSec: Long): List<Long>
 }
 
+/**
+ * Tracks the last-uploaded state of one file synced to OneDrive, mirroring [SyncedFileEntity].
+ * Kept as a separate table (rather than reusing the Drive one with a prefix) since OneDrive
+ * addresses files by path rather than a cached parent-folder id, so there is no OneDrive
+ * equivalent of [SyncedFolderEntity] -- folders are created idempotently by path on demand.
+ */
+@Entity(tableName = "onedrive_synced_files")
+data class OneDriveSyncedFileEntity(
+    @PrimaryKey val localPath: String,
+    val lastModifiedSec: Long,
+    val size: Long,
+)
+
+@Dao
+interface OneDriveSyncedFileDao {
+    @Query("SELECT * FROM onedrive_synced_files WHERE localPath = :path")
+    suspend fun get(path: String): OneDriveSyncedFileEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(entity: OneDriveSyncedFileEntity)
+}
+
 @Database(
-    entities = [SyncedFolderEntity::class, SyncedFileEntity::class, TrashedMediaEntity::class],
-    version = 2,
+    entities = [
+        SyncedFolderEntity::class,
+        SyncedFileEntity::class,
+        TrashedMediaEntity::class,
+        OneDriveSyncedFileEntity::class,
+    ],
+    version = 3,
     exportSchema = false,
 )
 abstract class BackupDatabase : RoomDatabase() {
     abstract fun syncedFolderDao(): SyncedFolderDao
     abstract fun syncedFileDao(): SyncedFileDao
     abstract fun trashedMediaDao(): TrashedMediaDao
+    abstract fun oneDriveSyncedFileDao(): OneDriveSyncedFileDao
 
     companion object {
         @Volatile private var instance: BackupDatabase? = null

@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -19,6 +20,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -29,7 +31,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
@@ -54,6 +58,13 @@ fun BackupSettingsScreen(
     val lastSyncTime by backupViewModel.lastSyncTime.collectAsState(initial = null)
     val lastSyncStatus by backupViewModel.lastSyncStatus.collectAsState(initial = null)
     val statusMessage by backupViewModel.statusMessage.collectAsState()
+
+    val oneDriveClientId by backupViewModel.oneDriveClientId.collectAsState(initial = "")
+    val oneDriveEnabled by backupViewModel.oneDriveEnabled.collectAsState(initial = false)
+    val oneDriveConnected by backupViewModel.oneDriveConnected.collectAsState(initial = false)
+    val oneDriveLastSyncTime by backupViewModel.oneDriveLastSyncTime.collectAsState(initial = null)
+    val oneDriveLastSyncStatus by backupViewModel.oneDriveLastSyncStatus.collectAsState(initial = null)
+    var clientIdInput by remember(oneDriveClientId) { mutableStateOf(oneDriveClientId) }
 
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(statusMessage) {
@@ -94,6 +105,63 @@ fun BackupSettingsScreen(
                         Button(onClick = { backupViewModel.connectToDrive() }) {
                             Text("Connect Google Drive")
                         }
+                    }
+                }
+                HorizontalDivider()
+            }
+
+            item {
+                Column(Modifier.padding(16.dp)) {
+                    Text("OneDrive connection", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        if (oneDriveConnected) "Connected" else "Not connected",
+                        color = if (oneDriveConnected) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.error,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    if (oneDriveConnected) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Switch(checked = oneDriveEnabled, onCheckedChange = { backupViewModel.setOneDriveEnabled(it) })
+                            Spacer(Modifier.width(8.dp))
+                            Text("Back up to OneDrive too")
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        OutlinedButton(onClick = { backupViewModel.disconnectOneDrive() }) {
+                            Text("Disconnect")
+                        }
+                    } else {
+                        Text(
+                            "Needs an Azure app registration's client id (\"Mobile and desktop " +
+                                "applications\" platform, redirect URI mediahub://oauth/onedrive, " +
+                                "Files.ReadWrite + offline_access delegated permissions).",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = clientIdInput,
+                            onValueChange = { clientIdInput = it },
+                            label = { Text("Azure app client id") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Button(
+                            onClick = { backupViewModel.connectToOneDrive(clientIdInput) },
+                            enabled = clientIdInput.isNotBlank(),
+                        ) {
+                            Text("Connect OneDrive")
+                        }
+                    }
+                    if (oneDriveConnected) {
+                        val syncTime = oneDriveLastSyncTime
+                        val syncText = if (syncTime == null) {
+                            "Never synced yet."
+                        } else {
+                            "Last sync: ${DateFormat.getDateTimeInstance().format(Date(syncTime))} -- ${oneDriveLastSyncStatus ?: ""}"
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text(syncText, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
                 HorizontalDivider()
@@ -160,7 +228,7 @@ fun BackupSettingsScreen(
                 Column(Modifier.padding(16.dp)) {
                     Button(
                         onClick = { backupViewModel.backupNow() },
-                        enabled = isConnected && selectedFolders.isNotEmpty(),
+                        enabled = (isConnected || (oneDriveConnected && oneDriveEnabled)) && selectedFolders.isNotEmpty(),
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Text("Back up now")

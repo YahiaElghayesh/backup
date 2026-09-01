@@ -2,7 +2,9 @@ package com.elghayesh.gallerybackup
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -47,6 +49,7 @@ import com.elghayesh.gallerybackup.ui.settings.BackupViewModel
 import com.elghayesh.gallerybackup.ui.theme.AppTheme
 import com.elghayesh.gallerybackup.ui.trash.TrashScreen
 import com.elghayesh.gallerybackup.ui.viewer.MediaViewerScreen
+import kotlinx.coroutines.flow.MutableStateFlow
 import java.net.URLDecoder
 import java.net.URLEncoder
 
@@ -54,6 +57,9 @@ class MainActivity : ComponentActivity() {
 
     private val galleryViewModel: GalleryViewModel by viewModels()
     private val backupViewModel: BackupViewModel by viewModels()
+
+    /** Set from [onNewIntent]/[onCreate] when the OneDrive sign-in browser tab sends the user back. */
+    private val pendingOneDriveRedirect = MutableStateFlow<Uri?>(null)
 
     private val driveConsentLauncher = registerForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult(),
@@ -68,8 +74,22 @@ class MainActivity : ComponentActivity() {
         galleryViewModel.onDeleteConfirmed()
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        capturePendingOneDriveRedirect(intent)
+    }
+
+    private fun capturePendingOneDriveRedirect(intent: Intent?) {
+        val uri = intent?.data
+        if (uri != null && uri.scheme == "mediahub" && uri.host == "oauth") {
+            pendingOneDriveRedirect.value = uri
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        capturePendingOneDriveRedirect(intent)
         setContent {
             val themeMode by galleryViewModel.themeMode.collectAsState()
             val accentColor by galleryViewModel.accentColor.collectAsState()
@@ -84,6 +104,17 @@ class MainActivity : ComponentActivity() {
                     LaunchedEffect(Unit) {
                         galleryViewModel.deleteConsentRequests.collect { pendingIntent ->
                             deleteConsentLauncher.launch(IntentSenderRequest.Builder(pendingIntent).build())
+                        }
+                    }
+                    LaunchedEffect(Unit) {
+                        backupViewModel.oneDriveAuthRequests.collect { intent -> startActivity(intent) }
+                    }
+                    LaunchedEffect(Unit) {
+                        pendingOneDriveRedirect.collect { uri ->
+                            if (uri != null) {
+                                backupViewModel.onOneDriveRedirect(uri)
+                                pendingOneDriveRedirect.value = null
+                            }
                         }
                     }
 

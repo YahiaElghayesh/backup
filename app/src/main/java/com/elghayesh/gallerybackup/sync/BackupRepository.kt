@@ -2,6 +2,7 @@ package com.elghayesh.gallerybackup.sync
 
 import android.content.Context
 import com.elghayesh.gallerybackup.data.db.BackupDatabase
+import com.elghayesh.gallerybackup.data.db.OneDriveSyncedFileEntity
 import com.elghayesh.gallerybackup.data.db.SyncedFileEntity
 import com.elghayesh.gallerybackup.data.db.SyncedFolderEntity
 import com.elghayesh.gallerybackup.data.drive.DriveApiClient
@@ -10,21 +11,30 @@ import com.elghayesh.gallerybackup.data.drive.DriveAuthResult
 import com.elghayesh.gallerybackup.data.media.FolderNode
 import com.elghayesh.gallerybackup.data.media.MediaItem
 import com.elghayesh.gallerybackup.data.media.MediaRepository
+import com.elghayesh.gallerybackup.data.onedrive.OneDriveApiClient
+import com.elghayesh.gallerybackup.data.onedrive.OneDriveAuthManager
+import com.elghayesh.gallerybackup.data.onedrive.OneDriveSettingsRepository
 import com.elghayesh.gallerybackup.data.settings.SettingsRepository
 import kotlinx.coroutines.flow.first
 
 /**
- * Mirrors the user's selected on-device folders into a single "GalleryBackup" folder tree
- * in their Drive, preserving the same nested structure -- the opposite of Google Photos'
- * flat-library backup. Already-uploaded, unchanged files are skipped via [BackupDatabase].
+ * Mirrors the user's selected on-device folders into a "GalleryBackup" folder tree on
+ * whichever cloud target(s) are connected and enabled -- Google Drive, OneDrive, or both --
+ * preserving the same nested structure, the opposite of Google Photos' flat-library backup.
+ * Both targets share the same folder selection; each tracks its own already-uploaded state
+ * independently ([BackupDatabase]'s Drive tables vs its OneDrive table) so enabling a second
+ * target later re-uploads everything to it without disturbing the first.
  */
 class BackupRepository(private val context: Context) {
 
     private val mediaRepository = MediaRepository(context)
-    private val authManager = DriveAuthManager(context)
+    private val driveAuthManager = DriveAuthManager(context)
     private val driveApi = DriveApiClient()
+    private val oneDriveAuthManager = OneDriveAuthManager(context)
+    private val oneDriveApi = OneDriveApiClient()
     private val db = BackupDatabase.get(context)
     private val settings = SettingsRepository(context)
+    private val oneDriveSettings = OneDriveSettingsRepository(context)
 
     /**
      * Every folder is an independent on/off flag -- selecting "DCIM" does *not* pull in
@@ -33,19 +43,30 @@ class BackupRepository(private val context: Context) {
      * exclude/hide folders, which use the same "flat set of paths at any depth" model.
      */
     suspend fun sync(onProgress: suspend (String) -> Unit = {}): SyncOutcome {
-        val authResult = authManager.authorize()
-        val accessToken = (authResult as? DriveAuthResult.Granted)?.accessToken
-            ?: return SyncOutcome.NotConnected
+        val driveToken = (driveAuthManager.authorize() as? DriveAuthResult.Granted)?.accessToken
+        val oneDriveToken = if (oneDriveSettings.enabled.first()) oneDriveAuthManager.getValidAccessToken() else null
+        if (driveToken == null && oneDriveToken == null) return SyncOutcome.NotConnected
 
         val selectedFolders = settings.selectedFolders.first()
         if (selectedFolders.isEmpty()) return SyncOutcome.NothingSelected
 
         val tree = mediaRepository.scanFolderTree()
-        val (uploaded, failed) = syncTree(accessToken, tree, selectedFolders, onProgress)
+        var uploaded = 0
+        var failed = 0
+        if (driveToken != null) {
+            val (u, f) = syncTreeToDrive(driveToken, tree, selectedFolders, onProgress)
+            uploaded += u
+            failed += f
+        }
+        if (oneDriveToken != null) {
+            val (u, f) = syncTreeToOneDrive(oneDriveToken, tree, selectedFolders, onProgress)
+            uploaded += u
+            failed += f
+        }
         return SyncOutcome.Completed(uploaded = uploaded, failed = failed)
     }
 
-    private suspend fun syncTree(
+    private suspend fun syncTreeToDrive(
         accessToken: String,
         node: FolderNode,
         selectedFolders: Set<String>,
@@ -68,11 +89,72 @@ class BackupRepository(private val context: Context) {
             }
         }
         for (child in node.children.values) {
-            val (u, f) = syncTree(accessToken, child, selectedFolders, onProgress)
+            val (u, f) = syncTreeToDrive(accessToken, child, selectedFolders, onProgress)
             uploaded += u
             failed += f
         }
         return uploaded to failed
+    }
+
+    private suspend fun syncTreeToOneDrive(
+        accessToken: String,
+        node: FolderNode,
+        selectedFolders: Set<String>,
+        onProgress: suspend (String) -> Unit,
+    ): Pair<Int, Int> {
+        var uploaded = 0
+        var failed = 0
+
+        if (node.path.isNotEmpty() && node.path in selectedFolders) {
+            val remoteFolderPath = "$ROOT_FOLDER_NAME/${node.path}"
+            try {
+                oneDriveApi.ensureFolderPath(accessToken, remoteFolderPath)
+                for (item in node.items) {
+                    try {
+                        if (uploadToOneDriveIfNeeded(accessToken, remoteFolderPath, item)) {
+                            uploaded++
+                            onProgress(item.displayName)
+                        }
+                    } catch (e: Exception) {
+                        failed++
+                    }
+                }
+            } catch (e: Exception) {
+                failed += node.items.size
+            }
+        }
+        for (child in node.children.values) {
+            val (u, f) = syncTreeToOneDrive(accessToken, child, selectedFolders, onProgress)
+            uploaded += u
+            failed += f
+        }
+        return uploaded to failed
+    }
+
+    /** Returns true if a file was actually uploaded (false if it was already up to date). */
+    private suspend fun uploadToOneDriveIfNeeded(accessToken: String, remoteFolderPath: String, item: MediaItem): Boolean {
+        val key = itemKey(item)
+        val existing = db.oneDriveSyncedFileDao().get(key)
+        if (existing != null && existing.lastModifiedSec == item.dateModifiedSec && existing.size == item.size) {
+            return false
+        }
+
+        oneDriveApi.uploadFile(
+            accessToken = accessToken,
+            folderPath = remoteFolderPath,
+            contentResolver = context.contentResolver,
+            sourceUri = item.uri,
+            totalSize = item.size,
+            name = item.displayName,
+        )
+        db.oneDriveSyncedFileDao().upsert(
+            OneDriveSyncedFileEntity(
+                localPath = key,
+                lastModifiedSec = item.dateModifiedSec,
+                size = item.size,
+            ),
+        )
+        return true
     }
 
     /** Finds (or creates) the Drive folder id mirroring [localPath], caching the mapping locally. */
