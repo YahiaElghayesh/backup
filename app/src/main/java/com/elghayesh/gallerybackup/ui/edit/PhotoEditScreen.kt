@@ -28,6 +28,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.RotateRight
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -62,6 +63,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.elghayesh.gallerybackup.data.media.MediaItem
+import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -89,6 +91,7 @@ private enum class EditTool { CROP, ADJUST, FILTERS }
 @Composable
 fun PhotoEditScreen(
     item: MediaItem,
+    viewModel: GalleryViewModel,
     onDone: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -97,6 +100,7 @@ fun PhotoEditScreen(
     var workingBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var isLoading by remember { mutableStateOf(true) }
     var isSaving by remember { mutableStateOf(false) }
+    var showSaveChoiceDialog by remember { mutableStateOf(false) }
 
     var tool by remember { mutableStateOf(EditTool.CROP) }
     var cropAspect by remember { mutableStateOf(CropAspect.FREE) }
@@ -111,6 +115,38 @@ fun PhotoEditScreen(
         isLoading = true
         workingBitmap = loadDownsampledBitmap(context, item.uri, maxDimension = 2048)
         isLoading = false
+    }
+
+    fun performSave(replace: Boolean) {
+        val bitmap = workingBitmap ?: return
+        val cropRect = cropRectFor(bitmap.width, bitmap.height, cropAspect, cropCenter)
+        val matrix = buildColorMatrix(brightness, contrast, saturation, filter)
+        isSaving = true
+        scope.launch {
+            saveEditedPhoto(context, bitmap, cropRect, matrix, item, replace)
+            if (replace) viewModel.deleteMediaItems(listOf(item), skipTrash = false)
+            viewModel.refresh()
+            isSaving = false
+            onDone()
+        }
+    }
+
+    if (showSaveChoiceDialog) {
+        AlertDialog(
+            onDismissRequest = { showSaveChoiceDialog = false },
+            title = { Text("Save changes") },
+            text = { Text("Replace the original photo, or save your edit as a new file alongside it?") },
+            confirmButton = {
+                TextButton(onClick = { showSaveChoiceDialog = false; performSave(replace = true) }) {
+                    Text("Replace original")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSaveChoiceDialog = false; performSave(replace = false) }) {
+                    Text("Save as new")
+                }
+            },
+        )
     }
 
     Scaffold(
@@ -131,17 +167,7 @@ fun PhotoEditScreen(
                     }
                     TextButton(
                         enabled = workingBitmap != null && !isSaving,
-                        onClick = {
-                            val bitmap = workingBitmap ?: return@TextButton
-                            val cropRect = cropRectFor(bitmap.width, bitmap.height, cropAspect, cropCenter)
-                            val matrix = buildColorMatrix(brightness, contrast, saturation, filter)
-                            isSaving = true
-                            scope.launch {
-                                saveEditedPhoto(context, bitmap, cropRect, matrix, item)
-                                isSaving = false
-                                onDone()
-                            }
-                        },
+                        onClick = { showSaveChoiceDialog = true },
                     ) {
                         Text("Save")
                     }
@@ -352,6 +378,7 @@ private suspend fun saveEditedPhoto(
     cropRect: Rect?,
     colorMatrix: android.graphics.ColorMatrix,
     original: MediaItem,
+    replace: Boolean,
 ) = withContext(Dispatchers.IO) {
     val cropped = if (cropRect != null) {
         Bitmap.createBitmap(bitmap, cropRect.left, cropRect.top, cropRect.width(), cropRect.height())
@@ -365,7 +392,7 @@ private suspend fun saveEditedPhoto(
 
     val resolver = context.contentResolver
     val baseName = original.displayName.substringBeforeLast('.', original.displayName)
-    val fileName = "${baseName}_edited_${System.currentTimeMillis() / 1000}.jpg"
+    val fileName = if (replace) "$baseName.jpg" else "${baseName}_edited_${System.currentTimeMillis() / 1000}.jpg"
     val values = ContentValues().apply {
         put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
         put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")

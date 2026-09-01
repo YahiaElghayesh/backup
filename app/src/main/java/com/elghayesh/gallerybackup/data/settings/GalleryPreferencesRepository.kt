@@ -61,6 +61,7 @@ class GalleryPreferencesRepository(private val context: Context) {
         val TRASH_RETENTION_DAYS = intPreferencesKey("trash_retention_days")
         val VIRTUAL_FOLDERS = stringSetPreferencesKey("virtual_folders")
         val FOLDER_COVERS_JSON = stringPreferencesKey("folder_covers_json")
+        val FAVORITE_MEDIA_IDS = stringSetPreferencesKey("favorite_media_ids")
     }
 
     val viewType: Flow<ViewType> = context.galleryPrefsStore.data.map { prefs ->
@@ -106,6 +107,11 @@ class GalleryPreferencesRepository(private val context: Context) {
     val folderCovers: Flow<Map<String, FolderCover>> =
         context.galleryPrefsStore.data.map { parseFolderCovers(it[Keys.FOLDER_COVERS_JSON]) }
 
+    val favoriteMediaIds: Flow<Set<Long>> =
+        context.galleryPrefsStore.data.map { prefs ->
+            (prefs[Keys.FAVORITE_MEDIA_IDS] ?: emptySet()).mapNotNull { it.toLongOrNull() }.toSet()
+        }
+
     suspend fun setViewType(type: ViewType) {
         context.galleryPrefsStore.edit { it[Keys.VIEW_TYPE] = type.name }
     }
@@ -140,6 +146,14 @@ class GalleryPreferencesRepository(private val context: Context) {
         }
     }
 
+    suspend fun setExcludedFolders(paths: Set<String>) {
+        context.galleryPrefsStore.edit { it[Keys.EXCLUDED_FOLDERS] = paths }
+    }
+
+    suspend fun setHiddenFolders(paths: Set<String>) {
+        context.galleryPrefsStore.edit { it[Keys.HIDDEN_FOLDERS] = paths }
+    }
+
     suspend fun setMediaHidden(id: Long, hidden: Boolean) {
         context.galleryPrefsStore.edit { prefs ->
             val current = prefs[Keys.HIDDEN_MEDIA_IDS] ?: emptySet()
@@ -166,6 +180,14 @@ class GalleryPreferencesRepository(private val context: Context) {
     suspend fun removeVirtualFolder(path: String) {
         context.galleryPrefsStore.edit { prefs ->
             prefs[Keys.VIRTUAL_FOLDERS] = (prefs[Keys.VIRTUAL_FOLDERS] ?: emptySet()) - path
+        }
+    }
+
+    suspend fun setMediaFavorite(id: Long, favorite: Boolean) {
+        context.galleryPrefsStore.edit { prefs ->
+            val current = prefs[Keys.FAVORITE_MEDIA_IDS] ?: emptySet()
+            val idStr = id.toString()
+            prefs[Keys.FAVORITE_MEDIA_IDS] = if (favorite) current + idStr else current - idStr
         }
     }
 

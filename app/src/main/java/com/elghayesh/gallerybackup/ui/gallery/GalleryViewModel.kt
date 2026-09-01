@@ -14,6 +14,7 @@ import com.elghayesh.gallerybackup.data.media.TrashRepository
 import com.elghayesh.gallerybackup.data.media.allItemsRecursive
 import com.elghayesh.gallerybackup.data.media.copyMediaTo
 import com.elghayesh.gallerybackup.data.media.filtered
+import com.elghayesh.gallerybackup.data.media.flattenAllFolders
 import com.elghayesh.gallerybackup.data.media.withVirtualFolders
 import com.elghayesh.gallerybackup.data.settings.AccentColor
 import com.elghayesh.gallerybackup.data.settings.FolderCover
@@ -94,6 +95,8 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         prefs.trashRetentionDays.stateIn(viewModelScope, SharingStarted.Eagerly, 30)
     val trashedEntries: StateFlow<Map<Long, Long>> =
         trashRepository.trashedEntries.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+    val favoriteMediaIds: StateFlow<Set<Long>> =
+        prefs.favoriteMediaIds.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
 
     /** [root] with excluded/hidden/trashed content removed, plus any still-empty user-created folders added in. */
     val visibleRoot: StateFlow<FolderNode?> = combine(
@@ -144,8 +147,40 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     fun setMediaHidden(id: Long, hidden: Boolean) =
         viewModelScope.launch { prefs.setMediaHidden(id, hidden) }
     fun setShowHidden(show: Boolean) = viewModelScope.launch { prefs.setShowHidden(show) }
+
+    /** [includeAll] = true clears every exclusion; false excludes everything so the gallery starts empty. */
+    fun setAllFoldersExcluded(includeAll: Boolean) {
+        viewModelScope.launch {
+            if (includeAll) {
+                prefs.setExcludedFolders(emptySet())
+            } else {
+                val allPaths = _rawRoot.value?.flattenAllFolders()?.map { it.path }?.toSet() ?: emptySet()
+                prefs.setExcludedFolders(allPaths)
+            }
+        }
+    }
+
+    fun setAllFoldersHidden(hidden: Boolean) {
+        viewModelScope.launch {
+            if (!hidden) {
+                prefs.setHiddenFolders(emptySet())
+            } else {
+                val allPaths = _rawRoot.value?.flattenAllFolders()?.map { it.path }?.toSet() ?: emptySet()
+                prefs.setHiddenFolders(allPaths)
+            }
+        }
+    }
     fun setTrashRetentionDays(days: Int) = viewModelScope.launch { prefs.setTrashRetentionDays(days) }
     fun setFolderCover(path: String, cover: FolderCover?) = viewModelScope.launch { prefs.setFolderCover(path, cover) }
+
+    fun setMediaFavorite(id: Long, favorite: Boolean) = viewModelScope.launch { prefs.setMediaFavorite(id, favorite) }
+
+    /** Favorites every id in [ids] if any of them isn't already a favorite, otherwise un-favorites them all. */
+    fun toggleFavorites(ids: List<Long>) {
+        if (ids.isEmpty()) return
+        val allFavorited = ids.all { it in favoriteMediaIds.value }
+        viewModelScope.launch { ids.forEach { prefs.setMediaFavorite(it, !allFavorited) } }
+    }
 
     fun createFolder(parentPath: String, name: String) {
         viewModelScope.launch {

@@ -193,7 +193,7 @@ private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: Back
             val root by galleryViewModel.visibleRoot.collectAsState()
             val item = root?.findNode(path)?.items?.sortedByDescending { it.dateModifiedSec }?.getOrNull(index)
             if (item != null) {
-                PhotoEditScreen(item = item, onDone = { navController.popBackStack() })
+                PhotoEditScreen(item = item, viewModel = galleryViewModel, onDone = { navController.popBackStack() })
             }
         }
         composable(
@@ -208,7 +208,7 @@ private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: Back
             val root by galleryViewModel.visibleRoot.collectAsState()
             val item = root?.findNode(path)?.items?.sortedByDescending { it.dateModifiedSec }?.getOrNull(index)
             if (item != null) {
-                VideoTrimScreen(item = item, onDone = { navController.popBackStack() })
+                VideoTrimScreen(item = item, viewModel = galleryViewModel, onDone = { navController.popBackStack() })
             }
         }
     }

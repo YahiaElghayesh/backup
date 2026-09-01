@@ -34,10 +34,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.exoplayer.ExoPlayer
@@ -45,7 +47,7 @@ import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import com.elghayesh.gallerybackup.data.media.MediaItem
 import com.elghayesh.gallerybackup.data.media.findNode
-import com.elghayesh.gallerybackup.ui.common.FolderPickerDialog
+import com.elghayesh.gallerybackup.ui.common.FolderTreePickerDialog
 import com.elghayesh.gallerybackup.ui.common.MediaActionBar
 import com.elghayesh.gallerybackup.ui.common.PropertiesDialog
 import com.elghayesh.gallerybackup.ui.common.RenameDialog
@@ -71,8 +73,8 @@ fun MediaViewerScreen(
     // Must match the same (filtered) list GalleryScreen computed indices from -- otherwise
     // an index picked from the visible grid could resolve to a different, hidden item here.
     val visibleRoot by viewModel.visibleRoot.collectAsState()
-    val rawRoot by viewModel.root.collectAsState()
     val hiddenMediaIds by viewModel.hiddenMediaIds.collectAsState()
+    val favoriteMediaIds by viewModel.favoriteMediaIds.collectAsState()
     val media = remember(visibleRoot, path) {
         visibleRoot?.findNode(path)?.items?.sortedByDescending { it.dateModifiedSec } ?: emptyList()
     }
@@ -107,9 +109,10 @@ fun MediaViewerScreen(
         )
     }
     transferMode?.let { mode ->
-        FolderPickerDialog(
-            root = rawRoot,
+        FolderTreePickerDialog(
+            root = visibleRoot,
             title = if (mode == ViewerTransferMode.MOVE) "Move to..." else "Copy to...",
+            onCreateFolder = { parentPath, name -> viewModel.createFolder(parentPath, name) },
             onPick = { destination ->
                 currentItem?.let { item ->
                     if (mode == ViewerTransferMode.MOVE) {
@@ -154,6 +157,8 @@ fun MediaViewerScreen(
                         },
                         onShare = { shareMedia(context, listOf(item)) },
                         onDelete = { requestDelete(listOf(item)) },
+                        isFavorite = item.id in favoriteMediaIds,
+                        onToggleFavorite = { viewModel.setMediaFavorite(item.id, item.id !in favoriteMediaIds) },
                         overflowActions = listOf(
                             (if (isHidden) "Unhide" else "Hide") to { viewModel.setMediaHidden(item.id, !isHidden) },
                             "Rename" to { showRenameDialog = true },
@@ -194,8 +199,9 @@ fun MediaViewerScreen(
     }
 }
 
-/** Pinch to zoom (up to 8x) and drag to pan once zoomed. Only intercepts single-finger drags
- * once already zoomed in, so swiping between photos at normal (1x) zoom is unaffected. */
+/** Pinch to zoom (up to 8x) and drag to pan once zoomed, plus double-tap to toggle between
+ * 1x and 3x. Only intercepts single-finger drags once already zoomed in, so swiping between
+ * photos at normal (1x) zoom is unaffected. */
 @Composable
 private fun ZoomableMediaBox(
     onScaleChanged: (Float) -> Unit,
@@ -208,14 +214,21 @@ private fun ZoomableMediaBox(
         Modifier
             .fillMaxSize()
             .pointerInput(Unit) {
+                var lastTapUpTimeMs = 0L
+                var lastTapPosition = Offset.Zero
+                val tapSlopPx = 24.dp.toPx()
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
+                    var totalPan = 0f
+                    var lastEvent: PointerEvent
                     do {
                         val event = awaitPointerEvent()
+                        lastEvent = event
                         val pointerCount = event.changes.size
+                        val zoomChange = event.calculateZoom()
+                        val panChange = event.calculatePan()
+                        totalPan += panChange.getDistance()
                         if (pointerCount >= 2 || scale > 1f) {
-                            val zoomChange = event.calculateZoom()
-                            val panChange = event.calculatePan()
                             if (zoomChange != 1f || panChange != Offset.Zero) {
                                 val newScale = (scale * zoomChange).coerceIn(1f, 8f)
                                 scale = newScale
@@ -227,6 +240,22 @@ private fun ZoomableMediaBox(
                             }
                         }
                     } while (event.changes.any { it.pressed })
+
+                    if (totalPan < tapSlopPx && lastEvent.changes.size == 1) {
+                        val upPosition = lastEvent.changes.first().position
+                        val now = System.currentTimeMillis()
+                        val isDoubleTap = now - lastTapUpTimeMs < 300 &&
+                            (upPosition - lastTapPosition).getDistance() < tapSlopPx * 3
+                        if (isDoubleTap) {
+                            scale = if (scale > 1f) 1f else 3f
+                            offset = Offset.Zero
+                            onScaleChanged(scale)
+                            lastTapUpTimeMs = 0L
+                        } else {
+                            lastTapUpTimeMs = now
+                            lastTapPosition = upPosition
+                        }
+                    }
                 }
             }
             .graphicsLayer(

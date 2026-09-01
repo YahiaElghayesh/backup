@@ -25,6 +25,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -128,6 +129,24 @@ fun GallerySettingsScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.height(8.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { viewModel.setAllFoldersExcluded(includeAll = true) }) {
+                            Text("Include all")
+                        }
+                        OutlinedButton(onClick = { viewModel.setAllFoldersExcluded(includeAll = false) }) {
+                            Text("Include nothing")
+                        }
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { viewModel.setAllFoldersHidden(hidden = false) }) {
+                            Text("Unhide all")
+                        }
+                        OutlinedButton(onClick = { viewModel.setAllFoldersHidden(hidden = true) }) {
+                            Text("Hide all")
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
                     Row(Modifier.fillMaxWidth()) {
                         Text("Folder", modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
                         Text("Show", style = MaterialTheme.typography.labelMedium)

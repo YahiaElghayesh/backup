@@ -1,9 +1,13 @@
 package com.elghayesh.gallerybackup.ui.gallery
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -83,7 +87,7 @@ import com.elghayesh.gallerybackup.data.settings.FolderSortOrder
 import com.elghayesh.gallerybackup.data.settings.ViewType
 import com.elghayesh.gallerybackup.ui.common.CreateFolderDialog
 import com.elghayesh.gallerybackup.ui.common.FolderCoverDialog
-import com.elghayesh.gallerybackup.ui.common.FolderPickerDialog
+import com.elghayesh.gallerybackup.ui.common.FolderTreePickerDialog
 import com.elghayesh.gallerybackup.ui.common.MediaActionBar
 import com.elghayesh.gallerybackup.ui.common.PropertiesDialog
 import com.elghayesh.gallerybackup.ui.common.RenameDialog
@@ -112,7 +116,6 @@ fun GalleryScreen(
     val context = LocalContext.current
 
     val visibleRoot by viewModel.visibleRoot.collectAsState()
-    val rawRoot by viewModel.root.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     val viewType by viewModel.viewType.collectAsState()
     val gridColumns by viewModel.gridColumns.collectAsState()
@@ -123,6 +126,7 @@ fun GalleryScreen(
     val selectedMediaIds by viewModel.selectedMediaIds.collectAsState()
     val selectedFolderPaths by viewModel.selectedFolderPaths.collectAsState()
     val folderCovers by viewModel.folderCovers.collectAsState()
+    val favoriteMediaIds by viewModel.favoriteMediaIds.collectAsState()
     val node = visibleRoot?.findNode(path)
 
     val folders = node?.let { sortedFolders(it.children.values.toList(), folderSort) } ?: emptyList()
@@ -131,6 +135,8 @@ fun GalleryScreen(
     val selectedFolderNodes = folders.filter { it.path in selectedFolderPaths }
     val isSelectionMode = selectedMediaIds.isNotEmpty() || selectedFolderPaths.isNotEmpty()
     val totalSelectedCount = selectedItems.size + selectedFolderNodes.size
+
+    BackHandler(enabled = isSelectionMode) { viewModel.clearSelection() }
 
     var overflowExpanded by remember { mutableStateOf(false) }
     var showSortDialog by remember { mutableStateOf(false) }
@@ -142,6 +148,7 @@ fun GalleryScreen(
 
     val requestDelete = rememberDeleteRequester(viewModel)
     val gridState = rememberLazyGridState()
+    var isDragSelecting by remember { mutableStateOf(false) }
 
     if (showSortDialog) {
         SortDialog(current = folderSort, onSelect = { viewModel.setFolderSort(it) }, onDismiss = { showSortDialog = false })
@@ -182,9 +189,10 @@ fun GalleryScreen(
         )
     }
     transferMode?.let { mode ->
-        FolderPickerDialog(
-            root = rawRoot,
+        FolderTreePickerDialog(
+            root = visibleRoot,
             title = if (mode == FolderTransferMode.MOVE) "Move to..." else "Copy to...",
+            onCreateFolder = { parentPath, name -> viewModel.createFolder(parentPath, name) },
             onPick = { destination ->
                 if (mode == FolderTransferMode.MOVE) {
                     viewModel.moveSelectionTo(selectedItems, selectedFolderNodes, destination)
@@ -287,6 +295,12 @@ fun GalleryScreen(
                             selectedFolderNodes.forEach { viewModel.setFolderCover(it.path, null) }
                             requestDelete(selectedItems + selectedFolderNodes.flatMap { it.allItemsRecursive() })
                         },
+                        isFavorite = selectedItems.isNotEmpty() && selectedItems.all { it.id in favoriteMediaIds },
+                        onToggleFavorite = if (selectedItems.isNotEmpty()) {
+                            { viewModel.toggleFavorites(selectedItems.map { it.id }) }
+                        } else {
+                            null
+                        },
                         overflowActions = buildList {
                             add(
                                 (if (allSelectedHidden) "Unhide" else "Hide") to {
@@ -348,17 +362,49 @@ fun GalleryScreen(
                             Modifier
                                 .fillMaxSize()
                                 .pointerInput(folders, media) {
-                                    detectDragGesturesAfterLongPress(
-                                        onDragStart = { offset ->
-                                            itemIndexAt(gridState, offset)
-                                                ?.let { selectAt(it, folders, media, viewModel) }
-                                        },
-                                        onDrag = { change, _ ->
-                                            change.consume()
-                                            itemIndexAt(gridState, change.position)
-                                                ?.let { selectAt(it, folders, media, viewModel) }
-                                        },
-                                    )
+                                    // A single, unified gesture owns the whole down-to-up lifecycle for every
+                                    // tile: a plain tap opens the item (or toggles it, once already selecting);
+                                    // a long press selects the item under the finger and enters selection mode;
+                                    // continuing to drag from that same long press extends the selection to
+                                    // whatever else the finger passes over. Handling all three in one detector
+                                    // (rather than a per-tile clickable racing a container drag detector) avoids
+                                    // the two independently reacting to the same up event.
+                                    val tapSlopPx = 18.dp.toPx()
+                                    awaitEachGesture {
+                                        val down = awaitFirstDown(requireUnconsumed = false)
+                                        val downIndex = itemIndexAt(gridState, down.position)
+                                        val longPress = awaitLongPressOrCancellation(down.id)
+                                        if (longPress != null) {
+                                            isDragSelecting = true
+                                            downIndex?.let { selectAt(it, folders, media, viewModel) }
+                                            var pointerId = down.id
+                                            try {
+                                                while (true) {
+                                                    val event = awaitPointerEvent()
+                                                    val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+                                                    if (!change.pressed) {
+                                                        change.consume()
+                                                        break
+                                                    }
+                                                    itemIndexAt(gridState, change.position)
+                                                        ?.let { selectAt(it, folders, media, viewModel) }
+                                                    change.consume()
+                                                    pointerId = change.id
+                                                }
+                                            } finally {
+                                                isDragSelecting = false
+                                            }
+                                        } else if (downIndex != null) {
+                                            val stillDown = currentEvent.changes.any { it.id == down.id && it.pressed }
+                                            val moved = currentEvent.changes.any { change ->
+                                                change.id == down.id &&
+                                                    (change.position - down.position).getDistance() > tapSlopPx
+                                            }
+                                            if (!stillDown && !moved) {
+                                                openOrToggle(downIndex, folders, media, viewModel, path, onOpenFolder, onOpenMedia)
+                                            }
+                                        }
+                                    }
                                 },
                         ) {
                             LazyVerticalGrid(
@@ -367,6 +413,7 @@ fun GalleryScreen(
                                 contentPadding = PaddingValues(4.dp),
                                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                                 verticalArrangement = Arrangement.spacedBy(4.dp),
+                                userScrollEnabled = !isDragSelecting,
                                 modifier = Modifier.fillMaxSize(),
                             ) {
                                 gridItems(folders, key = { "folder:${it.path}" }) { folder ->
@@ -375,27 +422,13 @@ fun GalleryScreen(
                                         isHidden = folder.path in hiddenFolders,
                                         isSelected = folder.path in selectedFolderPaths,
                                         cover = folderCovers[folder.path],
-                                        onClick = {
-                                            if (isSelectionMode) {
-                                                viewModel.toggleFolderSelection(folder.path)
-                                            } else {
-                                                onOpenFolder(folder.path)
-                                            }
-                                        },
                                     )
                                 }
-                                gridItemsIndexed(media, key = { _, item -> "media:${item.id}" }) { index, item ->
+                                gridItemsIndexed(media, key = { _, item -> "media:${item.id}" }) { _, item ->
                                     MediaGridTile(
                                         item = item,
                                         isHidden = item.id in hiddenMediaIds,
                                         isSelected = item.id in selectedMediaIds,
-                                        onClick = {
-                                            if (isSelectionMode) {
-                                                viewModel.toggleMediaSelection(item.id)
-                                            } else {
-                                                onOpenMedia(path, index)
-                                            }
-                                        },
                                     )
                                 }
                             }
@@ -415,6 +448,7 @@ fun GalleryScreen(
                                             onOpenFolder(folder.path)
                                         }
                                     },
+                                    onLongClick = { viewModel.setFolderSelected(folder.path, true) },
                                 )
                             }
                             itemsIndexed(media, key = { _, item -> "media:${item.id}" }) { index, item ->
@@ -429,6 +463,7 @@ fun GalleryScreen(
                                             onOpenMedia(path, index)
                                         }
                                     },
+                                    onLongClick = { viewModel.setMediaSelected(item.id, true) },
                                 )
                             }
                         }
@@ -457,6 +492,32 @@ private fun selectAt(flatIndex: Int, folders: List<FolderNode>, media: List<Medi
         viewModel.setFolderSelected(folders[flatIndex].path, true)
     } else {
         media.getOrNull(flatIndex - folders.size)?.let { viewModel.setMediaSelected(it.id, true) }
+    }
+}
+
+/**
+ * A plain tap on a grid tile: opens the folder/media, or -- if already selecting (read live off
+ * the ViewModel, never a stale composition snapshot, since this runs from inside a long-lived
+ * gesture callback) -- toggles that item's selection instead.
+ */
+private fun openOrToggle(
+    flatIndex: Int,
+    folders: List<FolderNode>,
+    media: List<MediaItem>,
+    viewModel: GalleryViewModel,
+    path: String,
+    onOpenFolder: (String) -> Unit,
+    onOpenMedia: (path: String, index: Int) -> Unit,
+) {
+    val isSelectionMode = viewModel.selectedMediaIds.value.isNotEmpty() || viewModel.selectedFolderPaths.value.isNotEmpty()
+    if (flatIndex < folders.size) {
+        val folder = folders[flatIndex]
+        if (isSelectionMode) viewModel.toggleFolderSelection(folder.path) else onOpenFolder(folder.path)
+    } else {
+        val mediaIndex = flatIndex - folders.size
+        media.getOrNull(mediaIndex)?.let { item ->
+            if (isSelectionMode) viewModel.toggleMediaSelection(item.id) else onOpenMedia(path, mediaIndex)
+        }
     }
 }
 
@@ -533,21 +594,18 @@ private fun FolderCoverContent(folder: FolderNode, cover: FolderCover?) {
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun FolderGridTile(
     folder: FolderNode,
     isHidden: Boolean,
     isSelected: Boolean,
     cover: FolderCover?,
-    onClick: () -> Unit,
 ) {
     Box(
         Modifier
             .aspectRatio(1f)
             .clip(RoundedCornerShape(12.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .clickable(onClick = onClick)
             .alpha(if (isHidden) 0.5f else 1f),
     ) {
         FolderCoverContent(folder, cover)
@@ -581,20 +639,17 @@ private fun FolderGridTile(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MediaGridTile(
     item: MediaItem,
     isHidden: Boolean,
     isSelected: Boolean,
-    onClick: () -> Unit,
 ) {
     Box(
         Modifier
             .aspectRatio(1f)
             .clip(RoundedCornerShape(8.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .clickable(onClick = onClick)
             .alpha(if (isHidden) 0.5f else 1f),
     ) {
         AsyncImage(
@@ -637,6 +692,7 @@ private fun MediaGridTile(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun GalleryListItem(
     thumbnailModel: Any?,
@@ -647,6 +703,7 @@ private fun GalleryListItem(
     isHidden: Boolean,
     isSelected: Boolean,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
 ) {
     Box(
         Modifier.background(
@@ -656,7 +713,7 @@ private fun GalleryListItem(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable(onClick = onClick)
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
                 .alpha(if (isHidden) 0.5f else 1f)
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -705,6 +762,7 @@ private fun FolderListRow(
     isSelected: Boolean,
     cover: FolderCover?,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
 ) {
     GalleryListItem(
         thumbnailModel = folder.coverUri(),
@@ -715,6 +773,7 @@ private fun FolderListRow(
         isHidden = isHidden,
         isSelected = isSelected,
         onClick = onClick,
+        onLongClick = onLongClick,
     )
 }
 
@@ -724,6 +783,7 @@ private fun MediaListRow(
     isHidden: Boolean,
     isSelected: Boolean,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
 ) {
     GalleryListItem(
         thumbnailModel = item.uri,
@@ -734,6 +794,7 @@ private fun MediaListRow(
         isHidden = isHidden,
         isSelected = isSelected,
         onClick = onClick,
+        onLongClick = onLongClick,
     )
 }
 

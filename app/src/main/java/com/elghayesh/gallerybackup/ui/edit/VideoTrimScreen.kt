@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -44,6 +45,7 @@ import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.Transformer
 import androidx.media3.ui.PlayerView
 import com.elghayesh.gallerybackup.data.media.MediaItem
+import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
 import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
@@ -54,13 +56,14 @@ import kotlinx.coroutines.withContext
 @OptIn(ExperimentalMaterial3Api::class)
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
-fun VideoTrimScreen(item: MediaItem, onDone: () -> Unit) {
+fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val durationMs = item.durationMs.coerceAtLeast(1000L)
 
     var trimRange by remember { mutableStateOf(0f..durationMs.toFloat()) }
     var isSaving by remember { mutableStateOf(false) }
+    var showSaveChoiceDialog by remember { mutableStateOf(false) }
 
     val exoPlayer = remember(item.id) {
         ExoPlayer.Builder(context).build().apply {
@@ -70,6 +73,45 @@ fun VideoTrimScreen(item: MediaItem, onDone: () -> Unit) {
         }
     }
     DisposableEffect(exoPlayer) { onDispose { exoPlayer.release() } }
+
+    fun performSave(replace: Boolean) {
+        isSaving = true
+        scope.launch {
+            val outputPath = File(context.cacheDir, "trim_${System.currentTimeMillis()}.mp4").absolutePath
+            val success = transformVideo(
+                context,
+                item.uri,
+                trimRange.start.toLong(),
+                trimRange.endInclusive.toLong(),
+                outputPath,
+            )
+            if (success) {
+                saveTrimmedVideo(context, outputPath, item, replace)
+                if (replace) viewModel.deleteMediaItems(listOf(item), skipTrash = false)
+                viewModel.refresh()
+            }
+            isSaving = false
+            onDone()
+        }
+    }
+
+    if (showSaveChoiceDialog) {
+        AlertDialog(
+            onDismissRequest = { showSaveChoiceDialog = false },
+            title = { Text("Save changes") },
+            text = { Text("Replace the original video, or save your trim as a new file alongside it?") },
+            confirmButton = {
+                TextButton(onClick = { showSaveChoiceDialog = false; performSave(replace = true) }) {
+                    Text("Replace original")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSaveChoiceDialog = false; performSave(replace = false) }) {
+                    Text("Save as new")
+                }
+            },
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -81,25 +123,7 @@ fun VideoTrimScreen(item: MediaItem, onDone: () -> Unit) {
                 actions = {
                     TextButton(
                         enabled = !isSaving,
-                        onClick = {
-                            isSaving = true
-                            scope.launch {
-                                val outputPath =
-                                    File(context.cacheDir, "trim_${System.currentTimeMillis()}.mp4").absolutePath
-                                val success = transformVideo(
-                                    context,
-                                    item.uri,
-                                    trimRange.start.toLong(),
-                                    trimRange.endInclusive.toLong(),
-                                    outputPath,
-                                )
-                                if (success) {
-                                    saveTrimmedVideo(context, outputPath, item)
-                                }
-                                isSaving = false
-                                onDone()
-                            }
-                        },
+                        onClick = { showSaveChoiceDialog = true },
                     ) {
                         Text("Save")
                     }
@@ -179,13 +203,13 @@ private suspend fun transformVideo(
     transformer.start(editedMediaItem, outputPath)
 }
 
-private suspend fun saveTrimmedVideo(context: Context, outputPath: String, original: MediaItem) =
+private suspend fun saveTrimmedVideo(context: Context, outputPath: String, original: MediaItem, replace: Boolean) =
     withContext(Dispatchers.IO) {
         val tempFile = File(outputPath)
         if (!tempFile.exists()) return@withContext
 
         val baseName = original.displayName.substringBeforeLast('.', original.displayName)
-        val fileName = "${baseName}_trimmed_${System.currentTimeMillis() / 1000}.mp4"
+        val fileName = if (replace) "$baseName.mp4" else "${baseName}_trimmed_${System.currentTimeMillis() / 1000}.mp4"
         val values = ContentValues().apply {
             put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
             put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
