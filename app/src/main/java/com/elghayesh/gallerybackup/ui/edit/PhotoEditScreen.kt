@@ -12,6 +12,11 @@ import android.os.Build
 import android.provider.MediaStore
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,12 +27,17 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Redo
 import androidx.compose.material.icons.filled.RotateRight
+import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -35,6 +45,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -43,7 +54,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -62,22 +73,29 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.elghayesh.gallerybackup.data.media.MediaItem
 import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 private enum class CropAspect(val label: String, val ratio: Float) {
     FREE("Free", 0f),
     SQUARE("1:1", 1f),
     FOUR_THREE("4:3", 4f / 3f),
+    THREE_FOUR("3:4", 3f / 4f),
     SIXTEEN_NINE("16:9", 16f / 9f),
 }
 
 private enum class PhotoFilter(val label: String) {
     NONE("None"),
+    VIVID("Vivid"),
+    FADE("Fade"),
+    NOIR("Noir"),
+    VINTAGE("Vintage"),
     GRAYSCALE("Grayscale"),
     SEPIA("Sepia"),
     COOL("Cool"),
@@ -85,7 +103,53 @@ private enum class PhotoFilter(val label: String) {
     INVERT("Invert"),
 }
 
-private enum class EditTool { CROP, ADJUST, FILTERS }
+private enum class EditTab(val label: String) {
+    TRANSFORM("Transform"),
+    FILTER("Filter"),
+    ADJUST("Adjust"),
+    FOCUS("Focus"),
+    STICKER("Sticker"),
+}
+
+/** A crop rectangle normalized to 0..1 of the working bitmap's current width/height. */
+private data class NormRect(val left: Float, val top: Float, val right: Float, val bottom: Float) {
+    companion object {
+        val FULL = NormRect(0f, 0f, 1f, 1f)
+    }
+}
+
+private enum class CropCorner { TOP_LEFT, TOP_RIGHT, BOTTOM_LEFT, BOTTOM_RIGHT }
+
+private data class TextSticker(
+    val id: Long,
+    val text: String,
+    val xNorm: Float,
+    val yNorm: Float,
+    val colorArgb: Long,
+)
+
+/** A soft circular spotlight: everything outside [radiusNorm] of ([xNorm], [yNorm]) darkens by [strength]. */
+private data class FocusSpot(
+    val xNorm: Float = 0.5f,
+    val yNorm: Float = 0.5f,
+    val radiusNorm: Float = 0.35f,
+    val strength: Float = 0f, // 0..100, 0 = off
+)
+
+/** Everything about the edit that undo/redo tracks as one snapshot. */
+private data class EditState(
+    val cropRect: NormRect = NormRect.FULL,
+    val cropAspect: CropAspect = CropAspect.FREE,
+    val brightness: Float = 0f,
+    val contrast: Float = 0f,
+    val saturation: Float = 0f,
+    val warmth: Float = 0f,
+    val highlights: Float = 0f,
+    val shadows: Float = 0f,
+    val filter: PhotoFilter = PhotoFilter.NONE,
+    val focus: FocusSpot = FocusSpot(),
+    val stickers: List<TextSticker> = emptyList(),
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -96,34 +160,71 @@ fun PhotoEditScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val density = androidx.compose.ui.platform.LocalDensity.current
 
     var workingBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var isLoading by remember { mutableStateOf(true) }
     var isSaving by remember { mutableStateOf(false) }
     var showSaveChoiceDialog by remember { mutableStateOf(false) }
 
-    var tool by remember { mutableStateOf(EditTool.CROP) }
-    var cropAspect by remember { mutableStateOf(CropAspect.FREE) }
-    var cropCenter by remember { mutableStateOf(Offset(0.5f, 0.5f)) }
-    var brightness by remember { mutableFloatStateOf(0f) }
-    var contrast by remember { mutableFloatStateOf(0f) }
-    var saturation by remember { mutableFloatStateOf(0f) }
-    var filter by remember { mutableStateOf(PhotoFilter.NONE) }
+    var tab by remember { mutableStateOf(EditTab.TRANSFORM) }
+    var current by remember { mutableStateOf(EditState()) }
+    val undoStack = remember { mutableStateListOf<EditState>() }
+    val redoStack = remember { mutableStateListOf<EditState>() }
     var boxSize by remember { mutableStateOf(IntSize.Zero) }
+    var editingStickerId by remember { mutableStateOf<Long?>(null) }
+    var nextStickerId by remember { mutableStateOf(1L) }
+
+    fun commit(newState: EditState) {
+        undoStack.add(current)
+        redoStack.clear()
+        current = newState
+    }
+
+    // Sliders and drags mutate `current` live (for immediate preview) on every tick, so by the
+    // time the gesture ends `current` already holds the final value -- commit(current) at that
+    // point would push the state onto itself, breaking undo. These two instead capture the state
+    // from *before* the gesture started once, on its first tick, and commit that captured
+    // baseline only when the gesture ends.
+    var dragBaseline by remember { mutableStateOf<EditState?>(null) }
+    fun mutateLive(newState: EditState) {
+        if (dragBaseline == null) dragBaseline = current
+        current = newState
+    }
+    fun endLiveMutation() {
+        val base = dragBaseline ?: return
+        undoStack.add(base)
+        redoStack.clear()
+        dragBaseline = null
+    }
+
+    fun undo() {
+        if (undoStack.isEmpty()) return
+        redoStack.add(current)
+        current = undoStack.removeAt(undoStack.lastIndex)
+    }
+    fun redo() {
+        if (redoStack.isEmpty()) return
+        undoStack.add(current)
+        current = redoStack.removeAt(redoStack.lastIndex)
+    }
 
     LaunchedEffect(item.uri) {
         isLoading = true
         workingBitmap = loadDownsampledBitmap(context, item.uri, maxDimension = 2048)
         isLoading = false
+        current = EditState()
+        undoStack.clear()
+        redoStack.clear()
+        dragBaseline = null
     }
 
     fun performSave(replace: Boolean) {
         val bitmap = workingBitmap ?: return
-        val cropRect = cropRectFor(bitmap.width, bitmap.height, cropAspect, cropCenter)
-        val matrix = buildColorMatrix(brightness, contrast, saturation, filter)
+        val state = current
         isSaving = true
         scope.launch {
-            saveEditedPhoto(context, bitmap, cropRect, matrix, item, replace)
+            saveEditedPhoto(context, bitmap, state, item, replace)
             if (replace) viewModel.deleteMediaItems(listOf(item), skipTrash = false)
             viewModel.refresh()
             isSaving = false
@@ -149,6 +250,37 @@ fun PhotoEditScreen(
         )
     }
 
+    editingStickerId?.let { id ->
+        val sticker = current.stickers.find { it.id == id }
+        StickerTextDialog(
+            initialText = sticker?.text ?: "",
+            onConfirm = { text ->
+                val stickers = if (sticker != null) {
+                    if (text.isBlank()) {
+                        current.stickers.filter { it.id != id }
+                    } else {
+                        current.stickers.map { if (it.id == id) it.copy(text = text) else it }
+                    }
+                } else if (text.isNotBlank()) {
+                    current.stickers + TextSticker(id, text, 0.5f, 0.5f, 0xFFFFFFFFL)
+                } else {
+                    current.stickers
+                }
+                commit(current.copy(stickers = stickers))
+                editingStickerId = null
+            },
+            onDelete = if (sticker != null) {
+                {
+                    commit(current.copy(stickers = current.stickers.filter { it.id != id }))
+                    editingStickerId = null
+                }
+            } else {
+                null
+            },
+            onDismiss = { editingStickerId = null },
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -159,11 +291,11 @@ fun PhotoEditScreen(
                     }
                 },
                 actions = {
-                    IconButton(
-                        enabled = workingBitmap != null,
-                        onClick = { workingBitmap = workingBitmap?.let { rotateBitmap90(it) } },
-                    ) {
-                        Icon(Icons.Filled.RotateRight, contentDescription = "Rotate")
+                    IconButton(enabled = undoStack.isNotEmpty(), onClick = { undo() }) {
+                        Icon(Icons.Filled.Undo, contentDescription = "Undo")
+                    }
+                    IconButton(enabled = redoStack.isNotEmpty(), onClick = { redo() }) {
+                        Icon(Icons.Filled.Redo, contentDescription = "Redo")
                     }
                     TextButton(
                         enabled = workingBitmap != null && !isSaving,
@@ -182,23 +314,12 @@ fun PhotoEditScreen(
                     isLoading -> CircularProgressIndicator()
                     bitmap == null -> Text("Couldn't load this photo.")
                     else -> {
-                        val composeMatrix = buildColorMatrix(brightness, contrast, saturation, filter)
+                        val composeMatrix = buildColorMatrix(current)
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .aspectRatio(bitmap.width.toFloat() / bitmap.height.toFloat())
-                                .onSizeChanged { boxSize = it }
-                                .pointerInput(cropAspect, bitmap) {
-                                    detectDragGestures { change, dragAmount ->
-                                        change.consume()
-                                        if (cropAspect != CropAspect.FREE && boxSize.width > 0 && boxSize.height > 0) {
-                                            cropCenter = Offset(
-                                                (cropCenter.x + dragAmount.x / boxSize.width).coerceIn(0f, 1f),
-                                                (cropCenter.y + dragAmount.y / boxSize.height).coerceIn(0f, 1f),
-                                            )
-                                        }
-                                    }
-                                },
+                                .onSizeChanged { boxSize = it },
                         ) {
                             Image(
                                 bitmap = bitmap.asImageBitmap(),
@@ -209,64 +330,257 @@ fun PhotoEditScreen(
                                 ),
                                 modifier = Modifier.fillMaxSize(),
                             )
-                            if (cropAspect != CropAspect.FREE) {
-                                CropOverlay(bitmap.width, bitmap.height, cropAspect, cropCenter)
+                            if (current.focus.strength > 0f) {
+                                FocusOverlay(current.focus)
+                            }
+                            current.stickers.forEach { sticker ->
+                                Text(
+                                    sticker.text,
+                                    color = Color(sticker.colorArgb),
+                                    fontSize = 22.sp,
+                                    modifier = Modifier
+                                        .align(Alignment.TopStart)
+                                        .normOffset(sticker.xNorm, sticker.yNorm, boxSize, density)
+                                        .pointerInput(sticker.id, boxSize) {
+                                            detectDragGestures(
+                                                onDragEnd = { endLiveMutation() },
+                                                onDrag = { change, dragAmount ->
+                                                    change.consume()
+                                                    if (boxSize.width > 0 && boxSize.height > 0) {
+                                                        mutateLive(
+                                                            current.copy(
+                                                                stickers = current.stickers.map {
+                                                                    if (it.id == sticker.id) {
+                                                                        it.copy(
+                                                                            xNorm = (it.xNorm + dragAmount.x / boxSize.width).coerceIn(0f, 1f),
+                                                                            yNorm = (it.yNorm + dragAmount.y / boxSize.height).coerceIn(0f, 1f),
+                                                                        )
+                                                                    } else {
+                                                                        it
+                                                                    }
+                                                                },
+                                                            ),
+                                                        )
+                                                    }
+                                                },
+                                            )
+                                        }
+                                        .clickable { editingStickerId = sticker.id }
+                                        .background(Color.Black.copy(alpha = 0.25f))
+                                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                                )
+                            }
+                            if (tab == EditTab.TRANSFORM) {
+                                CropOverlay(
+                                    rect = current.cropRect,
+                                    boxSize = boxSize,
+                                    density = density,
+                                    onCornerDrag = { corner, dxNorm, dyNorm ->
+                                        var rect = updatedCropRect(current.cropRect, corner, dxNorm, dyNorm)
+                                        if (current.cropAspect != CropAspect.FREE && bitmap.width > 0 && bitmap.height > 0) {
+                                            rect = applyAspectLock(rect, current.cropAspect.ratio, bitmap.width, bitmap.height)
+                                        }
+                                        mutateLive(current.copy(cropRect = rect))
+                                    },
+                                    onDragEnd = { endLiveMutation() },
+                                )
+                            }
+                            if (tab == EditTab.FOCUS && current.focus.strength > 0f) {
+                                FocusHandle(
+                                    focus = current.focus,
+                                    boxSize = boxSize,
+                                    density = density,
+                                    onMove = { xNorm, yNorm ->
+                                        mutateLive(current.copy(focus = current.focus.copy(xNorm = xNorm, yNorm = yNorm)))
+                                    },
+                                    onDragEnd = { endLiveMutation() },
+                                )
                             }
                         }
                     }
                 }
             }
 
-            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                EditTool.entries.forEach { t ->
-                    FilterChip(selected = tool == t, onClick = { tool = t }, label = { Text(t.name.lowercase().replaceFirstChar { it.uppercase() }) })
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                EditTab.entries.forEach { t ->
+                    FilterChip(selected = tab == t, onClick = { tab = t }, label = { Text(t.label) })
                 }
             }
 
-            when (tool) {
-                EditTool.CROP -> Row(
-                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    CropAspect.entries.forEach { a ->
-                        FilterChip(selected = cropAspect == a, onClick = { cropAspect = a; cropCenter = Offset(0.5f, 0.5f) }, label = { Text(a.label) })
+            when (tab) {
+                EditTab.TRANSFORM -> Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        CropAspect.entries.forEach { a ->
+                            FilterChip(
+                                selected = current.cropAspect == a,
+                                onClick = {
+                                    val bitmap = workingBitmap
+                                    val rect = if (a == CropAspect.FREE || bitmap == null) {
+                                        NormRect.FULL
+                                    } else {
+                                        applyAspectLock(current.cropRect, a.ratio, bitmap.width, bitmap.height)
+                                    }
+                                    commit(current.copy(cropAspect = a, cropRect = rect))
+                                },
+                                label = { Text(a.label) },
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    TextButton(
+                        enabled = workingBitmap != null,
+                        onClick = {
+                            val bitmap = workingBitmap ?: return@TextButton
+                            val rotated = rotateBitmap90(bitmap)
+                            workingBitmap = rotated
+                            // A crop/sticker layout from before the rotation no longer lines up with the
+                            // new orientation, so this starts a fresh layout on the rotated image.
+                            commit(EditState())
+                        },
+                    ) {
+                        Icon(Icons.Filled.RotateRight, contentDescription = null)
+                        Spacer(Modifier.width(4.dp))
+                        Text("Rotate 90°")
                     }
                 }
-                EditTool.ADJUST -> Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
-                    LabeledSlider("Brightness", brightness) { brightness = it }
-                    LabeledSlider("Contrast", contrast) { contrast = it }
-                    LabeledSlider("Saturation", saturation) { saturation = it }
-                    Spacer(Modifier.height(8.dp))
-                }
-                EditTool.FILTERS -> Row(
+                EditTab.FILTER -> Row(
                     Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     PhotoFilter.entries.forEach { f ->
-                        FilterChip(selected = filter == f, onClick = { filter = f }, label = { Text(f.label) })
+                        FilterChip(
+                            selected = current.filter == f,
+                            onClick = { commit(current.copy(filter = f)) },
+                            label = { Text(f.label) },
+                        )
                     }
+                }
+                EditTab.ADJUST -> Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+                    LabeledSlider(
+                        label = "Brightness",
+                        value = current.brightness,
+                        onChange = { mutateLive(current.copy(brightness = it)) },
+                        onChangeFinished = { endLiveMutation() },
+                    )
+                    LabeledSlider(
+                        label = "Contrast",
+                        value = current.contrast,
+                        onChange = { mutateLive(current.copy(contrast = it)) },
+                        onChangeFinished = { endLiveMutation() },
+                    )
+                    LabeledSlider(
+                        label = "Saturation",
+                        value = current.saturation,
+                        onChange = { mutateLive(current.copy(saturation = it)) },
+                        onChangeFinished = { endLiveMutation() },
+                    )
+                    LabeledSlider(
+                        label = "Warmth",
+                        value = current.warmth,
+                        onChange = { mutateLive(current.copy(warmth = it)) },
+                        onChangeFinished = { endLiveMutation() },
+                    )
+                    LabeledSlider(
+                        label = "Highlights",
+                        value = current.highlights,
+                        onChange = { mutateLive(current.copy(highlights = it)) },
+                        onChangeFinished = { endLiveMutation() },
+                    )
+                    LabeledSlider(
+                        label = "Shadows",
+                        value = current.shadows,
+                        onChange = { mutateLive(current.copy(shadows = it)) },
+                        onChangeFinished = { endLiveMutation() },
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
+                EditTab.FOCUS -> Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+                    Text(
+                        "A soft spotlight that keeps one circular area sharp and darkens the rest. " +
+                            "Drag the circle on the photo to move it once strength is above zero.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    LabeledSlider(
+                        label = "Strength",
+                        value = current.focus.strength,
+                        onChange = { mutateLive(current.copy(focus = current.focus.copy(strength = it.coerceIn(0f, 100f)))) },
+                        range = 0f..100f,
+                        onChangeFinished = { endLiveMutation() },
+                    )
+                    LabeledSlider(
+                        label = "Spotlight size",
+                        value = current.focus.radiusNorm * 100f,
+                        onChange = { mutateLive(current.copy(focus = current.focus.copy(radiusNorm = (it / 100f).coerceIn(0.1f, 0.8f)))) },
+                        range = 10f..80f,
+                        onChangeFinished = { endLiveMutation() },
+                    )
+                }
+                EditTab.STICKER -> Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+                    TextButton(
+                        onClick = {
+                            editingStickerId = nextStickerId
+                            nextStickerId += 1
+                        },
+                    ) {
+                        Icon(Icons.Filled.Add, contentDescription = null)
+                        Spacer(Modifier.width(4.dp))
+                        Text("Add text")
+                    }
+                    Text(
+                        "Drag a sticker to move it, or tap it to edit or remove it.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         }
     }
 }
 
+private fun Modifier.normOffset(
+    xNorm: Float,
+    yNorm: Float,
+    boxSize: IntSize,
+    density: androidx.compose.ui.unit.Density,
+): Modifier = this.then(
+    Modifier.padding(
+        start = with(density) { (xNorm * boxSize.width).toDp() },
+        top = with(density) { (yNorm * boxSize.height).toDp() },
+    ),
+)
+
 @Composable
-private fun LabeledSlider(label: String, value: Float, onChange: (Float) -> Unit) {
+private fun LabeledSlider(
+    label: String,
+    value: Float,
+    onChange: (Float) -> Unit,
+    range: ClosedFloatingPointRange<Float> = -100f..100f,
+    onChangeFinished: () -> Unit,
+) {
     Text("$label: ${value.roundToInt()}", style = MaterialTheme.typography.bodySmall)
-    Slider(value = value, onValueChange = onChange, valueRange = -100f..100f)
+    Slider(value = value, onValueChange = onChange, onValueChangeFinished = onChangeFinished, valueRange = range)
 }
 
 @Composable
-private fun CropOverlay(bitmapW: Int, bitmapH: Int, aspect: CropAspect, center: Offset) {
-    val rect = cropRectFor(bitmapW, bitmapH, aspect, center) ?: return
+private fun CropOverlay(
+    rect: NormRect,
+    boxSize: IntSize,
+    density: androidx.compose.ui.unit.Density,
+    onCornerDrag: (CropCorner, Float, Float) -> Unit,
+    onDragEnd: () -> Unit,
+) {
     Canvas(modifier = Modifier.fillMaxSize()) {
-        val scaleX = size.width / bitmapW
-        val scaleY = size.height / bitmapH
-        val left = rect.left * scaleX
-        val top = rect.top * scaleY
-        val right = rect.right * scaleX
-        val bottom = rect.bottom * scaleY
+        val left = rect.left * size.width
+        val top = rect.top * size.height
+        val right = rect.right * size.width
+        val bottom = rect.bottom * size.height
         val scrim = Color.Black.copy(alpha = 0.55f)
         drawRect(color = scrim, topLeft = Offset(0f, 0f), size = Size(size.width, top))
         drawRect(color = scrim, topLeft = Offset(0f, bottom), size = Size(size.width, size.height - bottom))
@@ -278,40 +592,221 @@ private fun CropOverlay(bitmapW: Int, bitmapH: Int, aspect: CropAspect, center: 
             size = Size(right - left, bottom - top),
             style = Stroke(width = 2.dp.toPx()),
         )
+        // Rule-of-thirds grid inside the crop rect.
+        val gridColor = Color.White.copy(alpha = 0.6f)
+        for (i in 1..2) {
+            val x = left + (right - left) * i / 3f
+            drawLine(gridColor, Offset(x, top), Offset(x, bottom), strokeWidth = 1.dp.toPx())
+            val y = top + (bottom - top) * i / 3f
+            drawLine(gridColor, Offset(left, y), Offset(right, y), strokeWidth = 1.dp.toPx())
+        }
+    }
+    Box(
+        Modifier
+            .normOffset(rect.left, rect.top, boxSize, density)
+            .size(28.dp)
+            .pointerInput(boxSize) {
+                detectDragGestures(onDragEnd = { onDragEnd() }) { change, dragAmount ->
+                    change.consume()
+                    if (boxSize.width > 0 && boxSize.height > 0) {
+                        onCornerDrag(CropCorner.TOP_LEFT, dragAmount.x / boxSize.width, dragAmount.y / boxSize.height)
+                    }
+                }
+            }
+            .background(Color.White, CircleShape)
+            .border(2.dp, Color.Black, CircleShape),
+    )
+    Box(
+        Modifier
+            .normOffset(rect.right, rect.top, boxSize, density)
+            .size(28.dp)
+            .pointerInput(boxSize) {
+                detectDragGestures(onDragEnd = { onDragEnd() }) { change, dragAmount ->
+                    change.consume()
+                    if (boxSize.width > 0 && boxSize.height > 0) {
+                        onCornerDrag(CropCorner.TOP_RIGHT, dragAmount.x / boxSize.width, dragAmount.y / boxSize.height)
+                    }
+                }
+            }
+            .background(Color.White, CircleShape)
+            .border(2.dp, Color.Black, CircleShape),
+    )
+    Box(
+        Modifier
+            .normOffset(rect.left, rect.bottom, boxSize, density)
+            .size(28.dp)
+            .pointerInput(boxSize) {
+                detectDragGestures(onDragEnd = { onDragEnd() }) { change, dragAmount ->
+                    change.consume()
+                    if (boxSize.width > 0 && boxSize.height > 0) {
+                        onCornerDrag(CropCorner.BOTTOM_LEFT, dragAmount.x / boxSize.width, dragAmount.y / boxSize.height)
+                    }
+                }
+            }
+            .background(Color.White, CircleShape)
+            .border(2.dp, Color.Black, CircleShape),
+    )
+    Box(
+        Modifier
+            .normOffset(rect.right, rect.bottom, boxSize, density)
+            .size(28.dp)
+            .pointerInput(boxSize) {
+                detectDragGestures(onDragEnd = { onDragEnd() }) { change, dragAmount ->
+                    change.consume()
+                    if (boxSize.width > 0 && boxSize.height > 0) {
+                        onCornerDrag(CropCorner.BOTTOM_RIGHT, dragAmount.x / boxSize.width, dragAmount.y / boxSize.height)
+                    }
+                }
+            }
+            .background(Color.White, CircleShape)
+            .border(2.dp, Color.Black, CircleShape),
+    )
+}
+
+private fun updatedCropRect(rect: NormRect, corner: CropCorner, dxNorm: Float, dyNorm: Float): NormRect {
+    val minSize = 0.08f
+    return when (corner) {
+        CropCorner.TOP_LEFT -> rect.copy(
+            left = (rect.left + dxNorm).coerceIn(0f, rect.right - minSize),
+            top = (rect.top + dyNorm).coerceIn(0f, rect.bottom - minSize),
+        )
+        CropCorner.TOP_RIGHT -> rect.copy(
+            right = (rect.right + dxNorm).coerceIn(rect.left + minSize, 1f),
+            top = (rect.top + dyNorm).coerceIn(0f, rect.bottom - minSize),
+        )
+        CropCorner.BOTTOM_LEFT -> rect.copy(
+            left = (rect.left + dxNorm).coerceIn(0f, rect.right - minSize),
+            bottom = (rect.bottom + dyNorm).coerceIn(rect.top + minSize, 1f),
+        )
+        CropCorner.BOTTOM_RIGHT -> rect.copy(
+            right = (rect.right + dxNorm).coerceIn(rect.left + minSize, 1f),
+            bottom = (rect.bottom + dyNorm).coerceIn(rect.top + minSize, 1f),
+        )
     }
 }
 
-private fun cropRectFor(bitmapW: Int, bitmapH: Int, aspect: CropAspect, center: Offset): Rect? {
-    if (aspect == CropAspect.FREE) return null
-    var cropW = bitmapW.toFloat()
-    var cropH = cropW / aspect.ratio
-    if (cropH > bitmapH) {
-        cropH = bitmapH.toFloat()
-        cropW = cropH * aspect.ratio
+/** Re-derives an aspect-locked rect centered on [rect]'s current center, sized to fit within it. */
+private fun applyAspectLock(rect: NormRect, ratio: Float, bitmapW: Int, bitmapH: Int): NormRect {
+    val cx = (rect.left + rect.right) / 2f
+    val cy = (rect.top + rect.bottom) / 2f
+    val wPx = (rect.right - rect.left) * bitmapW
+    val hPx = (rect.bottom - rect.top) * bitmapH
+    var newWPx = wPx
+    var newHPx = wPx / ratio
+    if (newHPx > hPx) {
+        newHPx = hPx
+        newWPx = hPx * ratio
     }
-    val centerX = center.x * bitmapW
-    val centerY = center.y * bitmapH
-    val left = (centerX - cropW / 2).coerceIn(0f, bitmapW - cropW)
-    val top = (centerY - cropH / 2).coerceIn(0f, bitmapH - cropH)
-    return Rect(left.roundToInt(), top.roundToInt(), (left + cropW).roundToInt(), (top + cropH).roundToInt())
+    val newWNorm = (newWPx / bitmapW).coerceIn(0.1f, 1f)
+    val newHNorm = (newHPx / bitmapH).coerceIn(0.1f, 1f)
+    var left = cx - newWNorm / 2f
+    var right = cx + newWNorm / 2f
+    var top = cy - newHNorm / 2f
+    var bottom = cy + newHNorm / 2f
+    if (left < 0f) { right -= left; left = 0f }
+    if (right > 1f) { left -= (right - 1f); right = 1f }
+    if (top < 0f) { bottom -= top; top = 0f }
+    if (bottom > 1f) { top -= (bottom - 1f); bottom = 1f }
+    return NormRect(left.coerceIn(0f, 1f), top.coerceIn(0f, 1f), right.coerceIn(0f, 1f), bottom.coerceIn(0f, 1f))
 }
 
-private fun buildColorMatrix(brightness: Float, contrast: Float, saturation: Float, filter: PhotoFilter): android.graphics.ColorMatrix {
+@Composable
+private fun FocusOverlay(focus: FocusSpot) {
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        val cx = focus.xNorm * size.width
+        val cy = focus.yNorm * size.height
+        val radius = focus.radiusNorm * min(size.width, size.height)
+        val alpha = (focus.strength / 100f).coerceIn(0f, 1f) * 0.7f
+        val brush = androidx.compose.ui.graphics.Brush.radialGradient(
+            colorStops = arrayOf(
+                0f to Color.Transparent,
+                0.6f to Color.Transparent,
+                1f to Color.Black.copy(alpha = alpha),
+            ),
+            center = Offset(cx, cy),
+            radius = radius * 2.2f,
+        )
+        drawRect(brush)
+    }
+}
+
+@Composable
+private fun FocusHandle(
+    focus: FocusSpot,
+    boxSize: IntSize,
+    density: androidx.compose.ui.unit.Density,
+    onMove: (Float, Float) -> Unit,
+    onDragEnd: () -> Unit,
+) {
+    Box(
+        Modifier
+            .normOffset(focus.xNorm, focus.yNorm, boxSize, density)
+            .size(32.dp)
+            .pointerInput(boxSize) {
+                detectDragGestures(onDragEnd = { onDragEnd() }) { change, dragAmount ->
+                    change.consume()
+                    if (boxSize.width > 0 && boxSize.height > 0) {
+                        onMove(
+                            (focus.xNorm + dragAmount.x / boxSize.width).coerceIn(0f, 1f),
+                            (focus.yNorm + dragAmount.y / boxSize.height).coerceIn(0f, 1f),
+                        )
+                    }
+                }
+            }
+            .border(2.dp, Color.White, CircleShape),
+    )
+}
+
+@Composable
+private fun StickerTextDialog(
+    initialText: String,
+    onConfirm: (String) -> Unit,
+    onDelete: (() -> Unit)?,
+    onDismiss: () -> Unit,
+) {
+    var text by remember { mutableStateOf(initialText) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Text sticker") },
+        text = {
+            OutlinedTextField(value = text, onValueChange = { text = it }, label = { Text("Text") })
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(text) }) { Text("Done") }
+        },
+        dismissButton = {
+            Row {
+                if (onDelete != null) {
+                    IconButton(onClick = onDelete) { Icon(Icons.Filled.Close, contentDescription = "Remove") }
+                }
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
+        },
+    )
+}
+
+private fun buildColorMatrix(state: EditState): android.graphics.ColorMatrix {
     val result = android.graphics.ColorMatrix()
-    result.postConcat(android.graphics.ColorMatrix().apply { setSaturation(1f + saturation / 100f) })
-    val contrastScale = 1f + contrast / 100f
-    val brightnessOffset = brightness / 100f * 255f
+    result.postConcat(android.graphics.ColorMatrix().apply { setSaturation(1f + state.saturation / 100f) })
+    val contrastScale = 1f + state.contrast / 100f
+    val brightnessOffset = state.brightness / 100f * 255f
+    // Highlights/shadows are approximated as gentle overall brightness nudges rather than a true
+    // tone curve (which needs per-pixel processing, not a single linear matrix) -- reasonable for a
+    // quick preview, but not a substitute for a real levels/curves tool.
+    val toneOffset = (state.highlights + state.shadows) / 100f * 40f
+    val warmR = state.warmth / 100f * 25f
+    val warmB = -state.warmth / 100f * 25f
     result.postConcat(
         android.graphics.ColorMatrix(
             floatArrayOf(
-                contrastScale, 0f, 0f, 0f, brightnessOffset,
-                0f, contrastScale, 0f, 0f, brightnessOffset,
-                0f, 0f, contrastScale, 0f, brightnessOffset,
+                contrastScale, 0f, 0f, 0f, brightnessOffset + toneOffset + warmR,
+                0f, contrastScale, 0f, 0f, brightnessOffset + toneOffset,
+                0f, 0f, contrastScale, 0f, brightnessOffset + toneOffset + warmB,
                 0f, 0f, 0f, 1f, 0f,
             ),
         ),
     )
-    filterMatrixOrNull(filter)?.let { result.postConcat(it) }
+    filterMatrixOrNull(state.filter)?.let { result.postConcat(it) }
     return result
 }
 
@@ -350,6 +845,36 @@ private fun filterMatrixOrNull(filter: PhotoFilter): android.graphics.ColorMatri
             0f, 0f, 0f, 1f, 0f,
         ),
     )
+    PhotoFilter.VIVID -> android.graphics.ColorMatrix().apply { setSaturation(1.5f) }
+    PhotoFilter.FADE -> android.graphics.ColorMatrix(
+        floatArrayOf(
+            0.9f, 0f, 0f, 0f, 25f,
+            0f, 0.9f, 0f, 0f, 25f,
+            0f, 0f, 0.9f, 0f, 25f,
+            0f, 0f, 0f, 1f, 0f,
+        ),
+    )
+    PhotoFilter.NOIR -> android.graphics.ColorMatrix().apply {
+        setSaturation(0f)
+        postConcat(
+            android.graphics.ColorMatrix(
+                floatArrayOf(
+                    1.3f, 0f, 0f, 0f, -25f,
+                    0f, 1.3f, 0f, 0f, -25f,
+                    0f, 0f, 1.3f, 0f, -25f,
+                    0f, 0f, 0f, 1f, 0f,
+                ),
+            ),
+        )
+    }
+    PhotoFilter.VINTAGE -> android.graphics.ColorMatrix(
+        floatArrayOf(
+            0.6f, 0.3f, 0.1f, 0f, 15f,
+            0.2f, 0.65f, 0.15f, 0f, 10f,
+            0.15f, 0.25f, 0.5f, 0f, 5f,
+            0f, 0f, 0f, 1f, 0f,
+        ),
+    )
 }
 
 private fun rotateBitmap90(bitmap: Bitmap): Bitmap {
@@ -372,23 +897,54 @@ private suspend fun loadDownsampledBitmap(context: Context, uri: Uri, maxDimensi
         resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, decodeOptions) }
     }
 
+private fun cropRectFor(bitmapW: Int, bitmapH: Int, rect: NormRect): Rect {
+    val left = (rect.left * bitmapW).roundToInt().coerceIn(0, bitmapW - 1)
+    val top = (rect.top * bitmapH).roundToInt().coerceIn(0, bitmapH - 1)
+    val right = (rect.right * bitmapW).roundToInt().coerceIn(left + 1, bitmapW)
+    val bottom = (rect.bottom * bitmapH).roundToInt().coerceIn(top + 1, bitmapH)
+    return Rect(left, top, right, bottom)
+}
+
 private suspend fun saveEditedPhoto(
     context: Context,
     bitmap: Bitmap,
-    cropRect: Rect?,
-    colorMatrix: android.graphics.ColorMatrix,
+    state: EditState,
     original: MediaItem,
     replace: Boolean,
 ) = withContext(Dispatchers.IO) {
-    val cropped = if (cropRect != null) {
-        Bitmap.createBitmap(bitmap, cropRect.left, cropRect.top, cropRect.width(), cropRect.height())
-    } else {
-        bitmap
-    }
+    val cropRect = cropRectFor(bitmap.width, bitmap.height, state.cropRect)
+    val cropped = Bitmap.createBitmap(bitmap, cropRect.left, cropRect.top, cropRect.width(), cropRect.height())
+
     val output = Bitmap.createBitmap(cropped.width, cropped.height, Bitmap.Config.ARGB_8888)
     val canvas = android.graphics.Canvas(output)
-    val paint = Paint().apply { colorFilter = android.graphics.ColorMatrixColorFilter(colorMatrix) }
+    val paint = Paint().apply { colorFilter = android.graphics.ColorMatrixColorFilter(buildColorMatrix(state)) }
     canvas.drawBitmap(cropped, 0f, 0f, paint)
+
+    if (state.focus.strength > 0f) {
+        val cx = (state.focus.xNorm - state.cropRect.left) / (state.cropRect.right - state.cropRect.left) * output.width
+        val cy = (state.focus.yNorm - state.cropRect.top) / (state.cropRect.bottom - state.cropRect.top) * output.height
+        val radius = state.focus.radiusNorm * min(output.width, output.height)
+        val alpha = ((state.focus.strength / 100f).coerceIn(0f, 1f) * 0.7f * 255).toInt()
+        val shader = android.graphics.RadialGradient(
+            cx, cy, radius * 2.2f,
+            intArrayOf(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT, android.graphics.Color.argb(alpha, 0, 0, 0)),
+            floatArrayOf(0f, 0.6f, 1f),
+            android.graphics.Shader.TileMode.CLAMP,
+        )
+        canvas.drawRect(0f, 0f, output.width.toFloat(), output.height.toFloat(), Paint().apply { this.shader = shader })
+    }
+
+    if (state.stickers.isNotEmpty()) {
+        val textPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = output.width / 18f
+        }
+        for (sticker in state.stickers) {
+            val relX = (sticker.xNorm - state.cropRect.left) / (state.cropRect.right - state.cropRect.left)
+            val relY = (sticker.yNorm - state.cropRect.top) / (state.cropRect.bottom - state.cropRect.top)
+            textPaint.color = sticker.colorArgb.toInt()
+            canvas.drawText(sticker.text, relX * output.width, relY * output.height, textPaint)
+        }
+    }
 
     val resolver = context.contentResolver
     val baseName = original.displayName.substringBeforeLast('.', original.displayName)
