@@ -43,8 +43,8 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
             <!-- Catches the browser redirect after OneDrive sign-in (see OneDriveAuthManager).
-                 Registered in Azure as a "Mobile and desktop applications" redirect URI --
-                 that platform type accepts a plain custom scheme with no signing-key hash. -->
+                 Registered in Azure as a "Mobile and desktop applications" redirect URI,
+                 which accepts a plain custom scheme with no signing-key hash. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
