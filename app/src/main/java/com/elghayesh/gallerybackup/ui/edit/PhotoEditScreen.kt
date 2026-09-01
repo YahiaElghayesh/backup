@@ -16,6 +16,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -31,26 +32,30 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Crop
+import androidx.compose.material.icons.filled.FilterVintage
 import androidx.compose.material.icons.filled.Redo
 import androidx.compose.material.icons.filled.RotateRight
+import androidx.compose.material.icons.filled.TextFields
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Undo
+import androidx.compose.material.icons.outlined.Lens
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -58,19 +63,23 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -79,6 +88,7 @@ import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -103,12 +113,12 @@ private enum class PhotoFilter(val label: String) {
     INVERT("Invert"),
 }
 
-private enum class EditTab(val label: String) {
-    TRANSFORM("Transform"),
-    FILTER("Filter"),
-    ADJUST("Adjust"),
-    FOCUS("Focus"),
-    STICKER("Sticker"),
+private enum class EditTab(val label: String, val icon: ImageVector) {
+    TRANSFORM("Transform", Icons.Filled.Crop),
+    FILTER("Filter", Icons.Filled.FilterVintage),
+    ADJUST("Adjust", Icons.Filled.Tune),
+    FOCUS("Focus", Icons.Outlined.Lens),
+    STICKER("Sticker", Icons.Filled.TextFields),
 }
 
 /** A crop rectangle normalized to 0..1 of the working bitmap's current width/height. */
@@ -174,6 +184,9 @@ fun PhotoEditScreen(
     var boxSize by remember { mutableStateOf(IntSize.Zero) }
     var editingStickerId by remember { mutableStateOf<Long?>(null) }
     var nextStickerId by remember { mutableStateOf(1L) }
+    var showOriginal by remember { mutableStateOf(false) }
+    var adjustParamIndex by remember { mutableStateOf(0) }
+    var focusParamIndex by remember { mutableStateOf(0) }
 
     fun commit(newState: EditState) {
         undoStack.add(current)
@@ -281,55 +294,200 @@ fun PhotoEditScreen(
         )
     }
 
+    val panelBg = Color(0xFF1C1C1C)
+
     Scaffold(
+        containerColor = Color.Black,
         topBar = {
             TopAppBar(
-                title = { Text("Edit photo") },
+                title = {},
                 navigationIcon = {
                     IconButton(onClick = onDone) {
-                        Icon(Icons.Filled.ArrowBack, contentDescription = "Cancel")
+                        Icon(Icons.Filled.Close, contentDescription = "Cancel", tint = Color.White)
                     }
                 },
                 actions = {
                     IconButton(enabled = undoStack.isNotEmpty(), onClick = { undo() }) {
-                        Icon(Icons.Filled.Undo, contentDescription = "Undo")
+                        Icon(
+                            Icons.Filled.Undo,
+                            contentDescription = "Undo",
+                            tint = if (undoStack.isNotEmpty()) Color.White else Color.White.copy(alpha = 0.3f),
+                        )
                     }
                     IconButton(enabled = redoStack.isNotEmpty(), onClick = { redo() }) {
-                        Icon(Icons.Filled.Redo, contentDescription = "Redo")
+                        Icon(
+                            Icons.Filled.Redo,
+                            contentDescription = "Redo",
+                            tint = if (redoStack.isNotEmpty()) Color.White else Color.White.copy(alpha = 0.3f),
+                        )
                     }
                     TextButton(
                         enabled = workingBitmap != null && !isSaving,
                         onClick = { showSaveChoiceDialog = true },
                     ) {
-                        Text("Save")
+                        Text("Save", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
                     }
                 },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Black),
             )
         },
-    ) { padding ->
-        Column(Modifier.padding(padding).fillMaxSize()) {
-            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                val bitmap = workingBitmap
-                when {
-                    isLoading -> CircularProgressIndicator()
-                    bitmap == null -> Text("Couldn't load this photo.")
-                    else -> {
-                        val composeMatrix = buildColorMatrix(current)
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .aspectRatio(bitmap.width.toFloat() / bitmap.height.toFloat())
-                                .onSizeChanged { boxSize = it },
+        bottomBar = {
+            Column(Modifier.background(Color.Black)) {
+                when (tab) {
+                    EditTab.TRANSFORM -> Column(Modifier.background(panelBg).padding(vertical = 8.dp)) {
+                        Row(
+                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Image(
-                                bitmap = bitmap.asImageBitmap(),
-                                contentDescription = item.displayName,
-                                contentScale = ContentScale.Fit,
-                                colorFilter = ColorFilter.colorMatrix(
-                                    androidx.compose.ui.graphics.ColorMatrix(composeMatrix.array),
-                                ),
-                                modifier = Modifier.fillMaxSize(),
+                            IconButton(
+                                enabled = workingBitmap != null,
+                                onClick = {
+                                    val bitmap = workingBitmap ?: return@IconButton
+                                    workingBitmap = rotateBitmap90(bitmap)
+                                    // A crop/sticker layout from before the rotation no longer lines up
+                                    // with the new orientation, so this starts a fresh layout on it.
+                                    commit(EditState())
+                                },
+                            ) {
+                                Icon(Icons.Filled.RotateRight, contentDescription = "Rotate", tint = Color.White)
+                            }
+                            CropAspect.entries.forEach { a ->
+                                DarkPill(
+                                    label = a.label,
+                                    selected = current.cropAspect == a,
+                                    onClick = {
+                                        val bitmap = workingBitmap
+                                        val rect = if (a == CropAspect.FREE || bitmap == null) {
+                                            NormRect.FULL
+                                        } else {
+                                            applyAspectLock(current.cropRect, a.ratio, bitmap.width, bitmap.height)
+                                        }
+                                        commit(current.copy(cropAspect = a, cropRect = rect))
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    EditTab.FILTER -> Row(
+                        Modifier.background(panelBg).fillMaxWidth().horizontalScroll(rememberScrollState())
+                            .padding(horizontal = 12.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        PhotoFilter.entries.forEach { f ->
+                            DarkPill(label = f.label, selected = current.filter == f, onClick = { commit(current.copy(filter = f)) })
+                        }
+                    }
+                    EditTab.ADJUST -> GestureAdjustPanel(
+                        background = panelBg,
+                        labels = listOf("Brightness", "Contrast", "Saturation", "Warmth", "Highlights", "Shadows"),
+                        values = listOf(
+                            current.brightness, current.contrast, current.saturation,
+                            current.warmth, current.highlights, current.shadows,
+                        ),
+                        ranges = List(6) { -100f..100f },
+                        selectedIndex = adjustParamIndex,
+                        onSelect = { adjustParamIndex = it },
+                        onChange = { index, value ->
+                            mutateLive(
+                                when (index) {
+                                    0 -> current.copy(brightness = value)
+                                    1 -> current.copy(contrast = value)
+                                    2 -> current.copy(saturation = value)
+                                    3 -> current.copy(warmth = value)
+                                    4 -> current.copy(highlights = value)
+                                    else -> current.copy(shadows = value)
+                                },
                             )
+                        },
+                        onChangeFinished = { endLiveMutation() },
+                    )
+                    EditTab.FOCUS -> Column {
+                        Text(
+                            "Drag the circle on the photo to move the spotlight once strength is above zero.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.6f),
+                            modifier = Modifier.background(panelBg).fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                        )
+                        GestureAdjustPanel(
+                            background = panelBg,
+                            labels = listOf("Strength", "Spotlight size"),
+                            values = listOf(current.focus.strength, current.focus.radiusNorm * 100f),
+                            ranges = listOf(0f..100f, 10f..80f),
+                            selectedIndex = focusParamIndex,
+                            onSelect = { focusParamIndex = it },
+                            onChange = { index, value ->
+                                mutateLive(
+                                    if (index == 0) {
+                                        current.copy(focus = current.focus.copy(strength = value.coerceIn(0f, 100f)))
+                                    } else {
+                                        current.copy(focus = current.focus.copy(radiusNorm = (value / 100f).coerceIn(0.1f, 0.8f)))
+                                    },
+                                )
+                            },
+                            onChangeFinished = { endLiveMutation() },
+                        )
+                    }
+                    EditTab.STICKER -> Column(Modifier.background(panelBg).fillMaxWidth().padding(16.dp)) {
+                        TextButton(onClick = { editingStickerId = nextStickerId; nextStickerId += 1 }) {
+                            Icon(Icons.Filled.Add, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(4.dp))
+                            Text("Add text", color = MaterialTheme.colorScheme.primary)
+                        }
+                        Text(
+                            "Drag a sticker to move it, or tap it to edit or remove it.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.6f),
+                        )
+                    }
+                }
+                Row(
+                    Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                ) {
+                    EditTab.entries.forEach { t ->
+                        ToolDockButton(tab = t, selected = tab == t, onClick = { tab = t })
+                    }
+                }
+            }
+        },
+    ) { padding ->
+        Box(Modifier.padding(padding).fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+            val bitmap = workingBitmap
+            when {
+                isLoading -> CircularProgressIndicator(color = Color.White)
+                bitmap == null -> Text("Couldn't load this photo.", color = Color.White)
+                else -> {
+                    val composeMatrix = buildColorMatrix(current)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(bitmap.width.toFloat() / bitmap.height.toFloat())
+                            .onSizeChanged { boxSize = it }
+                            // Press and hold anywhere on the photo to instantly preview the untouched
+                            // original -- release to go back to the edited version.
+                            .pointerInput(Unit) {
+                                detectTapGestures(
+                                    onPress = {
+                                        showOriginal = true
+                                        tryAwaitRelease()
+                                        showOriginal = false
+                                    },
+                                )
+                            },
+                    ) {
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = item.displayName,
+                            contentScale = ContentScale.Fit,
+                            colorFilter = if (showOriginal) {
+                                null
+                            } else {
+                                ColorFilter.colorMatrix(androidx.compose.ui.graphics.ColorMatrix(composeMatrix.array))
+                            },
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                        if (!showOriginal) {
                             if (current.focus.strength > 0f) {
                                 FocusOverlay(current.focus)
                             }
@@ -400,145 +558,133 @@ fun PhotoEditScreen(
                     }
                 }
             }
+        }
+    }
+}
 
-            Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                EditTab.entries.forEach { t ->
-                    FilterChip(selected = tab == t, onClick = { tab = t }, label = { Text(t.label) })
+@Composable
+private fun ToolDockButton(tab: EditTab, selected: Boolean, onClick: () -> Unit) {
+    val tint = if (selected) Color.White else Color.White.copy(alpha = 0.5f)
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 4.dp),
+    ) {
+        Icon(tab.icon, contentDescription = tab.label, tint = tint, modifier = Modifier.size(22.dp))
+        Spacer(Modifier.height(2.dp))
+        Text(tab.label, color = tint, style = MaterialTheme.typography.labelSmall)
+        if (selected) {
+            Spacer(Modifier.height(2.dp))
+            Box(Modifier.size(width = 16.dp, height = 2.dp).background(MaterialTheme.colorScheme.primary))
+        }
+    }
+}
+
+@Composable
+private fun DarkPill(label: String, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(if (selected) Color.White else Color.White.copy(alpha = 0.12f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+    ) {
+        Text(
+            label,
+            color = if (selected) Color.Black else Color.White,
+            style = MaterialTheme.typography.labelLarge,
+        )
+    }
+}
+
+/**
+ * The Snapseed-style fine-tune control: no visible slider bar over the photo. Swipe vertically to
+ * pick which parameter you're adjusting (shown as a row of dots), swipe horizontally to change its
+ * value, read the live number in the middle. The gesture commits to whichever direction the first
+ * few pixels of movement suggest and stays in that mode for the rest of the drag, so a slightly
+ * diagonal swipe doesn't flicker between switching parameters and changing a value.
+ */
+@Composable
+private fun GestureAdjustPanel(
+    background: Color,
+    labels: List<String>,
+    values: List<Float>,
+    ranges: List<ClosedFloatingPointRange<Float>>,
+    selectedIndex: Int,
+    onSelect: (Int) -> Unit,
+    onChange: (index: Int, value: Float) -> Unit,
+    onChangeFinished: () -> Unit,
+) {
+    var panelWidthPx by remember { mutableStateOf(1f) }
+    val label = labels.getOrElse(selectedIndex) { "" }
+    val value = values.getOrElse(selectedIndex) { 0f }
+    // pointerInput below is keyed only on (selectedIndex, labels.size), not on `values` itself --
+    // restarting it on every value tick would abort an in-progress drag. That means its coroutine
+    // can outlive several recompositions, so `values` must be read through rememberUpdatedState:
+    // otherwise a second drag on the same parameter (no index switch in between) would compute its
+    // starting point from whatever `values` was when the coroutine last (re)launched, not the value
+    // the first drag actually left it at.
+    val latestValues = rememberUpdatedState(values)
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(background)
+            .onSizeChanged { panelWidthPx = it.width.toFloat().coerceAtLeast(1f) }
+            .pointerInput(selectedIndex, labels.size) {
+                var mode = 0 // 0 = undecided, 1 = switching parameter, 2 = changing its value
+                var accDx = 0f
+                var accDy = 0f
+                var startValue = 0f
+                detectDragGestures(
+                    onDragStart = {
+                        mode = 0
+                        accDx = 0f
+                        accDy = 0f
+                        startValue = latestValues.value.getOrElse(selectedIndex) { 0f }
+                    },
+                    onDragEnd = {
+                        if (mode == 1) {
+                            if (accDy < -32f && selectedIndex > 0) onSelect(selectedIndex - 1)
+                            else if (accDy > 32f && selectedIndex < labels.lastIndex) onSelect(selectedIndex + 1)
+                        } else if (mode == 2) {
+                            onChangeFinished()
+                        }
+                    },
+                    onDragCancel = { if (mode == 2) onChangeFinished() },
+                ) { change, dragAmount ->
+                    change.consume()
+                    accDx += dragAmount.x
+                    accDy += dragAmount.y
+                    if (mode == 0 && (abs(accDx) > 12f || abs(accDy) > 12f)) {
+                        mode = if (abs(accDx) > abs(accDy)) 2 else 1
+                    }
+                    if (mode == 2) {
+                        val range = ranges.getOrElse(selectedIndex) { -100f..100f }
+                        val span = range.endInclusive - range.start
+                        val delta = accDx / panelWidthPx * span
+                        onChange(selectedIndex, (startValue + delta).coerceIn(range.start, range.endInclusive))
+                    }
                 }
             }
-
-            when (tab) {
-                EditTab.TRANSFORM -> Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
-                    Row(
-                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        CropAspect.entries.forEach { a ->
-                            FilterChip(
-                                selected = current.cropAspect == a,
-                                onClick = {
-                                    val bitmap = workingBitmap
-                                    val rect = if (a == CropAspect.FREE || bitmap == null) {
-                                        NormRect.FULL
-                                    } else {
-                                        applyAspectLock(current.cropRect, a.ratio, bitmap.width, bitmap.height)
-                                    }
-                                    commit(current.copy(cropAspect = a, cropRect = rect))
-                                },
-                                label = { Text(a.label) },
-                            )
-                        }
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    TextButton(
-                        enabled = workingBitmap != null,
-                        onClick = {
-                            val bitmap = workingBitmap ?: return@TextButton
-                            val rotated = rotateBitmap90(bitmap)
-                            workingBitmap = rotated
-                            // A crop/sticker layout from before the rotation no longer lines up with the
-                            // new orientation, so this starts a fresh layout on the rotated image.
-                            commit(EditState())
-                        },
-                    ) {
-                        Icon(Icons.Filled.RotateRight, contentDescription = null)
-                        Spacer(Modifier.width(4.dp))
-                        Text("Rotate 90°")
-                    }
-                }
-                EditTab.FILTER -> Row(
-                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    PhotoFilter.entries.forEach { f ->
-                        FilterChip(
-                            selected = current.filter == f,
-                            onClick = { commit(current.copy(filter = f)) },
-                            label = { Text(f.label) },
-                        )
-                    }
-                }
-                EditTab.ADJUST -> Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
-                    LabeledSlider(
-                        label = "Brightness",
-                        value = current.brightness,
-                        onChange = { mutateLive(current.copy(brightness = it)) },
-                        onChangeFinished = { endLiveMutation() },
-                    )
-                    LabeledSlider(
-                        label = "Contrast",
-                        value = current.contrast,
-                        onChange = { mutateLive(current.copy(contrast = it)) },
-                        onChangeFinished = { endLiveMutation() },
-                    )
-                    LabeledSlider(
-                        label = "Saturation",
-                        value = current.saturation,
-                        onChange = { mutateLive(current.copy(saturation = it)) },
-                        onChangeFinished = { endLiveMutation() },
-                    )
-                    LabeledSlider(
-                        label = "Warmth",
-                        value = current.warmth,
-                        onChange = { mutateLive(current.copy(warmth = it)) },
-                        onChangeFinished = { endLiveMutation() },
-                    )
-                    LabeledSlider(
-                        label = "Highlights",
-                        value = current.highlights,
-                        onChange = { mutateLive(current.copy(highlights = it)) },
-                        onChangeFinished = { endLiveMutation() },
-                    )
-                    LabeledSlider(
-                        label = "Shadows",
-                        value = current.shadows,
-                        onChange = { mutateLive(current.copy(shadows = it)) },
-                        onChangeFinished = { endLiveMutation() },
-                    )
-                    Spacer(Modifier.height(8.dp))
-                }
-                EditTab.FOCUS -> Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
-                    Text(
-                        "A soft spotlight that keeps one circular area sharp and darkens the rest. " +
-                            "Drag the circle on the photo to move it once strength is above zero.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    LabeledSlider(
-                        label = "Strength",
-                        value = current.focus.strength,
-                        onChange = { mutateLive(current.copy(focus = current.focus.copy(strength = it.coerceIn(0f, 100f)))) },
-                        range = 0f..100f,
-                        onChangeFinished = { endLiveMutation() },
-                    )
-                    LabeledSlider(
-                        label = "Spotlight size",
-                        value = current.focus.radiusNorm * 100f,
-                        onChange = { mutateLive(current.copy(focus = current.focus.copy(radiusNorm = (it / 100f).coerceIn(0.1f, 0.8f)))) },
-                        range = 10f..80f,
-                        onChangeFinished = { endLiveMutation() },
-                    )
-                }
-                EditTab.STICKER -> Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-                    TextButton(
-                        onClick = {
-                            editingStickerId = nextStickerId
-                            nextStickerId += 1
-                        },
-                    ) {
-                        Icon(Icons.Filled.Add, contentDescription = null)
-                        Spacer(Modifier.width(4.dp))
-                        Text("Add text")
-                    }
-                    Text(
-                        "Drag a sticker to move it, or tap it to edit or remove it.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+            .padding(vertical = 14.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(label, color = Color.White.copy(alpha = 0.8f), style = MaterialTheme.typography.labelLarge)
+        Text(
+            value.roundToInt().toString(),
+            color = Color.White,
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            labels.indices.forEach { i ->
+                Box(
+                    Modifier
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(if (i == selectedIndex) Color.White else Color.White.copy(alpha = 0.3f)),
+                )
             }
         }
     }
@@ -555,18 +701,6 @@ private fun Modifier.normOffset(
         top = with(density) { (yNorm * boxSize.height).toDp() },
     ),
 )
-
-@Composable
-private fun LabeledSlider(
-    label: String,
-    value: Float,
-    onChange: (Float) -> Unit,
-    range: ClosedFloatingPointRange<Float> = -100f..100f,
-    onChangeFinished: () -> Unit,
-) {
-    Text("$label: ${value.roundToInt()}", style = MaterialTheme.typography.bodySmall)
-    Slider(value = value, onValueChange = onChange, onValueChangeFinished = onChangeFinished, valueRange = range)
-}
 
 @Composable
 private fun CropOverlay(

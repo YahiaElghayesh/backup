@@ -55,6 +55,7 @@ class GalleryPreferencesRepository(private val context: Context) {
         val ACCENT_COLOR = stringPreferencesKey("accent_color")
         val FOLDER_SORT = stringPreferencesKey("folder_sort")
         val EXCLUDED_FOLDERS = stringSetPreferencesKey("excluded_folders")
+        val INCLUDED_FOLDERS = stringSetPreferencesKey("included_folders")
         val HIDDEN_FOLDERS = stringSetPreferencesKey("hidden_folders")
         val HIDDEN_MEDIA_IDS = stringSetPreferencesKey("hidden_media_ids")
         val SHOW_HIDDEN = booleanPreferencesKey("show_hidden")
@@ -86,6 +87,16 @@ class GalleryPreferencesRepository(private val context: Context) {
 
     val excludedFolders: Flow<Set<String>> =
         context.galleryPrefsStore.data.map { it[Keys.EXCLUDED_FOLDERS] ?: emptySet() }
+
+    /**
+     * Folders explicitly marked "show this in the gallery" from the folder explorer. Empty means
+     * "not configured yet" -- the gallery falls back to showing everything (minus [excludedFolders])
+     * so a fresh install never looks empty. The moment this has at least one entry, the gallery
+     * switches to an opt-in model: only these folders (and their subfolders, unless a subfolder is
+     * itself in [excludedFolders]) are shown.
+     */
+    val includedFolders: Flow<Set<String>> =
+        context.galleryPrefsStore.data.map { it[Keys.INCLUDED_FOLDERS] ?: emptySet() }
 
     val hiddenFolders: Flow<Set<String>> =
         context.galleryPrefsStore.data.map { it[Keys.HIDDEN_FOLDERS] ?: emptySet() }
@@ -148,6 +159,34 @@ class GalleryPreferencesRepository(private val context: Context) {
 
     suspend fun setExcludedFolders(paths: Set<String>) {
         context.galleryPrefsStore.edit { it[Keys.EXCLUDED_FOLDERS] = paths }
+    }
+
+    /**
+     * Sets exactly one folder's own visibility, recording only the minimal explicit override
+     * needed: if [visible], marks it included (and drops any of its own prior exclusion); if not,
+     * marks it excluded (and drops any of its own prior inclusion). Subfolders are unaffected here
+     * -- they keep inheriting from their nearest explicit ancestor, per [effectiveExcludedFolders].
+     */
+    suspend fun setFolderVisibility(path: String, visible: Boolean) {
+        context.galleryPrefsStore.edit { prefs ->
+            val included = prefs[Keys.INCLUDED_FOLDERS] ?: emptySet()
+            val excluded = prefs[Keys.EXCLUDED_FOLDERS] ?: emptySet()
+            if (visible) {
+                prefs[Keys.INCLUDED_FOLDERS] = included + path
+                prefs[Keys.EXCLUDED_FOLDERS] = excluded - path
+            } else {
+                prefs[Keys.INCLUDED_FOLDERS] = included - path
+                prefs[Keys.EXCLUDED_FOLDERS] = excluded + path
+            }
+        }
+    }
+
+    /** Clears every explicit include/exclude choice, back to "show everything" (the pre-explorer default). */
+    suspend fun resetFolderVisibility() {
+        context.galleryPrefsStore.edit { prefs ->
+            prefs[Keys.INCLUDED_FOLDERS] = emptySet()
+            prefs[Keys.EXCLUDED_FOLDERS] = emptySet()
+        }
     }
 
     suspend fun setHiddenFolders(paths: Set<String>) {

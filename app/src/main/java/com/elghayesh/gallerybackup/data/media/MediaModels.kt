@@ -89,6 +89,36 @@ fun FolderNode.latestModifiedSec(): Long {
 }
 
 /**
+ * Resolves [includedFolders]/[explicitlyExcluded] (the folder explorer's opt-in "show this at the
+ * root, auto-include its subfolders unless I say otherwise" choices) down into a flat excluded-set
+ * that [filtered] already knows how to consume, so the two concepts don't need two separate
+ * exclusion mechanisms downstream. If [includedFolders] is empty (the explorer has never been
+ * used), this is a no-op that returns [explicitlyExcluded] unchanged -- a fresh install shows
+ * everything rather than nothing.
+ *
+ * For every folder, the *nearest* explicit ancestor decision wins (an explicit exclude always beats
+ * an explicit include at the same folder), and anything with no explicit decision anywhere in its
+ * ancestor chain inherits whichever way its nearest ancestor went -- top-level folders with no
+ * explicit decision of their own default to hidden, since opting in is the whole point of the
+ * explorer.
+ */
+fun FolderNode.effectiveExcludedFolders(includedFolders: Set<String>, explicitlyExcluded: Set<String>): Set<String> {
+    if (includedFolders.isEmpty()) return explicitlyExcluded
+    val effective = mutableSetOf<String>()
+    fun walk(node: FolderNode, ancestorIncluded: Boolean) {
+        val visible = when {
+            node.path in explicitlyExcluded -> false
+            node.path in includedFolders -> true
+            else -> ancestorIncluded
+        }
+        if (!visible) effective.add(node.path)
+        for (child in node.children.values) walk(child, visible)
+    }
+    for (child in children.values) walk(child, false)
+    return effective
+}
+
+/**
  * Returns a copy of this tree with [excludedFolders] removed entirely, and with folders in
  * [hiddenFolders] / items in [hiddenMediaIds] removed unless [showHidden] is true. Items in
  * [trashedMediaIds] are always removed regardless of [showHidden] -- trash is a separate

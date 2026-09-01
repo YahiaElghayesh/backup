@@ -41,6 +41,7 @@ import androidx.navigation.navArgument
 import com.elghayesh.gallerybackup.data.media.findNode
 import com.elghayesh.gallerybackup.ui.edit.PhotoEditScreen
 import com.elghayesh.gallerybackup.ui.edit.VideoTrimScreen
+import com.elghayesh.gallerybackup.ui.gallery.FolderVisibilityExplorerScreen
 import com.elghayesh.gallerybackup.ui.gallery.GalleryScreen
 import com.elghayesh.gallerybackup.ui.gallery.GallerySettingsScreen
 import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
@@ -202,6 +203,13 @@ private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: Back
         }
         composable("gallerySettings") {
             GallerySettingsScreen(
+                viewModel = galleryViewModel,
+                onOpenFolderExplorer = { navController.navigate("folderExplorer") },
+                onBack = { navController.popBackStack() },
+            )
+        }
+        composable("folderExplorer") {
+            FolderVisibilityExplorerScreen(
                 viewModel = galleryViewModel,
                 onBack = { navController.popBackStack() },
             )

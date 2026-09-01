@@ -13,8 +13,8 @@ import com.elghayesh.gallerybackup.data.media.TrashManager
 import com.elghayesh.gallerybackup.data.media.TrashRepository
 import com.elghayesh.gallerybackup.data.media.allItemsRecursive
 import com.elghayesh.gallerybackup.data.media.copyMediaTo
+import com.elghayesh.gallerybackup.data.media.effectiveExcludedFolders
 import com.elghayesh.gallerybackup.data.media.filtered
-import com.elghayesh.gallerybackup.data.media.flattenAllFolders
 import com.elghayesh.gallerybackup.data.media.withVirtualFolders
 import com.elghayesh.gallerybackup.data.settings.AccentColor
 import com.elghayesh.gallerybackup.data.settings.FolderCover
@@ -83,6 +83,8 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         prefs.folderSort.stateIn(viewModelScope, SharingStarted.Eagerly, FolderSortOrder.NAME_ASC)
     val excludedFolders: StateFlow<Set<String>> =
         prefs.excludedFolders.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
+    val includedFolders: StateFlow<Set<String>> =
+        prefs.includedFolders.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
     val hiddenFolders: StateFlow<Set<String>> =
         prefs.hiddenFolders.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
     val hiddenMediaIds: StateFlow<Set<Long>> =
@@ -111,9 +113,11 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         },
         trashRepository.trashedIds,
         prefs.virtualFolders,
-    ) { inputs, trashedIds, virtualFolders ->
+        prefs.includedFolders,
+    ) { inputs, trashedIds, virtualFolders, includedFolders ->
+        val effectiveExcluded = inputs.raw?.effectiveExcludedFolders(includedFolders, inputs.excluded) ?: inputs.excluded
         inputs.raw
-            ?.filtered(inputs.excluded, inputs.hiddenFolders, inputs.hiddenMedia, inputs.showHidden, trashedIds)
+            ?.filtered(effectiveExcluded, inputs.hiddenFolders, inputs.hiddenMedia, inputs.showHidden, trashedIds)
             ?.withVirtualFolders(virtualFolders)
     }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
@@ -144,32 +148,12 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { prefs.setFolderExcluded(path, excluded) }
     fun setFolderHidden(path: String, hidden: Boolean) =
         viewModelScope.launch { prefs.setFolderHidden(path, hidden) }
+    fun setFolderVisibility(path: String, visible: Boolean) =
+        viewModelScope.launch { prefs.setFolderVisibility(path, visible) }
+    fun resetFolderVisibility() = viewModelScope.launch { prefs.resetFolderVisibility() }
     fun setMediaHidden(id: Long, hidden: Boolean) =
         viewModelScope.launch { prefs.setMediaHidden(id, hidden) }
     fun setShowHidden(show: Boolean) = viewModelScope.launch { prefs.setShowHidden(show) }
-
-    /** [includeAll] = true clears every exclusion; false excludes everything so the gallery starts empty. */
-    fun setAllFoldersExcluded(includeAll: Boolean) {
-        viewModelScope.launch {
-            if (includeAll) {
-                prefs.setExcludedFolders(emptySet())
-            } else {
-                val allPaths = _rawRoot.value?.flattenAllFolders()?.map { it.path }?.toSet() ?: emptySet()
-                prefs.setExcludedFolders(allPaths)
-            }
-        }
-    }
-
-    fun setAllFoldersHidden(hidden: Boolean) {
-        viewModelScope.launch {
-            if (!hidden) {
-                prefs.setHiddenFolders(emptySet())
-            } else {
-                val allPaths = _rawRoot.value?.flattenAllFolders()?.map { it.path }?.toSet() ?: emptySet()
-                prefs.setHiddenFolders(allPaths)
-            }
-        }
-    }
     fun setTrashRetentionDays(days: Int) = viewModelScope.launch { prefs.setTrashRetentionDays(days) }
     fun setFolderCover(path: String, cover: FolderCover?) = viewModelScope.launch { prefs.setFolderCover(path, cover) }
 
