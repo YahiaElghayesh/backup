@@ -79,69 +79,32 @@ fun FolderNode.latestModifiedSec(): Long {
 }
 
 /**
- * Resolves whether a single folder at [path] is effectively visible under the folder explorer's
- * opt-in "show this at the root, auto-include its subfolders unless I say otherwise" model: the
- * *nearest* explicit ancestor decision wins (an explicit exclude always beats an explicit include
- * at the same folder), and anything with no explicit decision anywhere in its ancestor chain
- * inherits whichever way its nearest ancestor went -- top-level folders with no explicit decision
- * of their own default to hidden, since opting in is the whole point of the explorer. Before the
- * explorer's ever been used to include anything ([includedFolders] empty), folders default to
- * shown instead -- explicit excludes still apply on top of that default, so unchecking a folder
- * works from a fresh install without needing to check another one first.
- */
-fun isFolderEffectivelyVisible(path: String, includedFolders: Set<String>, explicitlyExcluded: Set<String>): Boolean {
-    // No folder has ever been explicitly included yet -- default to showing everything (opt-out
-    // model), so a fresh install isn't empty and excluding still works. The moment includedFolders
-    // has an entry, unmarked folders default to hidden instead (opt-in model).
-    var visible = includedFolders.isEmpty()
-    var built = ""
-    for (segment in path.split("/").filter { it.isNotBlank() }) {
-        built = if (built.isEmpty()) segment else "$built/$segment"
-        visible = when {
-            built in explicitlyExcluded -> false
-            built in includedFolders -> true
-            else -> visible
-        }
-    }
-    return visible
-}
-
-/**
- * Returns a copy of this tree with invisible folders/items pruned out. A folder's own items only
- * survive if the folder itself is visible under [includedFolders]/[explicitlyExcludedFolders] (see
- * [isFolderEffectivelyVisible]), but every folder is still walked regardless of its own visibility
- * so that a folder explicitly re-included deeper down an otherwise-invisible branch (e.g. an
- * invisible "DCIM" containing an explicitly included "DCIM/Camera") still surfaces -- an invisible
- * folder is kept in the result only as a pass-through container when it has a visible descendant,
- * and dropped entirely otherwise. Folders in [hiddenFolders] / items in [hiddenMediaIds] are removed
- * unless [showHidden] is true. Items in [trashedMediaIds] are always removed regardless of
- * [showHidden] -- trash is a separate concept from hidden, with its own screen.
+ * Returns a copy of this tree with [excludedFolders] removed entirely, and with folders in
+ * [hiddenFolders] / items in [hiddenMediaIds] removed unless [showHidden] is true. Items in
+ * [trashedMediaIds] are always removed regardless of [showHidden] -- trash is a separate
+ * concept from hidden, with its own screen. This has nothing to do with which folders are
+ * *pinned to the gallery's home page* (see `GalleryPreferencesRepository.includedFolders`) --
+ * pinning only decides what additionally shows at the root; it never removes a folder from view
+ * when browsing into its real parent, so it plays no part in this recursive prune.
  */
 fun FolderNode.filtered(
-    includedFolders: Set<String>,
-    explicitlyExcludedFolders: Set<String>,
+    excludedFolders: Set<String>,
     hiddenFolders: Set<String>,
     hiddenMediaIds: Set<Long>,
     showHidden: Boolean,
     trashedMediaIds: Set<Long> = emptySet(),
 ): FolderNode {
-    val visible = isFolderEffectivelyVisible(path, includedFolders, explicitlyExcludedFolders)
     val result = FolderNode(path, name)
     for ((childName, child) in children) {
+        if (child.path in excludedFolders) continue
         if (!showHidden && child.path in hiddenFolders) continue
-        val filteredChild =
-            child.filtered(includedFolders, explicitlyExcludedFolders, hiddenFolders, hiddenMediaIds, showHidden, trashedMediaIds)
-        val childVisible = isFolderEffectivelyVisible(child.path, includedFolders, explicitlyExcludedFolders)
-        if (childVisible || filteredChild.children.isNotEmpty() || filteredChild.items.isNotEmpty()) {
-            result.children[childName] = filteredChild
-        }
+        result.children[childName] =
+            child.filtered(excludedFolders, hiddenFolders, hiddenMediaIds, showHidden, trashedMediaIds)
     }
-    if (visible) {
-        for (item in items) {
-            if (item.id in trashedMediaIds) continue
-            if (!showHidden && item.id in hiddenMediaIds) continue
-            result.items.add(item)
-        }
+    for (item in items) {
+        if (item.id in trashedMediaIds) continue
+        if (!showHidden && item.id in hiddenMediaIds) continue
+        result.items.add(item)
     }
     return result
 }

@@ -112,10 +112,9 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         },
         trashRepository.trashedIds,
         prefs.virtualFolders,
-        prefs.includedFolders,
-    ) { inputs, trashedIds, virtualFolders, includedFolders ->
+    ) { inputs, trashedIds, virtualFolders ->
         inputs.raw
-            ?.filtered(includedFolders, inputs.excluded, inputs.hiddenFolders, inputs.hiddenMedia, inputs.showHidden, trashedIds)
+            ?.filtered(inputs.excluded, inputs.hiddenFolders, inputs.hiddenMedia, inputs.showHidden, trashedIds)
             ?.withVirtualFolders(virtualFolders)
     }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
@@ -146,9 +145,9 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { prefs.setFolderExcluded(path, excluded) }
     fun setFolderHidden(path: String, hidden: Boolean) =
         viewModelScope.launch { prefs.setFolderHidden(path, hidden) }
-    fun setFolderVisibility(path: String, visible: Boolean) =
-        viewModelScope.launch { prefs.setFolderVisibility(path, visible) }
-    fun resetFolderVisibility() = viewModelScope.launch { prefs.resetFolderVisibility() }
+    fun setFolderIncluded(path: String, included: Boolean) =
+        viewModelScope.launch { prefs.setFolderIncluded(path, included) }
+    fun unhideAllFolders() = viewModelScope.launch { prefs.setHiddenFolders(emptySet()) }
     fun setMediaHidden(id: Long, hidden: Boolean) =
         viewModelScope.launch { prefs.setMediaHidden(id, hidden) }
     fun setShowHidden(show: Boolean) = viewModelScope.launch { prefs.setShowHidden(show) }

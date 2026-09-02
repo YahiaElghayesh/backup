@@ -123,13 +123,24 @@ fun GalleryScreen(
     val showHidden by viewModel.showHidden.collectAsState()
     val hiddenFolders by viewModel.hiddenFolders.collectAsState()
     val hiddenMediaIds by viewModel.hiddenMediaIds.collectAsState()
+    val includedFolders by viewModel.includedFolders.collectAsState()
     val selectedMediaIds by viewModel.selectedMediaIds.collectAsState()
     val selectedFolderPaths by viewModel.selectedFolderPaths.collectAsState()
     val folderCovers by viewModel.folderCovers.collectAsState()
     val favoriteMediaIds by viewModel.favoriteMediaIds.collectAsState()
     val node = visibleRoot?.findNode(path)
 
-    val folders = node?.let { sortedFolders(it.children.values.toList(), folderSort) } ?: emptyList()
+    // On the home page, folders pinned from the gallery-settings explorer show up as extra tiles
+    // alongside the real top-level folders, in addition to their normal place if you drill down to
+    // their real parent -- pinning is purely additive, it never hides or filters anything.
+    val ownChildren = node?.children?.values?.toList() ?: emptyList()
+    val pinnedExtras = if (path.isEmpty() && includedFolders.isNotEmpty()) {
+        val topLevelPaths = ownChildren.map { it.path }.toSet()
+        includedFolders.filter { it !in topLevelPaths }.mapNotNull { visibleRoot?.findNode(it) }
+    } else {
+        emptyList()
+    }
+    val folders = if (node != null) sortedFolders(ownChildren + pinnedExtras, folderSort) else emptyList()
     val media = node?.items?.sortedByDescending { it.dateModifiedSec } ?: emptyList()
     val selectedItems = media.filter { it.id in selectedMediaIds }
     val selectedFolderNodes = folders.filter { it.path in selectedFolderPaths }

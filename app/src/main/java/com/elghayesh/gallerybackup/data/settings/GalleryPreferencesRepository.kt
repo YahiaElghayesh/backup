@@ -89,11 +89,11 @@ class GalleryPreferencesRepository(private val context: Context) {
         context.galleryPrefsStore.data.map { it[Keys.EXCLUDED_FOLDERS] ?: emptySet() }
 
     /**
-     * Folders explicitly marked "show this in the gallery" from the folder explorer. Empty means
-     * "not configured yet" -- the gallery falls back to showing everything (minus [excludedFolders])
-     * so a fresh install never looks empty. The moment this has at least one entry, the gallery
-     * switches to an opt-in model: only these folders (and their subfolders, unless a subfolder is
-     * itself in [excludedFolders]) are shown.
+     * Folders pinned to the gallery's home page from the folder explorer. Purely additive and
+     * flat -- each entry shows up as its own tile at the gallery root (with its full real
+     * contents, unfiltered by this set), on top of whatever's already there. Pinning a subfolder
+     * doesn't affect its parent's own pin state or vice versa; browsing into a folder normally
+     * (whether reached via a pin or by drilling down for real) always shows everything inside it.
      */
     val includedFolders: Flow<Set<String>> =
         context.galleryPrefsStore.data.map { it[Keys.INCLUDED_FOLDERS] ?: emptySet() }
@@ -161,32 +161,11 @@ class GalleryPreferencesRepository(private val context: Context) {
         context.galleryPrefsStore.edit { it[Keys.EXCLUDED_FOLDERS] = paths }
     }
 
-    /**
-     * Sets exactly one folder's own visibility, recording only the minimal explicit override
-     * needed: if [visible], marks it included (and drops any of its own prior exclusion); if not,
-     * marks it excluded (and drops any of its own prior inclusion). Subfolders are unaffected here
-     * -- they keep inheriting from their nearest explicit ancestor (see
-     * `FolderNode.filtered`/`isFolderEffectivelyVisible` in `data.media.MediaModels`).
-     */
-    suspend fun setFolderVisibility(path: String, visible: Boolean) {
+    /** Pins or unpins a single folder to the gallery's home page. See [includedFolders]. */
+    suspend fun setFolderIncluded(path: String, included: Boolean) {
         context.galleryPrefsStore.edit { prefs ->
-            val included = prefs[Keys.INCLUDED_FOLDERS] ?: emptySet()
-            val excluded = prefs[Keys.EXCLUDED_FOLDERS] ?: emptySet()
-            if (visible) {
-                prefs[Keys.INCLUDED_FOLDERS] = included + path
-                prefs[Keys.EXCLUDED_FOLDERS] = excluded - path
-            } else {
-                prefs[Keys.INCLUDED_FOLDERS] = included - path
-                prefs[Keys.EXCLUDED_FOLDERS] = excluded + path
-            }
-        }
-    }
-
-    /** Clears every explicit include/exclude choice, back to "show everything" (the pre-explorer default). */
-    suspend fun resetFolderVisibility() {
-        context.galleryPrefsStore.edit { prefs ->
-            prefs[Keys.INCLUDED_FOLDERS] = emptySet()
-            prefs[Keys.EXCLUDED_FOLDERS] = emptySet()
+            val current = prefs[Keys.INCLUDED_FOLDERS] ?: emptySet()
+            prefs[Keys.INCLUDED_FOLDERS] = if (included) current + path else current - path
         }
     }
 

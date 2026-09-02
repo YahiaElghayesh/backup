@@ -123,8 +123,8 @@ fun GallerySettingsScreen(
                     Column(Modifier.weight(1f)) {
                         Text("Choose gallery folders", style = MaterialTheme.typography.titleMedium)
                         Text(
-                            "Pick which folders show in the gallery, file-explorer style -- checking a " +
-                                "folder includes its subfolders automatically, unless you uncheck one specifically.",
+                            "Pin folders to the gallery's home page, or hide folders entirely -- " +
+                                "file-explorer style, with a separate checkbox for each.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
