@@ -49,8 +49,12 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
         run: |
           TAG="mediahub-${{ github.run_number }}"
+          # gh's "file#label" syntax only sets a cosmetic display label, not the actual asset
+          # filename the download URL and the GitHub API's asset "name" field use -- rename the
+          # file for real so the app's UpdateChecker can match on a stable, app-specific name.
+          cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/mediahub.apk
           gh release create "$TAG" \
-            "app/build/outputs/apk/debug/app-debug.apk#mediahub.apk" \
+            app/build/outputs/apk/debug/mediahub.apk \
             --repo "YahiaElghayesh/app-releases" \
             --title "MediaHub build ${{ github.run_number }}" \
             --notes "Automated MediaHub build from commit ${{ github.sha }} (yahiaelghayesh/backup, branch ${{ github.ref_name }}). The in-app updater checks this release."
