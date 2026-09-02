@@ -50,7 +50,10 @@ class GalleryPreferencesRepository(private val context: Context) {
 
     private object Keys {
         val VIEW_TYPE = stringPreferencesKey("view_type")
-        val GRID_COLUMNS = intPreferencesKey("grid_columns")
+        /** Column count for folder tiles. Key name kept as "grid_columns" for compatibility with
+         * installs from before folder and media tile sizes were split into separate settings. */
+        val FOLDER_GRID_COLUMNS = intPreferencesKey("grid_columns")
+        val MEDIA_GRID_COLUMNS = intPreferencesKey("media_grid_columns")
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val ACCENT_COLOR = stringPreferencesKey("accent_color")
         val FOLDER_SORT = stringPreferencesKey("folder_sort")
@@ -69,8 +72,14 @@ class GalleryPreferencesRepository(private val context: Context) {
         prefs[Keys.VIEW_TYPE]?.let { runCatching { ViewType.valueOf(it) }.getOrNull() } ?: ViewType.GRID
     }
 
-    val gridColumns: Flow<Int> = context.galleryPrefsStore.data.map { prefs ->
-        (prefs[Keys.GRID_COLUMNS] ?: 3).coerceIn(2, 5)
+    /** How many folder tiles sit across the gallery's width -- independent of [mediaGridColumns]. */
+    val folderGridColumns: Flow<Int> = context.galleryPrefsStore.data.map { prefs ->
+        (prefs[Keys.FOLDER_GRID_COLUMNS] ?: 3).coerceIn(2, 6)
+    }
+
+    /** How many photo/video tiles sit across the gallery's width -- independent of [folderGridColumns]. */
+    val mediaGridColumns: Flow<Int> = context.galleryPrefsStore.data.map { prefs ->
+        (prefs[Keys.MEDIA_GRID_COLUMNS] ?: 3).coerceIn(2, 6)
     }
 
     val themeMode: Flow<ThemeMode> = context.galleryPrefsStore.data.map { prefs ->
@@ -134,8 +143,12 @@ class GalleryPreferencesRepository(private val context: Context) {
         context.galleryPrefsStore.edit { it[Keys.VIEW_TYPE] = type.name }
     }
 
-    suspend fun setGridColumns(columns: Int) {
-        context.galleryPrefsStore.edit { it[Keys.GRID_COLUMNS] = columns.coerceIn(2, 5) }
+    suspend fun setFolderGridColumns(columns: Int) {
+        context.galleryPrefsStore.edit { it[Keys.FOLDER_GRID_COLUMNS] = columns.coerceIn(2, 6) }
+    }
+
+    suspend fun setMediaGridColumns(columns: Int) {
+        context.galleryPrefsStore.edit { it[Keys.MEDIA_GRID_COLUMNS] = columns.coerceIn(2, 6) }
     }
 
     suspend fun setThemeMode(mode: ThemeMode) {

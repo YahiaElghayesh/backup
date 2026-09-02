@@ -21,6 +21,7 @@ import com.elghayesh.gallerybackup.data.settings.FolderSortOrder
 import com.elghayesh.gallerybackup.data.settings.GalleryPreferencesRepository
 import com.elghayesh.gallerybackup.data.settings.ThemeMode
 import com.elghayesh.gallerybackup.data.settings.ViewType
+import com.elghayesh.gallerybackup.sync.MediaChangeSignal
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,6 +29,9 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -71,8 +75,10 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
 
     val viewType: StateFlow<ViewType> =
         prefs.viewType.stateIn(viewModelScope, SharingStarted.Eagerly, ViewType.GRID)
-    val gridColumns: StateFlow<Int> =
-        prefs.gridColumns.stateIn(viewModelScope, SharingStarted.Eagerly, 3)
+    val folderGridColumns: StateFlow<Int> =
+        prefs.folderGridColumns.stateIn(viewModelScope, SharingStarted.Eagerly, 3)
+    val mediaGridColumns: StateFlow<Int> =
+        prefs.mediaGridColumns.stateIn(viewModelScope, SharingStarted.Eagerly, 3)
     val themeMode: StateFlow<ThemeMode> =
         prefs.themeMode.stateIn(viewModelScope, SharingStarted.Eagerly, ThemeMode.SYSTEM)
     val accentColor: StateFlow<AccentColor> =
@@ -119,6 +125,18 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         raw?.allItemsRecursive()?.filter { it.id in entries.keys } ?: emptyList()
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
+    init {
+        // MediaChangeObserver fires once per changed row, which can be many times in a row for a
+        // burst (e.g. an app writing several photos back to back) -- debounce so a burst settles
+        // into a single rescan instead of one per row. This is the "refresh automatically" half of
+        // keeping the gallery in sync with the device; [refresh] itself is the "refresh faster on
+        // demand" half, wired to pull-to-refresh and the "Rescan device" menu item.
+        MediaChangeSignal.changes
+            .debounce(1500)
+            .onEach { refresh() }
+            .launchIn(viewModelScope)
+    }
+
     fun loadIfNeeded() {
         if (_rawRoot.value != null || _isLoading.value) return
         refresh()
@@ -133,7 +151,8 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun setViewType(type: ViewType) = viewModelScope.launch { prefs.setViewType(type) }
-    fun setGridColumns(columns: Int) = viewModelScope.launch { prefs.setGridColumns(columns) }
+    fun setFolderGridColumns(columns: Int) = viewModelScope.launch { prefs.setFolderGridColumns(columns) }
+    fun setMediaGridColumns(columns: Int) = viewModelScope.launch { prefs.setMediaGridColumns(columns) }
     fun setThemeMode(mode: ThemeMode) = viewModelScope.launch { prefs.setThemeMode(mode) }
     fun setAccentColor(color: AccentColor) = viewModelScope.launch { prefs.setAccentColor(color) }
     fun setFolderSort(order: FolderSortOrder) = viewModelScope.launch { prefs.setFolderSort(order) }

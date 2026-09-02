@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
@@ -51,6 +52,7 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -100,6 +102,9 @@ import java.util.concurrent.TimeUnit
 
 private enum class FolderTransferMode { MOVE, COPY }
 
+/** LCM of the column counts 2..6 the folder/media size settings allow, so both always divide evenly. */
+private const val GRID_SPAN_UNITS = 60
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun GalleryScreen(
@@ -121,7 +126,8 @@ fun GalleryScreen(
     val visibleRoot by viewModel.visibleRoot.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     val viewType by viewModel.viewType.collectAsState()
-    val gridColumns by viewModel.gridColumns.collectAsState()
+    val folderGridColumns by viewModel.folderGridColumns.collectAsState()
+    val mediaGridColumns by viewModel.mediaGridColumns.collectAsState()
     val folderSort by viewModel.folderSort.collectAsState()
     val showHidden by viewModel.showHidden.collectAsState()
     val hiddenFolders by viewModel.hiddenFolders.collectAsState()
@@ -352,7 +358,13 @@ fun GalleryScreen(
             }
         },
     ) { padding ->
-        Box(Modifier.padding(padding).fillMaxSize()) {
+        // Pull-to-refresh is the "faster, on demand" rescan the user can trigger manually; automatic
+        // rescans on device media changes are debounced in GalleryViewModel's init block.
+        PullToRefreshBox(
+            isRefreshing = isLoading,
+            onRefresh = { viewModel.refresh() },
+            modifier = Modifier.padding(padding).fillMaxSize(),
+        ) {
             when {
                 isLoading && visibleRoot == null -> {
                     CircularProgressIndicator(Modifier.align(Alignment.Center))
@@ -424,14 +436,21 @@ fun GalleryScreen(
                         ) {
                             LazyVerticalGrid(
                                 state = gridState,
-                                columns = GridCells.Fixed(gridColumns),
+                                // A single, shared column-track count that folder and media tiles each span a
+                                // different number of, so the two can have independent apparent column counts
+                                // (GRID_SPAN_UNITS is divisible by every column count 2..6) within one grid.
+                                columns = GridCells.Fixed(GRID_SPAN_UNITS),
                                 contentPadding = PaddingValues(4.dp),
                                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                                 verticalArrangement = Arrangement.spacedBy(4.dp),
                                 userScrollEnabled = !isDragSelecting,
                                 modifier = Modifier.fillMaxSize(),
                             ) {
-                                gridItems(folders, key = { "folder:${it.path}" }) { folder ->
+                                gridItems(
+                                    folders,
+                                    key = { "folder:${it.path}" },
+                                    span = { GridItemSpan(GRID_SPAN_UNITS / folderGridColumns) },
+                                ) { folder ->
                                     FolderGridTile(
                                         folder = folder,
                                         isHidden = folder.path in hiddenFolders,
@@ -440,7 +459,11 @@ fun GalleryScreen(
                                         includedFolders = includedFolders,
                                     )
                                 }
-                                gridItemsIndexed(media, key = { _, item -> "media:${item.id}" }) { _, item ->
+                                gridItemsIndexed(
+                                    media,
+                                    key = { _, item -> "media:${item.id}" },
+                                    span = { _, _ -> GridItemSpan(GRID_SPAN_UNITS / mediaGridColumns) },
+                                ) { _, item ->
                                     MediaGridTile(
                                         item = item,
                                         isHidden = item.id in hiddenMediaIds,

@@ -48,7 +48,8 @@ fun GallerySettingsScreen(
 ) {
     val themeMode by viewModel.themeMode.collectAsState()
     val accentColor by viewModel.accentColor.collectAsState()
-    val gridColumns by viewModel.gridColumns.collectAsState()
+    val folderGridColumns by viewModel.folderGridColumns.collectAsState()
+    val mediaGridColumns by viewModel.mediaGridColumns.collectAsState()
 
     Scaffold(
         topBar = {
@@ -101,12 +102,20 @@ fun GallerySettingsScreen(
 
             item {
                 Column(Modifier.padding(16.dp)) {
-                    Text("Grid columns: $gridColumns", style = MaterialTheme.typography.titleMedium)
+                    Text("Folder tile size: $folderGridColumns per row", style = MaterialTheme.typography.titleMedium)
                     Slider(
-                        value = gridColumns.toFloat(),
-                        onValueChange = { viewModel.setGridColumns(it.roundToInt()) },
-                        valueRange = 2f..5f,
-                        steps = 2,
+                        value = folderGridColumns.toFloat(),
+                        onValueChange = { viewModel.setFolderGridColumns(it.roundToInt()) },
+                        valueRange = 2f..6f,
+                        steps = 3,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text("Photo/video tile size: $mediaGridColumns per row", style = MaterialTheme.typography.titleMedium)
+                    Slider(
+                        value = mediaGridColumns.toFloat(),
+                        onValueChange = { viewModel.setMediaGridColumns(it.roundToInt()) },
+                        valueRange = 2f..6f,
+                        steps = 3,
                     )
                 }
                 HorizontalDivider()

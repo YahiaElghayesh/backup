@@ -32,6 +32,7 @@ class MediaChangeObserver(
     }
 
     override fun onChange(selfChange: Boolean, uri: Uri?) {
+        MediaChangeSignal.notifyChanged()
         scope.launch {
             val isConnected = settings.isConnected.first()
             val hasSelection = settings.selectedFolders.first().isNotEmpty()
