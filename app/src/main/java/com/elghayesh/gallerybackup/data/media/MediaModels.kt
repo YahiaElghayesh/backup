@@ -84,12 +84,16 @@ fun FolderNode.latestModifiedSec(): Long {
  * *nearest* explicit ancestor decision wins (an explicit exclude always beats an explicit include
  * at the same folder), and anything with no explicit decision anywhere in its ancestor chain
  * inherits whichever way its nearest ancestor went -- top-level folders with no explicit decision
- * of their own default to hidden, since opting in is the whole point of the explorer. If
- * [includedFolders] is empty (the explorer has never been used), everything is visible.
+ * of their own default to hidden, since opting in is the whole point of the explorer. Before the
+ * explorer's ever been used to include anything ([includedFolders] empty), folders default to
+ * shown instead -- explicit excludes still apply on top of that default, so unchecking a folder
+ * works from a fresh install without needing to check another one first.
  */
 fun isFolderEffectivelyVisible(path: String, includedFolders: Set<String>, explicitlyExcluded: Set<String>): Boolean {
-    if (includedFolders.isEmpty()) return true
-    var visible = false
+    // No folder has ever been explicitly included yet -- default to showing everything (opt-out
+    // model), so a fresh install isn't empty and excluding still works. The moment includedFolders
+    // has an entry, unmarked folders default to hidden instead (opt-in model).
+    var visible = includedFolders.isEmpty()
     var built = ""
     for (segment in path.split("/").filter { it.isNotBlank() }) {
         built = if (built.isEmpty()) segment else "$built/$segment"
