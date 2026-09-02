@@ -32,17 +32,22 @@ class SyncWorker(
         // itself from running.
         trySetForeground(foregroundInfo("Backing up your photos and videos..."))
 
-        val repository = BackupRepository(applicationContext)
-        val settings = SettingsRepository(applicationContext)
-        val oneDriveSettings = OneDriveSettingsRepository(applicationContext)
-        val oneDriveActive = oneDriveSettings.enabled.first() && oneDriveSettings.connected.first()
-
-        suspend fun recordResult(message: String) {
-            settings.recordSyncResult(message)
-            if (oneDriveActive) oneDriveSettings.recordSyncResult(message)
-        }
-
+        // Everything below -- constructing the repositories, reading DataStore settings, and the
+        // sync pass itself -- must stay inside this one try/catch. The earlier fix above only
+        // guarded setForeground(); a throw from any of these other suspend calls (e.g. a DataStore
+        // read) was just as uncaught and just as capable of crashing the whole app process, not
+        // just this job -- which is what kept reproducing the same crash-on-toggle symptom.
         return try {
+            val repository = BackupRepository(applicationContext)
+            val settings = SettingsRepository(applicationContext)
+            val oneDriveSettings = OneDriveSettingsRepository(applicationContext)
+            val oneDriveActive = oneDriveSettings.enabled.first() && oneDriveSettings.connected.first()
+
+            suspend fun recordResult(message: String) {
+                settings.recordSyncResult(message)
+                if (oneDriveActive) oneDriveSettings.recordSyncResult(message)
+            }
+
             val outcome = repository.sync { name -> maybeUpdateNotification(name) }
             when (outcome) {
                 is SyncOutcome.Completed -> {
@@ -59,7 +64,8 @@ class SyncWorker(
                 }
             }
         } catch (e: Exception) {
-            recordResult("Error: ${e.message}")
+            // Best-effort only -- recording the error must not itself risk an uncaught throw.
+            runCatching { SettingsRepository(applicationContext).recordSyncResult("Error: ${e.message}") }
             Result.retry()
         }
     }
