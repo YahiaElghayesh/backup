@@ -79,16 +79,15 @@ fun FolderNode.latestModifiedSec(): Long {
 }
 
 /**
- * Returns a copy of this tree with [excludedFolders] removed entirely, and with folders in
- * [hiddenFolders] / items in [hiddenMediaIds] removed unless [showHidden] is true. Items in
- * [trashedMediaIds] are always removed regardless of [showHidden] -- trash is a separate
- * concept from hidden, with its own screen. This has nothing to do with which folders are
- * *pinned to the gallery's home page* (see `GalleryPreferencesRepository.includedFolders`) --
- * pinning only decides what additionally shows at the root; it never removes a folder from view
- * when browsing into its real parent, so it plays no part in this recursive prune.
+ * Returns a copy of this tree with folders in [hiddenFolders] / items in [hiddenMediaIds] removed
+ * unless [showHidden] is true. Items in [trashedMediaIds] are always removed regardless of
+ * [showHidden] -- trash is a separate concept from hidden, with its own screen. This has nothing
+ * to do with which folders are *pinned to the gallery's home page* (see
+ * `GalleryPreferencesRepository.includedFolders`) -- pinning only decides what additionally shows
+ * at the root; it never removes a folder from view when browsing into its real parent, so it
+ * plays no part in this recursive prune.
  */
 fun FolderNode.filtered(
-    excludedFolders: Set<String>,
     hiddenFolders: Set<String>,
     hiddenMediaIds: Set<Long>,
     showHidden: Boolean,
@@ -96,10 +95,8 @@ fun FolderNode.filtered(
 ): FolderNode {
     val result = FolderNode(path, name)
     for ((childName, child) in children) {
-        if (child.path in excludedFolders) continue
         if (!showHidden && child.path in hiddenFolders) continue
-        result.children[childName] =
-            child.filtered(excludedFolders, hiddenFolders, hiddenMediaIds, showHidden, trashedMediaIds)
+        result.children[childName] = child.filtered(hiddenFolders, hiddenMediaIds, showHidden, trashedMediaIds)
     }
     for (item in items) {
         if (item.id in trashedMediaIds) continue
@@ -108,6 +105,32 @@ fun FolderNode.filtered(
     }
     return result
 }
+
+/**
+ * Total media count in this folder and every folder beneath it, except any child whose own path
+ * is in [includedFolders] -- that child is pinned to the gallery's home page and promoted out of
+ * this listing (see [promotedChildren]), so its contents shouldn't be double-counted on this
+ * folder's own tile.
+ */
+fun FolderNode.promotionAwareItemCount(includedFolders: Set<String>): Int =
+    items.size + promotedChildren(includedFolders).sumOf { it.promotionAwareItemCount(includedFolders) }
+
+/** Like [FolderNode.coverUri], but skips any child promoted out via [includedFolders]. See [promotionAwareItemCount]. */
+fun FolderNode.promotionAwareCoverUri(includedFolders: Set<String>): Uri? =
+    items.firstOrNull()?.uri
+        ?: promotedChildren(includedFolders).firstNotNullOfOrNull { it.promotionAwareCoverUri(includedFolders) }
+
+/**
+ * This folder's direct real children, minus any that are individually pinned to the gallery's
+ * home page. A pinned child is promoted out of its real parent's listing everywhere that parent
+ * is shown, and instead surfaces as its own separate tile at the gallery root -- so it isn't
+ * shown in two places at once. Applies uniformly at any depth for any folder, including the root
+ * itself: the root's own real children follow this same rule, they just aren't otherwise treated
+ * as pinned by default (see [GalleryPreferencesRepository.includedFolders] for the full rule and
+ * how the root additionally surfaces every pinned path as its own tile).
+ */
+fun FolderNode.promotedChildren(includedFolders: Set<String>): List<FolderNode> =
+    children.values.filter { it.path !in includedFolders }
 
 /** Every [MediaItem] in this folder and all its subfolders. */
 fun FolderNode.allItemsRecursive(): List<MediaItem> =

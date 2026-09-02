@@ -34,7 +34,6 @@ import kotlinx.coroutines.launch
 
 private data class RootFilterInputs(
     val raw: FolderNode?,
-    val excluded: Set<String>,
     val hiddenFolders: Set<String>,
     val hiddenMedia: Set<Long>,
     val showHidden: Boolean,
@@ -80,8 +79,6 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         prefs.accentColor.stateIn(viewModelScope, SharingStarted.Eagerly, AccentColor.BLUE)
     val folderSort: StateFlow<FolderSortOrder> =
         prefs.folderSort.stateIn(viewModelScope, SharingStarted.Eagerly, FolderSortOrder.NAME_ASC)
-    val excludedFolders: StateFlow<Set<String>> =
-        prefs.excludedFolders.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
     val includedFolders: StateFlow<Set<String>> =
         prefs.includedFolders.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
     val hiddenFolders: StateFlow<Set<String>> =
@@ -99,22 +96,21 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     val favoriteMediaIds: StateFlow<Set<Long>> =
         prefs.favoriteMediaIds.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
 
-    /** [root] with excluded/hidden/trashed content removed, plus any still-empty user-created folders added in. */
+    /** [root] with hidden/trashed content removed, plus any still-empty user-created folders added in. */
     val visibleRoot: StateFlow<FolderNode?> = combine(
         combine(
             _rawRoot,
-            prefs.excludedFolders,
             prefs.hiddenFolders,
             prefs.hiddenMediaIds,
             prefs.showHidden,
-        ) { raw, excluded, hiddenFolders, hiddenMedia, showHidden ->
-            RootFilterInputs(raw, excluded, hiddenFolders, hiddenMedia, showHidden)
+        ) { raw, hiddenFolders, hiddenMedia, showHidden ->
+            RootFilterInputs(raw, hiddenFolders, hiddenMedia, showHidden)
         },
         trashRepository.trashedIds,
         prefs.virtualFolders,
     ) { inputs, trashedIds, virtualFolders ->
         inputs.raw
-            ?.filtered(inputs.excluded, inputs.hiddenFolders, inputs.hiddenMedia, inputs.showHidden, trashedIds)
+            ?.filtered(inputs.hiddenFolders, inputs.hiddenMedia, inputs.showHidden, trashedIds)
             ?.withVirtualFolders(virtualFolders)
     }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
@@ -141,13 +137,11 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     fun setThemeMode(mode: ThemeMode) = viewModelScope.launch { prefs.setThemeMode(mode) }
     fun setAccentColor(color: AccentColor) = viewModelScope.launch { prefs.setAccentColor(color) }
     fun setFolderSort(order: FolderSortOrder) = viewModelScope.launch { prefs.setFolderSort(order) }
-    fun setFolderExcluded(path: String, excluded: Boolean) =
-        viewModelScope.launch { prefs.setFolderExcluded(path, excluded) }
     fun setFolderHidden(path: String, hidden: Boolean) =
         viewModelScope.launch { prefs.setFolderHidden(path, hidden) }
     fun setFolderIncluded(path: String, included: Boolean) =
         viewModelScope.launch { prefs.setFolderIncluded(path, included) }
-    fun unhideAllFolders() = viewModelScope.launch { prefs.setHiddenFolders(emptySet()) }
+    fun unhideAllFolders() = viewModelScope.launch { prefs.unhideAllFolders() }
     fun setMediaHidden(id: Long, hidden: Boolean) =
         viewModelScope.launch { prefs.setMediaHidden(id, hidden) }
     fun setShowHidden(show: Boolean) = viewModelScope.launch { prefs.setShowHidden(show) }

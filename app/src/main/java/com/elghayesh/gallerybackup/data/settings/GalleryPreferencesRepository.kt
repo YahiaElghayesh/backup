@@ -85,21 +85,28 @@ class GalleryPreferencesRepository(private val context: Context) {
         prefs[Keys.FOLDER_SORT]?.let { runCatching { FolderSortOrder.valueOf(it) }.getOrNull() } ?: FolderSortOrder.NAME_ASC
     }
 
-    val excludedFolders: Flow<Set<String>> =
-        context.galleryPrefsStore.data.map { it[Keys.EXCLUDED_FOLDERS] ?: emptySet() }
-
     /**
      * Folders pinned to the gallery's home page from the folder explorer. A flat set -- pinning a
      * subfolder doesn't affect its parent's own pin state or vice versa -- but not purely additive:
      * a pinned folder is *promoted* out of its real parent's own listing (wherever that parent is
-     * shown) and surfaces instead as its own tile at the gallery root, so it isn't shown twice.
-     * Its own contents, once you open it, are still shown in full either way.
+     * shown, at any depth) and surfaces instead as its own tile at the gallery root, so it isn't
+     * shown twice. Its own contents, once you open it, are still shown in full either way. Before
+     * anything's ever been pinned (this set is empty), the root falls back to showing its real
+     * top-level folders as usual; the moment it has an entry, the root becomes a pure opt-in list
+     * -- only pinned folders show there, nothing appears just for being a real top-level folder.
      */
     val includedFolders: Flow<Set<String>> =
         context.galleryPrefsStore.data.map { it[Keys.INCLUDED_FOLDERS] ?: emptySet() }
 
+    /**
+     * Folders hidden from the gallery everywhere. Also folds in the legacy [Keys.EXCLUDED_FOLDERS]
+     * key from an older, separate "exclude from gallery" mechanism -- so a folder hidden that way
+     * (including from a bug during earlier testing where an attempted uncheck silently wrote here
+     * instead of visibly failing) shows up as checked in the explorer's Hide checkbox and can be
+     * unhidden the normal way, instead of staying invisibly excluded with no UI to undo it.
+     */
     val hiddenFolders: Flow<Set<String>> =
-        context.galleryPrefsStore.data.map { it[Keys.HIDDEN_FOLDERS] ?: emptySet() }
+        context.galleryPrefsStore.data.map { (it[Keys.HIDDEN_FOLDERS] ?: emptySet()) + (it[Keys.EXCLUDED_FOLDERS] ?: emptySet()) }
 
     val hiddenMediaIds: Flow<Set<Long>> =
         context.galleryPrefsStore.data.map { prefs ->
@@ -143,22 +150,16 @@ class GalleryPreferencesRepository(private val context: Context) {
         context.galleryPrefsStore.edit { it[Keys.FOLDER_SORT] = order.name }
     }
 
-    suspend fun setFolderExcluded(path: String, excluded: Boolean) {
-        context.galleryPrefsStore.edit { prefs ->
-            val current = prefs[Keys.EXCLUDED_FOLDERS] ?: emptySet()
-            prefs[Keys.EXCLUDED_FOLDERS] = if (excluded) current + path else current - path
-        }
-    }
-
+    /** Hides or unhides one folder. Unhiding always clears it from both [hiddenFolders]'s keys. */
     suspend fun setFolderHidden(path: String, hidden: Boolean) {
         context.galleryPrefsStore.edit { prefs ->
             val current = prefs[Keys.HIDDEN_FOLDERS] ?: emptySet()
             prefs[Keys.HIDDEN_FOLDERS] = if (hidden) current + path else current - path
+            if (!hidden) {
+                val excluded = prefs[Keys.EXCLUDED_FOLDERS] ?: emptySet()
+                if (path in excluded) prefs[Keys.EXCLUDED_FOLDERS] = excluded - path
+            }
         }
-    }
-
-    suspend fun setExcludedFolders(paths: Set<String>) {
-        context.galleryPrefsStore.edit { it[Keys.EXCLUDED_FOLDERS] = paths }
     }
 
     /** Pins or unpins a single folder to the gallery's home page. See [includedFolders]. */
@@ -169,8 +170,12 @@ class GalleryPreferencesRepository(private val context: Context) {
         }
     }
 
-    suspend fun setHiddenFolders(paths: Set<String>) {
-        context.galleryPrefsStore.edit { it[Keys.HIDDEN_FOLDERS] = paths }
+    /** Clears every hidden folder, including any legacy [Keys.EXCLUDED_FOLDERS] entries. */
+    suspend fun unhideAllFolders() {
+        context.galleryPrefsStore.edit { prefs ->
+            prefs[Keys.HIDDEN_FOLDERS] = emptySet()
+            prefs[Keys.EXCLUDED_FOLDERS] = emptySet()
+        }
     }
 
     suspend fun setMediaHidden(id: Long, hidden: Boolean) {

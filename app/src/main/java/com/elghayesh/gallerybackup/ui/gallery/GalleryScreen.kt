@@ -132,13 +132,23 @@ fun GalleryScreen(
 
     // A pinned folder is promoted out of its real parent's listing wherever that parent is shown
     // (so it isn't duplicated in two places) and surfaces instead as its own tile on the gallery's
-    // home page. Every folder listing -- home included -- hides its own direct children that are
-    // pinned; the home page then adds every pinned path back in as its own resolved tile, which is
-    // what makes a pinned child appear promoted to the root instead of nested under its parent.
-    val ownChildren = node?.children?.values?.toList() ?: emptyList()
-    val visibleOwnChildren = ownChildren.filter { it.path !in includedFolders }
-    val pinnedExtras = if (path.isEmpty()) includedFolders.mapNotNull { visibleRoot?.findNode(it) } else emptyList()
-    val folders = if (node != null) sortedFolders(visibleOwnChildren + pinnedExtras, folderSort) else emptyList()
+    // home page. This applies uniformly at any depth via FolderNode.promotedChildren -- a folder's
+    // own real children never include one that's pinned elsewhere. The root additionally goes fully
+    // opt-in the moment anything's been pinned: once includedFolders isn't empty, its own real
+    // top-level children stop showing automatically too, and the tile list becomes purely whatever
+    // was pinned. Before anything's ever been pinned, the root falls back to showing its real
+    // top-level children as usual, so a fresh install isn't an empty gallery.
+    val folders = if (node != null) {
+        val ownChildren = when {
+            path.isNotEmpty() -> node.promotedChildren(includedFolders)
+            includedFolders.isEmpty() -> node.children.values.toList()
+            else -> emptyList()
+        }
+        val pinnedExtras = if (path.isEmpty()) includedFolders.mapNotNull { visibleRoot?.findNode(it) } else emptyList()
+        sortedFolders(ownChildren + pinnedExtras, folderSort, includedFolders)
+    } else {
+        emptyList()
+    }
     val media = node?.items?.sortedByDescending { it.dateModifiedSec } ?: emptyList()
     val selectedItems = media.filter { it.id in selectedMediaIds }
     val selectedFolderNodes = folders.filter { it.path in selectedFolderPaths }
@@ -317,13 +327,6 @@ fun GalleryScreen(
                                     selectedFolderNodes.forEach { viewModel.setFolderHidden(it.path, !allSelectedHidden) }
                                 },
                             )
-                            if (selectedFolderNodes.isNotEmpty()) {
-                                add(
-                                    "Exclude from gallery" to {
-                                        selectedFolderNodes.forEach { viewModel.setFolderExcluded(it.path, true) }
-                                    },
-                                )
-                            }
                             if (totalSelectedCount == 1) {
                                 add("Rename" to { showRenameDialog = true })
                             }
@@ -358,7 +361,7 @@ fun GalleryScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                node.totalItemCount() == 0 -> {
+                folders.isEmpty() && media.isEmpty() -> {
                     Text(
                         "No photos or videos yet.",
                         modifier = Modifier.align(Alignment.Center),
@@ -431,6 +434,7 @@ fun GalleryScreen(
                                         isHidden = folder.path in hiddenFolders,
                                         isSelected = folder.path in selectedFolderPaths,
                                         cover = folderCovers[folder.path],
+                                        includedFolders = includedFolders,
                                     )
                                 }
                                 gridItemsIndexed(media, key = { _, item -> "media:${item.id}" }) { _, item ->
@@ -450,6 +454,7 @@ fun GalleryScreen(
                                     isHidden = folder.path in hiddenFolders,
                                     isSelected = folder.path in selectedFolderPaths,
                                     cover = folderCovers[folder.path],
+                                    includedFolders = includedFolders,
                                     onClick = {
                                         if (isSelectionMode) {
                                             viewModel.toggleFolderSelection(folder.path)
@@ -530,14 +535,14 @@ private fun openOrToggle(
     }
 }
 
-private fun sortedFolders(folders: List<FolderNode>, order: FolderSortOrder): List<FolderNode> =
+private fun sortedFolders(folders: List<FolderNode>, order: FolderSortOrder, includedFolders: Set<String>): List<FolderNode> =
     when (order) {
         FolderSortOrder.NAME_ASC -> folders.sortedBy { it.name.lowercase() }
         FolderSortOrder.NAME_DESC -> folders.sortedByDescending { it.name.lowercase() }
         FolderSortOrder.DATE_DESC -> folders.sortedByDescending { it.latestModifiedSec() }
         FolderSortOrder.DATE_ASC -> folders.sortedBy { it.latestModifiedSec() }
-        FolderSortOrder.COUNT_DESC -> folders.sortedByDescending { it.totalItemCount() }
-        FolderSortOrder.COUNT_ASC -> folders.sortedBy { it.totalItemCount() }
+        FolderSortOrder.COUNT_DESC -> folders.sortedByDescending { it.promotionAwareItemCount(includedFolders) }
+        FolderSortOrder.COUNT_ASC -> folders.sortedBy { it.promotionAwareItemCount(includedFolders) }
     }
 
 private fun breadcrumbTitle(path: String): String =
@@ -571,7 +576,7 @@ private fun SortDialog(current: FolderSortOrder, onSelect: (FolderSortOrder) -> 
 }
 
 @Composable
-private fun FolderCoverContent(folder: FolderNode, cover: FolderCover?) {
+private fun FolderCoverContent(folder: FolderNode, cover: FolderCover?, includedFolders: Set<String>) {
     if (cover != null) {
         Box(Modifier.fillMaxSize().background(Color(cover.colorSeed)), contentAlignment = Alignment.Center) {
             Text(
@@ -584,7 +589,7 @@ private fun FolderCoverContent(folder: FolderNode, cover: FolderCover?) {
         }
         return
     }
-    val coverUri = folder.coverUri()
+    val coverUri = folder.promotionAwareCoverUri(includedFolders)
     if (coverUri != null) {
         AsyncImage(
             model = coverUri,
@@ -609,6 +614,7 @@ private fun FolderGridTile(
     isHidden: Boolean,
     isSelected: Boolean,
     cover: FolderCover?,
+    includedFolders: Set<String>,
 ) {
     Box(
         Modifier
@@ -617,9 +623,9 @@ private fun FolderGridTile(
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .alpha(if (isHidden) 0.5f else 1f),
     ) {
-        FolderCoverContent(folder, cover)
+        FolderCoverContent(folder, cover, includedFolders)
         Text(
-            text = "${folder.name}  (${folder.totalItemCount()})",
+            text = "${folder.name}  (${folder.promotionAwareItemCount(includedFolders)})",
             color = Color.White,
             style = MaterialTheme.typography.labelMedium,
             modifier = Modifier
@@ -770,15 +776,16 @@ private fun FolderListRow(
     isHidden: Boolean,
     isSelected: Boolean,
     cover: FolderCover?,
+    includedFolders: Set<String>,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
     GalleryListItem(
-        thumbnailModel = folder.coverUri(),
+        thumbnailModel = folder.promotionAwareCoverUri(includedFolders),
         icon = Icons.Filled.Folder,
         cover = cover,
         title = folder.name,
-        subtitle = "${folder.totalItemCount()} items",
+        subtitle = "${folder.promotionAwareItemCount(includedFolders)} items",
         isHidden = isHidden,
         isSelected = isSelected,
         onClick = onClick,
