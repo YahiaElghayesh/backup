@@ -3,6 +3,7 @@ package com.elghayesh.gallerybackup.ui.gallery
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -10,6 +11,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -17,6 +19,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -30,6 +33,7 @@ import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
@@ -37,7 +41,9 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.FolderOff
 import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.ViewList
@@ -69,7 +75,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
@@ -367,20 +375,28 @@ fun GalleryScreen(
         ) {
             when {
                 isLoading && visibleRoot == null -> {
-                    CircularProgressIndicator(Modifier.align(Alignment.Center))
+                    Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.height(16.dp))
+                        Text(
+                            "Scanning your photos and videos...",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
                 node == null -> {
-                    Text(
-                        "No media found here.",
-                        modifier = Modifier.align(Alignment.Center),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    EmptyState(
+                        icon = Icons.Filled.FolderOff,
+                        title = "Folder not found",
+                        subtitle = "This folder may have been moved or deleted.",
                     )
                 }
                 folders.isEmpty() && media.isEmpty() -> {
-                    Text(
-                        "No photos or videos yet.",
-                        modifier = Modifier.align(Alignment.Center),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    EmptyState(
+                        icon = Icons.Filled.PhotoLibrary,
+                        title = "Nothing here yet",
+                        subtitle = "Photos and videos you add will show up here. Pull down to rescan anytime.",
                     )
                 }
                 else -> {
@@ -575,6 +591,40 @@ private fun breadcrumbTitle(path: String): String =
     if (path.isEmpty()) "Gallery" else path.substringAfterLast('/')
 
 @Composable
+private fun BoxScope.EmptyState(icon: ImageVector, title: String, subtitle: String) {
+    Column(
+        Modifier
+            .align(Alignment.Center)
+            .padding(horizontal = 32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Box(
+            Modifier
+                .size(72.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.primaryContainer),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                modifier = Modifier.size(32.dp),
+            )
+        }
+        Spacer(Modifier.height(20.dp))
+        Text(title, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
+        Spacer(Modifier.height(6.dp))
+        Text(
+            subtitle,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+@Composable
 private fun SortDialog(current: FolderSortOrder, onSelect: (FolderSortOrder) -> Unit, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -634,6 +684,13 @@ private fun FolderCoverContent(folder: FolderNode, cover: FolderCover?, included
     }
 }
 
+/** A bottom-up fade used behind labels/badges drawn over a photo, so white text and icons stay
+ * legible on any thumbnail without needing a flat, visually heavy scrim across the whole tile. */
+private val ScrimBrush = Brush.verticalGradient(
+    0f to Color.Transparent,
+    1f to Color.Black.copy(alpha = 0.78f),
+)
+
 @Composable
 private fun FolderGridTile(
     folder: FolderNode,
@@ -642,39 +699,60 @@ private fun FolderGridTile(
     cover: FolderCover?,
     includedFolders: Set<String>,
 ) {
+    val shape = MaterialTheme.shapes.medium
     Box(
         Modifier
             .aspectRatio(1f)
-            .clip(RoundedCornerShape(12.dp))
+            .shadow(if (isSelected) 6.dp else 1.dp, shape, clip = false)
+            .clip(shape)
             .background(MaterialTheme.colorScheme.surfaceVariant)
+            .then(
+                if (isSelected) {
+                    Modifier.border(2.5.dp, MaterialTheme.colorScheme.primary, shape)
+                } else {
+                    Modifier
+                },
+            )
             .alpha(if (isHidden) 0.5f else 1f),
     ) {
         FolderCoverContent(folder, cover, includedFolders)
-        Text(
-            text = "${folder.name}  (${folder.promotionAwareItemCount(includedFolders)})",
-            color = Color.White,
-            style = MaterialTheme.typography.labelMedium,
-            modifier = Modifier
+        Box(
+            Modifier
                 .align(Alignment.BottomStart)
                 .fillMaxWidth()
-                .background(Color.Black.copy(alpha = 0.3f))
-                .padding(6.dp),
-        )
+                .background(ScrimBrush)
+                .padding(horizontal = 8.dp, vertical = 8.dp),
+        ) {
+            Text(
+                text = "${folder.name}  ·  ${folder.promotionAwareItemCount(includedFolders)}",
+                color = Color.White,
+                style = MaterialTheme.typography.labelMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
         if (isHidden) {
             Icon(
                 Icons.Filled.VisibilityOff,
                 contentDescription = "Hidden",
                 tint = Color.White,
-                modifier = Modifier.align(Alignment.TopEnd).padding(6.dp),
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp)
+                    .background(Color.Black.copy(alpha = 0.4f), CircleShape)
+                    .padding(4.dp)
+                    .size(16.dp),
             )
         }
         if (isSelected) {
-            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f)))
             Icon(
                 Icons.Filled.CheckCircle,
                 contentDescription = "Selected",
-                tint = Color.White,
-                modifier = Modifier.align(Alignment.TopStart).padding(6.dp),
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(6.dp)
+                    .background(Color.White, CircleShape),
             )
         }
     }
@@ -686,11 +764,20 @@ private fun MediaGridTile(
     isHidden: Boolean,
     isSelected: Boolean,
 ) {
+    val shape = MaterialTheme.shapes.small
     Box(
         Modifier
             .aspectRatio(1f)
-            .clip(RoundedCornerShape(8.dp))
+            .shadow(if (isSelected) 6.dp else 0.dp, shape, clip = false)
+            .clip(shape)
             .background(MaterialTheme.colorScheme.surfaceVariant)
+            .then(
+                if (isSelected) {
+                    Modifier.border(2.5.dp, MaterialTheme.colorScheme.primary, shape)
+                } else {
+                    Modifier
+                },
+            )
             .alpha(if (isHidden) 0.5f else 1f),
     ) {
         AsyncImage(
@@ -700,10 +787,11 @@ private fun MediaGridTile(
             modifier = Modifier.fillMaxSize(),
         )
         if (item.isVideo) {
+            Box(Modifier.align(Alignment.BottomEnd).fillMaxWidth().height(28.dp).background(ScrimBrush))
             Icon(
                 Icons.Filled.PlayCircle,
                 contentDescription = "Video",
-                tint = Color.White,
+                tint = Color.White.copy(alpha = 0.9f),
                 modifier = Modifier.align(Alignment.Center),
             )
             Text(
@@ -718,16 +806,23 @@ private fun MediaGridTile(
                 Icons.Filled.VisibilityOff,
                 contentDescription = "Hidden",
                 tint = Color.White,
-                modifier = Modifier.align(Alignment.TopEnd).padding(4.dp),
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(4.dp)
+                    .background(Color.Black.copy(alpha = 0.4f), CircleShape)
+                    .padding(3.dp)
+                    .size(14.dp),
             )
         }
         if (isSelected) {
-            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f)))
             Icon(
                 Icons.Filled.CheckCircle,
                 contentDescription = "Selected",
-                tint = Color.White,
-                modifier = Modifier.align(Alignment.TopStart).padding(4.dp),
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(4.dp)
+                    .background(Color.White, CircleShape),
             )
         }
     }
