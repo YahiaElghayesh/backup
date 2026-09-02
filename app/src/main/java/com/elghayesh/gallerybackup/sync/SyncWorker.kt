@@ -25,7 +25,12 @@ class SyncWorker(
     private var lastNotifyMs = 0L
 
     override suspend fun doWork(): Result {
-        setForeground(foregroundInfo("Backing up your photos and videos..."))
+        // Android 12+ can refuse to start a foreground service for a background-triggered job
+        // (ForegroundServiceStartNotAllowedException, e.g. a periodic sync firing while the app
+        // isn't open) -- an uncaught exception here crashes the whole app process, not just this
+        // worker, so a failed attempt to show the progress notification must not stop the sync
+        // itself from running.
+        trySetForeground(foregroundInfo("Backing up your photos and videos..."))
 
         val repository = BackupRepository(applicationContext)
         val settings = SettingsRepository(applicationContext)
@@ -64,7 +69,16 @@ class SyncWorker(
         val now = System.currentTimeMillis()
         if (now - lastNotifyMs < 1000L) return
         lastNotifyMs = now
-        setForeground(foregroundInfo("Uploading: $currentFileName"))
+        trySetForeground(foregroundInfo("Uploading: $currentFileName"))
+    }
+
+    /** See the comment in [doWork] -- a refused foreground-service start must not crash the app. */
+    private suspend fun trySetForeground(info: ForegroundInfo) {
+        try {
+            setForeground(info)
+        } catch (e: Exception) {
+            // No progress notification this time; the sync itself still proceeds below.
+        }
     }
 
     private fun foregroundInfo(text: String): ForegroundInfo {

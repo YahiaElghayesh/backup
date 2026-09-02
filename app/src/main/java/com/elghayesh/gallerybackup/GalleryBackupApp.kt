@@ -27,9 +27,17 @@ class GalleryBackupApp : Application(), ImageLoaderFactory {
 
         MediaChangeObserver(this, appScope).register()
 
+        // An uncaught exception in any coroutine on this scope crashes the whole app on every
+        // future launch (this exact scope's own startup work runs unconditionally on every cold
+        // start) -- catch broadly here so a scheduling hiccup degrades to "sync doesn't run" the
+        // Gallery can still be used, rather than a boot loop with no way back in to fix settings.
         appScope.launch {
-            val wifiOnly = SettingsRepository(this@GalleryBackupApp).wifiOnly.first()
-            SyncScheduler.schedulePeriodicSync(this@GalleryBackupApp, wifiOnly)
+            try {
+                val wifiOnly = SettingsRepository(this@GalleryBackupApp).wifiOnly.first()
+                SyncScheduler.schedulePeriodicSync(this@GalleryBackupApp, wifiOnly)
+            } catch (e: Exception) {
+                // Nothing to do -- periodic sync just won't be (re)scheduled this launch.
+            }
         }
     }
 
