@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch: {}
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -35,3 +38,15 @@ jobs:
           name: gallery-backup-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
+
+      - name: Publish GitHub Release with APK
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="build-${{ github.run_number }}"
+          gh release create "$TAG" \
+            app/build/outputs/apk/debug/app-debug.apk \
+            --repo "${{ github.repository }}" \
+            --title "Build ${{ github.run_number }}" \
+            --notes "Automated build from commit ${{ github.sha }} on branch ${{ github.ref_name }}. The in-app updater checks this release."

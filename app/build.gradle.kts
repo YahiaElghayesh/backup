@@ -8,12 +8,18 @@ android {
     namespace = "com.elghayesh.gallerybackup"
     compileSdk = 34
 
+    // GitHub Actions sets GITHUB_RUN_NUMBER on every job automatically -- using it as the version
+    // code (and echoing it in the version name) gives every CI build a distinct, monotonically
+    // increasing version with no manual bump, which the in-app updater compares against to decide
+    // whether a new release is available (see data.update.UpdateChecker).
+    val ciRunNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
+
     defaultConfig {
         applicationId = "com.elghayesh.gallerybackup"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = ciRunNumber
+        versionName = "1.0.$ciRunNumber"
     }
 
     signingConfigs {

@@ -23,6 +23,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
+    <!-- In-app updater: there's no Play Store, so the app installs its own downloaded update APK. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <application
         android:name=".GalleryBackupApp"
         android:allowBackup="false"
@@ -54,6 +57,18 @@
         </activity>
 
         <!-- WorkManager schedules and survives reboot on its own; no custom boot receiver needed. -->
+
+        <!-- Hands a downloaded update APK to the system installer via a content:// Uri instead of a
+             raw file:// path (blocked by FileUriExposedException on Android 7+). -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
     </application>
 

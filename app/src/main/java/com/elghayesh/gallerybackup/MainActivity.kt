@@ -50,6 +50,7 @@ import com.elghayesh.gallerybackup.ui.settings.BackupSettingsScreen
 import com.elghayesh.gallerybackup.ui.settings.BackupViewModel
 import com.elghayesh.gallerybackup.ui.theme.AppTheme
 import com.elghayesh.gallerybackup.ui.trash.TrashScreen
+import com.elghayesh.gallerybackup.ui.update.AppUpdateController
 import com.elghayesh.gallerybackup.ui.viewer.MediaViewerScreen
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.net.URLDecoder
@@ -98,6 +99,8 @@ class MainActivity : ComponentActivity() {
 
             AppTheme(themeMode = themeMode, accentColor = accentColor) {
                 Surface(modifier = Modifier.fillMaxSize()) {
+                    AppUpdateController()
+
                     LaunchedEffect(Unit) {
                         backupViewModel.consentRequests.collect { pendingIntent ->
                             driveConsentLauncher.launch(IntentSenderRequest.Builder(pendingIntent).build())
