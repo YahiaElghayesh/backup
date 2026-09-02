@@ -15,6 +15,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
@@ -76,7 +77,12 @@ import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.PointerInputChange
+import androidx.compose.ui.input.pointer.PointerInputScope
+import androidx.compose.ui.input.pointer.awaitFirstDown
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -502,7 +508,7 @@ fun PhotoEditScreen(
                                         .align(Alignment.TopStart)
                                         .normOffset(sticker.xNorm, sticker.yNorm, boxSize, density)
                                         .pointerInput(sticker.id, boxSize) {
-                                            detectDragGestures(
+                                            detectDragImmediate(
                                                 onDragEnd = { endLiveMutation() },
                                                 onDrag = { change, dragAmount ->
                                                     change.consume()
@@ -716,6 +722,38 @@ private fun Modifier.normOffset(
     }
 }
 
+/**
+ * Like [detectDragGestures], but consumes the initial pointer-down immediately instead of only
+ * once a drag actually starts. Drag handles (crop corners, focus spot, stickers) sit on top of
+ * this screen's whole-image "press and hold to preview original" gesture; that outer gesture
+ * only fires on an *unconsumed* down (see [detectTapGestures]'s use of `awaitFirstDown()`), which
+ * is otherwise still unconsumed while a handle is merely waiting to see if this touch turns into
+ * a drag. Without this, touching a handle also flips on the original-photo preview, which yanks
+ * the handle out of composition mid-touch and aborts the drag -- every time, not just once.
+ */
+private suspend fun PointerInputScope.detectDragImmediate(
+    onDragEnd: () -> Unit = {},
+    onDrag: (change: PointerInputChange, dragAmount: Offset) -> Unit,
+) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        down.consume()
+        val pointerId = down.id
+        while (true) {
+            val event = awaitPointerEvent()
+            val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+            if (change.changedToUpIgnoreConsumed()) {
+                change.consume()
+                onDragEnd()
+                break
+            }
+            val dragAmount = change.positionChange()
+            change.consume()
+            onDrag(change, dragAmount)
+        }
+    }
+}
+
 @Composable
 private fun CropOverlay(
     rect: NormRect,
@@ -754,7 +792,7 @@ private fun CropOverlay(
             .normOffset(rect.left, rect.top, boxSize, density, centerOnPointDp = 28.dp)
             .size(28.dp)
             .pointerInput(boxSize) {
-                detectDragGestures(onDragEnd = { onDragEnd() }) { change, dragAmount ->
+                detectDragImmediate(onDragEnd = { onDragEnd() }) { change, dragAmount ->
                     change.consume()
                     if (boxSize.width > 0 && boxSize.height > 0) {
                         onCornerDrag(CropCorner.TOP_LEFT, dragAmount.x / boxSize.width, dragAmount.y / boxSize.height)
@@ -769,7 +807,7 @@ private fun CropOverlay(
             .normOffset(rect.right, rect.top, boxSize, density, centerOnPointDp = 28.dp)
             .size(28.dp)
             .pointerInput(boxSize) {
-                detectDragGestures(onDragEnd = { onDragEnd() }) { change, dragAmount ->
+                detectDragImmediate(onDragEnd = { onDragEnd() }) { change, dragAmount ->
                     change.consume()
                     if (boxSize.width > 0 && boxSize.height > 0) {
                         onCornerDrag(CropCorner.TOP_RIGHT, dragAmount.x / boxSize.width, dragAmount.y / boxSize.height)
@@ -784,7 +822,7 @@ private fun CropOverlay(
             .normOffset(rect.left, rect.bottom, boxSize, density, centerOnPointDp = 28.dp)
             .size(28.dp)
             .pointerInput(boxSize) {
-                detectDragGestures(onDragEnd = { onDragEnd() }) { change, dragAmount ->
+                detectDragImmediate(onDragEnd = { onDragEnd() }) { change, dragAmount ->
                     change.consume()
                     if (boxSize.width > 0 && boxSize.height > 0) {
                         onCornerDrag(CropCorner.BOTTOM_LEFT, dragAmount.x / boxSize.width, dragAmount.y / boxSize.height)
@@ -799,7 +837,7 @@ private fun CropOverlay(
             .normOffset(rect.right, rect.bottom, boxSize, density, centerOnPointDp = 28.dp)
             .size(28.dp)
             .pointerInput(boxSize) {
-                detectDragGestures(onDragEnd = { onDragEnd() }) { change, dragAmount ->
+                detectDragImmediate(onDragEnd = { onDragEnd() }) { change, dragAmount ->
                     change.consume()
                     if (boxSize.width > 0 && boxSize.height > 0) {
                         onCornerDrag(CropCorner.BOTTOM_RIGHT, dragAmount.x / boxSize.width, dragAmount.y / boxSize.height)
@@ -891,7 +929,7 @@ private fun FocusHandle(
             .normOffset(focus.xNorm, focus.yNorm, boxSize, density, centerOnPointDp = 32.dp)
             .size(32.dp)
             .pointerInput(boxSize) {
-                detectDragGestures(onDragEnd = { onDragEnd() }) { change, dragAmount ->
+                detectDragImmediate(onDragEnd = { onDragEnd() }) { change, dragAmount ->
                     change.consume()
                     if (boxSize.width > 0 && boxSize.height > 0) {
                         onMove(
