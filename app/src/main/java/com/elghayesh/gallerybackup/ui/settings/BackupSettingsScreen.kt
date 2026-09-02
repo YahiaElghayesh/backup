@@ -1,5 +1,6 @@
 package com.elghayesh.gallerybackup.ui.settings
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -9,11 +10,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material3.Button
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -37,21 +37,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.elghayesh.gallerybackup.data.media.flattenAllFolders
-import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
 import java.text.DateFormat
 import java.util.Date
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BackupSettingsScreen(
-    galleryViewModel: GalleryViewModel,
     backupViewModel: BackupViewModel,
+    onOpenFolderExplorer: () -> Unit,
     onBack: () -> Unit,
 ) {
-    val root by galleryViewModel.root.collectAsState()
     val selectedFolders by backupViewModel.selectedFolders.collectAsState(initial = emptySet())
     val wifiOnly by backupViewModel.wifiOnly.collectAsState(initial = true)
     val isConnected by backupViewModel.isConnected.collectAsState(initial = false)
@@ -168,37 +164,27 @@ fun BackupSettingsScreen(
             }
 
             item {
-                Column(Modifier.padding(16.dp)) {
-                    Text("Folders to back up", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        "Each folder is independent -- checking a folder does not automatically " +
-                            "include its subfolders. Check exactly the ones you want, at any level.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-
-            val allFolders = root?.flattenAllFolders()?.sortedBy { it.path.lowercase() } ?: emptyList()
-            items(allFolders, key = { it.path }) { folder ->
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                        .clickable(onClick = onOpenFolderExplorer)
+                        .padding(16.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Checkbox(
-                        checked = selectedFolders.contains(folder.path),
-                        onCheckedChange = { checked -> backupViewModel.toggleFolder(folder.path, checked) },
-                    )
-                    Column(Modifier.padding(start = 8.dp).weight(1f)) {
-                        Text(folder.path, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Column(Modifier.weight(1f)) {
+                        Text("Folders to back up", style = MaterialTheme.typography.titleMedium)
                         Text(
-                            "${folder.items.size} items directly inside",
+                            if (selectedFolders.isEmpty()) {
+                                "No folders selected yet -- tap to browse, file-explorer style."
+                            } else {
+                                "${selectedFolders.size} folder(s) selected. Each is independent -- " +
+                                    "checking one doesn't pull in its subfolders."
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
+                    Icon(Icons.Filled.ChevronRight, contentDescription = null)
                 }
             }
 

@@ -16,6 +16,19 @@ android {
         versionName = "1.0"
     }
 
+    signingConfigs {
+        getByName("debug") {
+            // Committed so every CI build (and every local build) signs debug APKs with the same
+            // key -- without a fixed keystore, Android Gradle Plugin generates a random one per
+            // machine/CI-runner, and Android then refuses to install a new build over an old one
+            // signed with a different key ("package conflicts with an existing package").
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false

@@ -1,7 +1,6 @@
-package com.elghayesh.gallerybackup.ui.gallery
+package com.elghayesh.gallerybackup.ui.settings
 
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -22,7 +21,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -35,24 +33,24 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.elghayesh.gallerybackup.data.media.findNode
-import com.elghayesh.gallerybackup.data.media.isFolderEffectivelyVisible
+import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
 
 /**
- * A real file-explorer-style browser for choosing which folders show up in the gallery -- the
- * opposite of the old flat "every folder, opt out" checklist. Marking a folder here makes it (and
- * everything under it) show up at the gallery's root; a subfolder inherits that automatically
- * unless you drill into it and mark it hidden specifically, which overrides the inherited choice
- * just for that branch.
+ * A file-explorer-style browser for choosing which folders to back up -- the same navigable
+ * pattern as [com.elghayesh.gallerybackup.ui.gallery.FolderVisibilityExplorerScreen], but each
+ * folder's checkbox is independent: checking a folder backs up just that folder's own items, it
+ * does not automatically pull in its subfolders (matching [BackupViewModel.toggleFolder]'s
+ * existing no-cascade behavior).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FolderVisibilityExplorerScreen(
-    viewModel: GalleryViewModel,
+fun BackupFolderExplorerScreen(
+    galleryViewModel: GalleryViewModel,
+    backupViewModel: BackupViewModel,
     onBack: () -> Unit,
 ) {
-    val root by viewModel.root.collectAsState()
-    val includedFolders by viewModel.includedFolders.collectAsState()
-    val excludedFolders by viewModel.excludedFolders.collectAsState()
+    val root by galleryViewModel.root.collectAsState()
+    val selectedFolders by backupViewModel.selectedFolders.collectAsState(initial = emptySet())
     var currentPath by remember { mutableStateOf("") }
 
     val node = root?.findNode(currentPath)
@@ -61,7 +59,7 @@ fun FolderVisibilityExplorerScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(if (currentPath.isEmpty()) "Choose gallery folders" else currentPath.substringAfterLast('/')) },
+                title = { Text(if (currentPath.isEmpty()) "Folders to back up" else currentPath.substringAfterLast('/')) },
                 navigationIcon = {
                     IconButton(
                         onClick = {
@@ -78,19 +76,15 @@ fun FolderVisibilityExplorerScreen(
                         )
                     }
                 },
-                actions = {
-                    TextButton(onClick = { viewModel.resetFolderVisibility() }) {
-                        Text("Show all")
-                    }
-                },
             )
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
             if (currentPath.isEmpty()) {
                 Text(
-                    "Check a folder to show it (and everything inside it) in the gallery. " +
-                        "Open a checked folder to uncheck specific subfolders you don't want.",
+                    "Check a folder to back it up. Each folder is independent -- checking one " +
+                        "does not automatically include its subfolders, so open it and check " +
+                        "those separately if you want them too.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(16.dp),
@@ -103,8 +97,7 @@ fun FolderVisibilityExplorerScreen(
             } else {
                 LazyColumn(Modifier.fillMaxWidth()) {
                     items(children, key = { it.path }) { folder ->
-                        val visible = isFolderEffectivelyVisible(folder.path, includedFolders, excludedFolders)
-                        val hasOwnOverride = folder.path in includedFolders || folder.path in excludedFolders
+                        val checked = folder.path in selectedFolders
                         Row(
                             Modifier
                                 .fillMaxWidth()
@@ -113,14 +106,14 @@ fun FolderVisibilityExplorerScreen(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Checkbox(
-                                checked = visible,
-                                onCheckedChange = { checked -> viewModel.setFolderVisibility(folder.path, checked) },
+                                checked = checked,
+                                onCheckedChange = { selected -> backupViewModel.toggleFolder(folder.path, selected) },
                             )
                             Icon(Icons.Filled.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                             Column(Modifier.padding(start = 12.dp).weight(1f)) {
                                 Text(folder.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(
-                                    if (hasOwnOverride) "${folder.totalItemCount()} items" else "${folder.totalItemCount()} items (inherited)",
+                                    "${folder.items.size} items directly inside",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )

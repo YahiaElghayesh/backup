@@ -71,16 +71,6 @@ fun FolderNode.findNode(path: String): FolderNode? {
     return node
 }
 
-/** Every folder in this tree (any depth), not including this node itself. */
-fun FolderNode.flattenAllFolders(): List<FolderNode> {
-    val result = mutableListOf<FolderNode>()
-    for (child in children.values) {
-        result.add(child)
-        result.addAll(child.flattenAllFolders())
-    }
-    return result
-}
-
 /** Most recent [MediaItem.dateModifiedSec] anywhere in this folder or its subfolders; 0 if empty. */
 fun FolderNode.latestModifiedSec(): Long {
     val ownMax = items.maxOfOrNull { it.dateModifiedSec } ?: 0L
@@ -89,59 +79,65 @@ fun FolderNode.latestModifiedSec(): Long {
 }
 
 /**
- * Resolves [includedFolders]/[explicitlyExcluded] (the folder explorer's opt-in "show this at the
- * root, auto-include its subfolders unless I say otherwise" choices) down into a flat excluded-set
- * that [filtered] already knows how to consume, so the two concepts don't need two separate
- * exclusion mechanisms downstream. If [includedFolders] is empty (the explorer has never been
- * used), this is a no-op that returns [explicitlyExcluded] unchanged -- a fresh install shows
- * everything rather than nothing.
- *
- * For every folder, the *nearest* explicit ancestor decision wins (an explicit exclude always beats
- * an explicit include at the same folder), and anything with no explicit decision anywhere in its
- * ancestor chain inherits whichever way its nearest ancestor went -- top-level folders with no
- * explicit decision of their own default to hidden, since opting in is the whole point of the
- * explorer.
+ * Resolves whether a single folder at [path] is effectively visible under the folder explorer's
+ * opt-in "show this at the root, auto-include its subfolders unless I say otherwise" model: the
+ * *nearest* explicit ancestor decision wins (an explicit exclude always beats an explicit include
+ * at the same folder), and anything with no explicit decision anywhere in its ancestor chain
+ * inherits whichever way its nearest ancestor went -- top-level folders with no explicit decision
+ * of their own default to hidden, since opting in is the whole point of the explorer. If
+ * [includedFolders] is empty (the explorer has never been used), everything is visible.
  */
-fun FolderNode.effectiveExcludedFolders(includedFolders: Set<String>, explicitlyExcluded: Set<String>): Set<String> {
-    if (includedFolders.isEmpty()) return explicitlyExcluded
-    val effective = mutableSetOf<String>()
-    fun walk(node: FolderNode, ancestorIncluded: Boolean) {
-        val visible = when {
-            node.path in explicitlyExcluded -> false
-            node.path in includedFolders -> true
-            else -> ancestorIncluded
+fun isFolderEffectivelyVisible(path: String, includedFolders: Set<String>, explicitlyExcluded: Set<String>): Boolean {
+    if (includedFolders.isEmpty()) return true
+    var visible = false
+    var built = ""
+    for (segment in path.split("/").filter { it.isNotBlank() }) {
+        built = if (built.isEmpty()) segment else "$built/$segment"
+        visible = when {
+            built in explicitlyExcluded -> false
+            built in includedFolders -> true
+            else -> visible
         }
-        if (!visible) effective.add(node.path)
-        for (child in node.children.values) walk(child, visible)
     }
-    for (child in children.values) walk(child, false)
-    return effective
+    return visible
 }
 
 /**
- * Returns a copy of this tree with [excludedFolders] removed entirely, and with folders in
- * [hiddenFolders] / items in [hiddenMediaIds] removed unless [showHidden] is true. Items in
- * [trashedMediaIds] are always removed regardless of [showHidden] -- trash is a separate
- * concept from hidden, with its own screen.
+ * Returns a copy of this tree with invisible folders/items pruned out. A folder's own items only
+ * survive if the folder itself is visible under [includedFolders]/[explicitlyExcludedFolders] (see
+ * [isFolderEffectivelyVisible]), but every folder is still walked regardless of its own visibility
+ * so that a folder explicitly re-included deeper down an otherwise-invisible branch (e.g. an
+ * invisible "DCIM" containing an explicitly included "DCIM/Camera") still surfaces -- an invisible
+ * folder is kept in the result only as a pass-through container when it has a visible descendant,
+ * and dropped entirely otherwise. Folders in [hiddenFolders] / items in [hiddenMediaIds] are removed
+ * unless [showHidden] is true. Items in [trashedMediaIds] are always removed regardless of
+ * [showHidden] -- trash is a separate concept from hidden, with its own screen.
  */
 fun FolderNode.filtered(
-    excludedFolders: Set<String>,
+    includedFolders: Set<String>,
+    explicitlyExcludedFolders: Set<String>,
     hiddenFolders: Set<String>,
     hiddenMediaIds: Set<Long>,
     showHidden: Boolean,
     trashedMediaIds: Set<Long> = emptySet(),
 ): FolderNode {
+    val visible = isFolderEffectivelyVisible(path, includedFolders, explicitlyExcludedFolders)
     val result = FolderNode(path, name)
     for ((childName, child) in children) {
-        if (child.path in excludedFolders) continue
         if (!showHidden && child.path in hiddenFolders) continue
-        result.children[childName] =
-            child.filtered(excludedFolders, hiddenFolders, hiddenMediaIds, showHidden, trashedMediaIds)
+        val filteredChild =
+            child.filtered(includedFolders, explicitlyExcludedFolders, hiddenFolders, hiddenMediaIds, showHidden, trashedMediaIds)
+        val childVisible = isFolderEffectivelyVisible(child.path, includedFolders, explicitlyExcludedFolders)
+        if (childVisible || filteredChild.children.isNotEmpty() || filteredChild.items.isNotEmpty()) {
+            result.children[childName] = filteredChild
+        }
     }
-    for (item in items) {
-        if (item.id in trashedMediaIds) continue
-        if (!showHidden && item.id in hiddenMediaIds) continue
-        result.items.add(item)
+    if (visible) {
+        for (item in items) {
+            if (item.id in trashedMediaIds) continue
+            if (!showHidden && item.id in hiddenMediaIds) continue
+            result.items.add(item)
+        }
     }
     return result
 }

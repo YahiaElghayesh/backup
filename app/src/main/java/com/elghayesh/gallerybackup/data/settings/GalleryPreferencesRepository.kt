@@ -165,7 +165,8 @@ class GalleryPreferencesRepository(private val context: Context) {
      * Sets exactly one folder's own visibility, recording only the minimal explicit override
      * needed: if [visible], marks it included (and drops any of its own prior exclusion); if not,
      * marks it excluded (and drops any of its own prior inclusion). Subfolders are unaffected here
-     * -- they keep inheriting from their nearest explicit ancestor, per [effectiveExcludedFolders].
+     * -- they keep inheriting from their nearest explicit ancestor (see
+     * `FolderNode.filtered`/`isFolderEffectivelyVisible` in `data.media.MediaModels`).
      */
     suspend fun setFolderVisibility(path: String, visible: Boolean) {
         context.galleryPrefsStore.edit { prefs ->

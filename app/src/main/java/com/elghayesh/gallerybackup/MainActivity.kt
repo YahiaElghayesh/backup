@@ -45,6 +45,7 @@ import com.elghayesh.gallerybackup.ui.gallery.FolderVisibilityExplorerScreen
 import com.elghayesh.gallerybackup.ui.gallery.GalleryScreen
 import com.elghayesh.gallerybackup.ui.gallery.GallerySettingsScreen
 import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
+import com.elghayesh.gallerybackup.ui.settings.BackupFolderExplorerScreen
 import com.elghayesh.gallerybackup.ui.settings.BackupSettingsScreen
 import com.elghayesh.gallerybackup.ui.settings.BackupViewModel
 import com.elghayesh.gallerybackup.ui.theme.AppTheme
@@ -196,6 +197,13 @@ private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: Back
         }
         composable("backupSettings") {
             BackupSettingsScreen(
+                backupViewModel = backupViewModel,
+                onOpenFolderExplorer = { navController.navigate("backupFolderExplorer") },
+                onBack = { navController.popBackStack() },
+            )
+        }
+        composable("backupFolderExplorer") {
+            BackupFolderExplorerScreen(
                 galleryViewModel = galleryViewModel,
                 backupViewModel = backupViewModel,
                 onBack = { navController.popBackStack() },

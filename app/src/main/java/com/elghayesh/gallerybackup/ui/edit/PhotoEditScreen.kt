@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -80,6 +81,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -690,17 +692,29 @@ private fun GestureAdjustPanel(
     }
 }
 
+/**
+ * Positions this element at ([xNorm], [yNorm]) fractions of [boxSize], measured in pixels via
+ * [offset] (not [padding], which asserts non-negative values and would crash once a centered
+ * handle's top-left goes negative near an edge). [centerOnPointDp] shifts the element so it's
+ * centered ON that point rather than anchored there by its own top-left corner -- pass the
+ * element's own size for a drag handle that should sit right on the point it represents; leave
+ * it 0.dp (the default) for something like sticker text that's meant to start at the point.
+ */
 private fun Modifier.normOffset(
     xNorm: Float,
     yNorm: Float,
     boxSize: IntSize,
     density: androidx.compose.ui.unit.Density,
-): Modifier = this.then(
-    Modifier.padding(
-        start = with(density) { (xNorm * boxSize.width).toDp() },
-        top = with(density) { (yNorm * boxSize.height).toDp() },
-    ),
-)
+    centerOnPointDp: androidx.compose.ui.unit.Dp = 0.dp,
+): Modifier = this.offset {
+    with(density) {
+        val half = centerOnPointDp.toPx() / 2f
+        IntOffset(
+            (xNorm * boxSize.width - half).roundToInt(),
+            (yNorm * boxSize.height - half).roundToInt(),
+        )
+    }
+}
 
 @Composable
 private fun CropOverlay(
@@ -737,7 +751,7 @@ private fun CropOverlay(
     }
     Box(
         Modifier
-            .normOffset(rect.left, rect.top, boxSize, density)
+            .normOffset(rect.left, rect.top, boxSize, density, centerOnPointDp = 28.dp)
             .size(28.dp)
             .pointerInput(boxSize) {
                 detectDragGestures(onDragEnd = { onDragEnd() }) { change, dragAmount ->
@@ -752,7 +766,7 @@ private fun CropOverlay(
     )
     Box(
         Modifier
-            .normOffset(rect.right, rect.top, boxSize, density)
+            .normOffset(rect.right, rect.top, boxSize, density, centerOnPointDp = 28.dp)
             .size(28.dp)
             .pointerInput(boxSize) {
                 detectDragGestures(onDragEnd = { onDragEnd() }) { change, dragAmount ->
@@ -767,7 +781,7 @@ private fun CropOverlay(
     )
     Box(
         Modifier
-            .normOffset(rect.left, rect.bottom, boxSize, density)
+            .normOffset(rect.left, rect.bottom, boxSize, density, centerOnPointDp = 28.dp)
             .size(28.dp)
             .pointerInput(boxSize) {
                 detectDragGestures(onDragEnd = { onDragEnd() }) { change, dragAmount ->
@@ -782,7 +796,7 @@ private fun CropOverlay(
     )
     Box(
         Modifier
-            .normOffset(rect.right, rect.bottom, boxSize, density)
+            .normOffset(rect.right, rect.bottom, boxSize, density, centerOnPointDp = 28.dp)
             .size(28.dp)
             .pointerInput(boxSize) {
                 detectDragGestures(onDragEnd = { onDragEnd() }) { change, dragAmount ->
@@ -874,7 +888,7 @@ private fun FocusHandle(
 ) {
     Box(
         Modifier
-            .normOffset(focus.xNorm, focus.yNorm, boxSize, density)
+            .normOffset(focus.xNorm, focus.yNorm, boxSize, density, centerOnPointDp = 32.dp)
             .size(32.dp)
             .pointerInput(boxSize) {
                 detectDragGestures(onDragEnd = { onDragEnd() }) { change, dragAmount ->

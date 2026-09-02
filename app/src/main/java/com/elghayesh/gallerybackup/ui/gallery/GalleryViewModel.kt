@@ -13,7 +13,6 @@ import com.elghayesh.gallerybackup.data.media.TrashManager
 import com.elghayesh.gallerybackup.data.media.TrashRepository
 import com.elghayesh.gallerybackup.data.media.allItemsRecursive
 import com.elghayesh.gallerybackup.data.media.copyMediaTo
-import com.elghayesh.gallerybackup.data.media.effectiveExcludedFolders
 import com.elghayesh.gallerybackup.data.media.filtered
 import com.elghayesh.gallerybackup.data.media.withVirtualFolders
 import com.elghayesh.gallerybackup.data.settings.AccentColor
@@ -115,9 +114,8 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         prefs.virtualFolders,
         prefs.includedFolders,
     ) { inputs, trashedIds, virtualFolders, includedFolders ->
-        val effectiveExcluded = inputs.raw?.effectiveExcludedFolders(includedFolders, inputs.excluded) ?: inputs.excluded
         inputs.raw
-            ?.filtered(effectiveExcluded, inputs.hiddenFolders, inputs.hiddenMedia, inputs.showHidden, trashedIds)
+            ?.filtered(includedFolders, inputs.excluded, inputs.hiddenFolders, inputs.hiddenMedia, inputs.showHidden, trashedIds)
             ?.withVirtualFolders(virtualFolders)
     }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
