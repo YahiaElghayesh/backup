@@ -82,6 +82,9 @@ import com.elghayesh.gallerybackup.data.media.MediaItem
 import com.elghayesh.gallerybackup.data.media.allItemsRecursive
 import com.elghayesh.gallerybackup.data.media.findNode
 import com.elghayesh.gallerybackup.data.media.latestModifiedSec
+import com.elghayesh.gallerybackup.data.media.promotedChildren
+import com.elghayesh.gallerybackup.data.media.promotionAwareCoverUri
+import com.elghayesh.gallerybackup.data.media.promotionAwareItemCount
 import com.elghayesh.gallerybackup.data.settings.FolderCover
 import com.elghayesh.gallerybackup.data.settings.FolderSortOrder
 import com.elghayesh.gallerybackup.data.settings.ViewType
