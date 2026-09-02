@@ -89,11 +89,11 @@ class GalleryPreferencesRepository(private val context: Context) {
         context.galleryPrefsStore.data.map { it[Keys.EXCLUDED_FOLDERS] ?: emptySet() }
 
     /**
-     * Folders pinned to the gallery's home page from the folder explorer. Purely additive and
-     * flat -- each entry shows up as its own tile at the gallery root (with its full real
-     * contents, unfiltered by this set), on top of whatever's already there. Pinning a subfolder
-     * doesn't affect its parent's own pin state or vice versa; browsing into a folder normally
-     * (whether reached via a pin or by drilling down for real) always shows everything inside it.
+     * Folders pinned to the gallery's home page from the folder explorer. A flat set -- pinning a
+     * subfolder doesn't affect its parent's own pin state or vice versa -- but not purely additive:
+     * a pinned folder is *promoted* out of its real parent's own listing (wherever that parent is
+     * shown) and surfaces instead as its own tile at the gallery root, so it isn't shown twice.
+     * Its own contents, once you open it, are still shown in full either way.
      */
     val includedFolders: Flow<Set<String>> =
         context.galleryPrefsStore.data.map { it[Keys.INCLUDED_FOLDERS] ?: emptySet() }

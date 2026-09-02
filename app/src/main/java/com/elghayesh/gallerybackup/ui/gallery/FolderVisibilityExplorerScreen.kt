@@ -39,9 +39,11 @@ import com.elghayesh.gallerybackup.data.media.findNode
 
 /**
  * A file-explorer-style browser with two independent checkboxes per folder:
- * - **Show**: pins this folder (with everything inside it, unfiltered) as its own tile on the
- *   gallery's home page, in addition to wherever it already sits when you browse normally. Purely
- *   additive -- pinning a subfolder doesn't hide or change its parent, and vice versa.
+ * - **Show**: pins this folder (with everything inside it, unfiltered once you open it) as its
+ *   own tile on the gallery's home page. This *promotes* it out of its real parent's own listing
+ *   -- e.g. pinning "gg/bb" makes "bb" show up next to "gg" at the gallery's root, and opening
+ *   "gg" from then on shows everything except "bb". Pinning a folder doesn't change whether its
+ *   own parent or children are pinned.
  * - **Hide**: removes this folder (and everything inside it) from the gallery everywhere, until a
  *   later "Unhide all" or unchecking it again. Independent of Show -- a folder can be pinned and
  *   hidden at once (hidden wins), or neither, or just one.
@@ -91,9 +93,9 @@ fun FolderVisibilityExplorerScreen(
         Column(Modifier.padding(padding).fillMaxSize()) {
             if (currentPath.isEmpty()) {
                 Text(
-                    "Show pins a folder (with everything inside it) to the gallery's home page, on " +
-                        "top of what's already there. Hide removes a folder everywhere until you " +
-                        "uncheck it or tap \"Unhide all\".",
+                    "Show pins a folder to the gallery's home page and moves it out of its parent's " +
+                        "listing there. Hide removes a folder everywhere until you uncheck it or tap " +
+                        "\"Unhide all\".",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(16.dp),
