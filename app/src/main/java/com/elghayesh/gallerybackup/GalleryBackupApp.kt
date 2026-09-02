@@ -23,6 +23,7 @@ class GalleryBackupApp : Application(), ImageLoaderFactory {
 
     override fun onCreate() {
         super.onCreate()
+        CrashReporter.install(this)
         createNotificationChannel()
 
         MediaChangeObserver(this, appScope).register()

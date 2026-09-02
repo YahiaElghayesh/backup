@@ -18,10 +18,17 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -100,6 +107,32 @@ class MainActivity : ComponentActivity() {
             AppTheme(themeMode = themeMode, accentColor = accentColor) {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     AppUpdateController()
+
+                    var lastCrash by remember { mutableStateOf<String?>(null) }
+                    LaunchedEffect(Unit) {
+                        lastCrash = CrashReporter.consumeLastCrash(this@MainActivity)
+                    }
+                    lastCrash?.let { crashText ->
+                        AlertDialog(
+                            onDismissRequest = { lastCrash = null },
+                            title = { Text("MediaHub crashed last time") },
+                            text = {
+                                Column(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState())) {
+                                    Text(
+                                        "Screenshot or copy this and send it over so the exact cause can be fixed.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                    Spacer(Modifier.height(8.dp))
+                                    SelectionContainer {
+                                        Text(crashText, style = MaterialTheme.typography.bodySmall)
+                                    }
+                                }
+                            },
+                            confirmButton = {
+                                TextButton(onClick = { lastCrash = null }) { Text("OK") }
+                            },
+                        )
+                    }
 
                     LaunchedEffect(Unit) {
                         backupViewModel.consentRequests.collect { pendingIntent ->
