@@ -10,7 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import org.json.JSONObject
+import org.json.JSONArray
 import java.io.File
 import java.io.IOException
 
@@ -18,19 +18,24 @@ import java.io.IOException
 data class ReleaseInfo(val versionCode: Int, val tagName: String, val downloadUrl: String)
 
 /**
- * There's no Play Store for this app, so it updates itself: checks the repo's latest GitHub
- * Release (published automatically by the build workflow, tagged "build-<run number>" with the
- * same number baked in as the APK's own versionCode -- see app/build.gradle.kts), downloads the
- * APK if it's newer than what's installed, and hands it to the system package installer.
+ * There's no Play Store for this app, so it updates itself. Source lives in a private repo, but
+ * releases publish to "app-releases" -- a small public repo (see the build workflow) shared
+ * across several projects, holding nothing but built APKs. Because it's shared, this can't just
+ * read /releases/latest (that would return whichever project published most recently, not
+ * MediaHub's); instead it lists releases and picks the highest build number tagged
+ * "mediahub-<n>" (the same number baked into this app's own versionCode -- see
+ * app/build.gradle.kts), downloads its APK if newer than what's installed, and hands it to the
+ * system package installer. The whole check is a plain unauthenticated read of a public repo --
+ * no credential of any kind lives in this app.
  */
 class UpdateChecker(private val context: Context) {
 
     private val client = OkHttpClient()
 
-    /** Null if already up to date, the check failed (offline, etc.), or the release couldn't be parsed. */
+    /** Null if already up to date, the check failed (offline, etc.), or no release could be parsed. */
     suspend fun checkForUpdate(): ReleaseInfo? = withContext(Dispatchers.IO) {
         val request = Request.Builder()
-            .url("https://api.github.com/repos/YahiaElghayesh/backup/releases/latest")
+            .url("https://api.github.com/repos/YahiaElghayesh/app-releases/releases?per_page=50")
             .header("Accept", "application/vnd.github+json")
             .build()
         val body = try {
@@ -42,21 +47,27 @@ class UpdateChecker(private val context: Context) {
             null
         } ?: return@withContext null
 
-        val json = try { JSONObject(body) } catch (e: Exception) { return@withContext null }
-        val tag = json.optString("tag_name")
-        val versionCode = tag.substringAfterLast('-').toIntOrNull() ?: return@withContext null
-        if (versionCode <= installedVersionCode()) return@withContext null
+        val releases = try { JSONArray(body) } catch (e: Exception) { return@withContext null }
+        var best: ReleaseInfo? = null
+        for (i in 0 until releases.length()) {
+            val release = releases.optJSONObject(i) ?: continue
+            val tag = release.optString("tag_name")
+            if (!tag.startsWith("mediahub-")) continue
+            val versionCode = tag.removePrefix("mediahub-").toIntOrNull() ?: continue
+            if (best != null && versionCode <= best.versionCode) continue
 
-        val assets = json.optJSONArray("assets") ?: return@withContext null
-        var downloadUrl: String? = null
-        for (i in 0 until assets.length()) {
-            val asset = assets.optJSONObject(i) ?: continue
-            if (asset.optString("name") == "app-debug.apk") {
-                downloadUrl = asset.optString("browser_download_url")
-                break
+            val assets = release.optJSONArray("assets") ?: continue
+            var downloadUrl: String? = null
+            for (j in 0 until assets.length()) {
+                val asset = assets.optJSONObject(j) ?: continue
+                if (asset.optString("name") == "mediahub.apk") {
+                    downloadUrl = asset.optString("browser_download_url")
+                    break
+                }
             }
+            downloadUrl?.let { best = ReleaseInfo(versionCode, tag, it) }
         }
-        downloadUrl?.let { ReleaseInfo(versionCode, tag, it) }
+        best?.takeIf { it.versionCode > installedVersionCode() }
     }
 
     private fun installedVersionCode(): Int {
