@@ -59,7 +59,7 @@
 
         <!-- WorkManager schedules and survives reboot on its own; no custom boot receiver needed.
              Its default self-initialization normally runs via this same androidx.startup
-             ContentProvider, which Android creates BEFORE Application.onCreate() -- before
+             ContentProvider, which Android creates BEFORE Application.onCreate(), before
              GalleryBackupApp has installed CrashReporter or done anything else. If that init
              ever throws (e.g. a corrupted persisted job), the app crash-loops on every single
              launch with no crash ever reaching CrashReporter, and no way back in short of
@@ -83,7 +83,7 @@
              foregroundServiceType declared for it here, defaulting to none. Since Android 14
              (this app's targetSdk), the OS enforces that the type requested at runtime must be a
              subset of what the manifest declares for that service, and throws
-             IllegalArgumentException otherwise -- inside WorkManager's own service, not inside
+             IllegalArgumentException otherwise, inside WorkManager's own service, not inside
              any of our own coroutines, so no amount of try/catch around setForeground() itself
              could ever have caught it. Declaring the type here is the actual fix. -->
         <service
