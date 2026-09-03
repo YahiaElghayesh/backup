@@ -25,6 +25,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -57,6 +58,7 @@ fun FolderVisibilityExplorerScreen(
     val root by viewModel.root.collectAsState()
     val includedFolders by viewModel.includedFolders.collectAsState()
     val hiddenFolders by viewModel.hiddenFolders.collectAsState()
+    val isLoading by viewModel.isLoading.collectAsState()
     var currentPath by remember { mutableStateOf("") }
 
     val node = root?.findNode(currentPath)
@@ -90,69 +92,75 @@ fun FolderVisibilityExplorerScreen(
             )
         },
     ) { padding ->
-        Column(Modifier.padding(padding).fillMaxSize()) {
-            if (currentPath.isEmpty()) {
-                Text(
-                    "Show pins a folder to the gallery's home page and moves it out of its parent's " +
-                        "listing there. Hide removes a folder everywhere until you uncheck it or tap " +
-                        "\"Unhide all\".",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(16.dp),
-                )
-            }
-            if (children.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("No subfolders here.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        PullToRefreshBox(
+            isRefreshing = isLoading,
+            onRefresh = { viewModel.refresh() },
+            modifier = Modifier.padding(padding).fillMaxSize(),
+        ) {
+            Column(Modifier.fillMaxSize()) {
+                if (currentPath.isEmpty()) {
+                    Text(
+                        "Show pins a folder to the gallery's home page and moves it out of its parent's " +
+                            "listing there. Hide removes a folder everywhere until you uncheck it or tap " +
+                            "\"Unhide all\".",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(16.dp),
+                    )
                 }
-            } else {
-                LazyColumn(Modifier.fillMaxWidth()) {
-                    items(children, key = { it.path }) { folder ->
-                        val pinned = folder.path in includedFolders
-                        val hidden = folder.path in hiddenFolders
-                        Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Checkbox(
-                                    checked = pinned,
-                                    onCheckedChange = { checked -> viewModel.setFolderIncluded(folder.path, checked) },
-                                )
-                                Text("Show", style = MaterialTheme.typography.labelSmall)
-                            }
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Checkbox(
-                                    checked = hidden,
-                                    onCheckedChange = { checked -> viewModel.setFolderHidden(folder.path, checked) },
-                                )
-                                Text("Hide", style = MaterialTheme.typography.labelSmall)
-                            }
-                            Spacer(Modifier.width(4.dp))
+                if (children.isEmpty()) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text("No subfolders here.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                } else {
+                    LazyColumn(Modifier.fillMaxWidth()) {
+                        items(children, key = { it.path }) { folder ->
+                            val pinned = folder.path in includedFolders
+                            val hidden = folder.path in hiddenFolders
                             Row(
-                                Modifier
-                                    .weight(1f)
-                                    .clickable { currentPath = folder.path },
+                                Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Icon(Icons.Filled.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Column(Modifier.padding(start = 12.dp).weight(1f)) {
-                                    Text(folder.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    Text(
-                                        buildString {
-                                            append("${folder.totalItemCount()} items")
-                                            if (pinned) append(" · pinned to home")
-                                            if (hidden) append(" · hidden")
-                                        },
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Checkbox(
+                                        checked = pinned,
+                                        onCheckedChange = { checked -> viewModel.setFolderIncluded(folder.path, checked) },
+                                    )
+                                    Text("Show", style = MaterialTheme.typography.labelSmall)
+                                }
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Checkbox(
+                                        checked = hidden,
+                                        onCheckedChange = { checked -> viewModel.setFolderHidden(folder.path, checked) },
+                                    )
+                                    Text("Hide", style = MaterialTheme.typography.labelSmall)
+                                }
+                                Spacer(Modifier.width(4.dp))
+                                Row(
+                                    Modifier
+                                        .weight(1f)
+                                        .clickable { currentPath = folder.path },
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Icon(Icons.Filled.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                                        Text(folder.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Text(
+                                            buildString {
+                                                append("${folder.totalItemCount()} items")
+                                                if (pinned) append(" · pinned to home")
+                                                if (hidden) append(" · hidden")
+                                            },
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    Icon(
+                                        Icons.Filled.ChevronRight,
+                                        contentDescription = "Open",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                 }
-                                Icon(
-                                    Icons.Filled.ChevronRight,
-                                    contentDescription = "Open",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
                             }
                         }
                     }

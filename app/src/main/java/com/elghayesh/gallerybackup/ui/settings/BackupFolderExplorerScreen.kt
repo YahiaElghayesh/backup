@@ -22,6 +22,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -50,6 +51,7 @@ fun BackupFolderExplorerScreen(
     onBack: () -> Unit,
 ) {
     val root by galleryViewModel.root.collectAsState()
+    val isLoading by galleryViewModel.isLoading.collectAsState()
     val selectedFolders by backupViewModel.selectedFolders.collectAsState(initial = emptySet())
     var currentPath by remember { mutableStateOf("") }
 
@@ -79,46 +81,52 @@ fun BackupFolderExplorerScreen(
             )
         },
     ) { padding ->
-        Column(Modifier.padding(padding).fillMaxSize()) {
-            if (currentPath.isEmpty()) {
-                Text(
-                    "Check a folder to back it up. Each folder is independent -- checking one " +
-                        "does not automatically include its subfolders, so open it and check " +
-                        "those separately if you want them too.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(16.dp),
-                )
-            }
-            if (children.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("No subfolders here.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        PullToRefreshBox(
+            isRefreshing = isLoading,
+            onRefresh = { galleryViewModel.refresh() },
+            modifier = Modifier.padding(padding).fillMaxSize(),
+        ) {
+            Column(Modifier.fillMaxSize()) {
+                if (currentPath.isEmpty()) {
+                    Text(
+                        "Check a folder to back it up. Each folder is independent -- checking one " +
+                            "does not automatically include its subfolders, so open it and check " +
+                            "those separately if you want them too.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(16.dp),
+                    )
                 }
-            } else {
-                LazyColumn(Modifier.fillMaxWidth()) {
-                    items(children, key = { it.path }) { folder ->
-                        val checked = folder.path in selectedFolders
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .clickable { currentPath = folder.path }
-                                .padding(horizontal = 8.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Checkbox(
-                                checked = checked,
-                                onCheckedChange = { selected -> backupViewModel.toggleFolder(folder.path, selected) },
-                            )
-                            Icon(Icons.Filled.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Column(Modifier.padding(start = 12.dp).weight(1f)) {
-                                Text(folder.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(
-                                    "${folder.items.size} items directly inside",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                if (children.isEmpty()) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text("No subfolders here.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                } else {
+                    LazyColumn(Modifier.fillMaxWidth()) {
+                        items(children, key = { it.path }) { folder ->
+                            val checked = folder.path in selectedFolders
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clickable { currentPath = folder.path }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Checkbox(
+                                    checked = checked,
+                                    onCheckedChange = { selected -> backupViewModel.toggleFolder(folder.path, selected) },
                                 )
+                                Icon(Icons.Filled.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                                    Text(folder.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(
+                                        "${folder.items.size} items directly inside",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Icon(Icons.Filled.ChevronRight, contentDescription = "Open", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
-                            Icon(Icons.Filled.ChevronRight, contentDescription = "Open", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 }
