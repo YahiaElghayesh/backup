@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -37,6 +38,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.elghayesh.gallerybackup.data.settings.AccentColor
 import com.elghayesh.gallerybackup.data.settings.ThemeMode
+import com.elghayesh.gallerybackup.data.update.UpdateCheckCoordinator
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -50,6 +52,8 @@ fun GallerySettingsScreen(
     val accentColor by viewModel.accentColor.collectAsState()
     val folderGridColumns by viewModel.folderGridColumns.collectAsState()
     val mediaGridColumns by viewModel.mediaGridColumns.collectAsState()
+    val isCheckingForUpdate by UpdateCheckCoordinator.isChecking.collectAsState()
+    val lastCheckFoundUpdate by UpdateCheckCoordinator.lastCheckFoundUpdate.collectAsState()
 
     Scaffold(
         topBar = {
@@ -139,6 +143,28 @@ fun GallerySettingsScreen(
                         )
                     }
                     Icon(Icons.Filled.ChevronRight, contentDescription = null)
+                }
+            }
+
+            item {
+                HorizontalDivider()
+                Column(Modifier.padding(16.dp)) {
+                    Text("Updates", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = { UpdateCheckCoordinator.requestCheck() },
+                        enabled = !isCheckingForUpdate,
+                    ) {
+                        Text(if (isCheckingForUpdate) "Checking..." else "Check for updates")
+                    }
+                    if (!isCheckingForUpdate && lastCheckFoundUpdate == false) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "You're on the latest version.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
         }

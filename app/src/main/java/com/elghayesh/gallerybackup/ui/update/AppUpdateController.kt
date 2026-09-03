@@ -23,6 +23,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.elghayesh.gallerybackup.data.update.ReleaseInfo
 import com.elghayesh.gallerybackup.data.update.UpdateChecker
+import com.elghayesh.gallerybackup.data.update.UpdateCheckCoordinator
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -55,8 +56,16 @@ fun AppUpdateController() {
         }
     }
 
+    suspend fun performCheck() {
+        UpdateCheckCoordinator.onCheckStarted()
+        val update = checker.checkForUpdate()
+        if (update != null) availableUpdate = update
+        UpdateCheckCoordinator.onCheckFinished(foundUpdate = update != null)
+    }
+
+    LaunchedEffect(Unit) { performCheck() }
     LaunchedEffect(Unit) {
-        availableUpdate = checker.checkForUpdate()
+        UpdateCheckCoordinator.requests.collect { performCheck() }
     }
 
     availableUpdate?.let { update ->
