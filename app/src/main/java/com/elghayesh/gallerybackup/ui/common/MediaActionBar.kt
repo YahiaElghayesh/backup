@@ -5,7 +5,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DriveFileMove
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Share
@@ -25,10 +27,12 @@ import androidx.compose.ui.Modifier
 
 /**
  * The action row shared by the media viewer (acting on the single open item) and the
- * gallery's multi-select toolbar (acting on every selected item/folder). Every action
- * beyond Edit/Share/Delete lives behind the overflow menu as a plain text label -- the
- * exact set of what's applicable (Rename, Set cover, Exclude, ...) changes depending on
- * what's selected, so the caller builds that list rather than this component guessing.
+ * gallery's multi-select toolbar (acting on every selected item/folder). Move/Copy sit
+ * directly in the row -- they're common enough moves that hiding them behind the overflow
+ * menu cost an extra tap every time. Everything else (Rename, Set cover, Exclude, ...)
+ * still lives behind the overflow menu as a plain text label -- the exact set of what's
+ * applicable changes depending on what's selected, so the caller builds that list rather
+ * than this component guessing.
  */
 @Composable
 fun MediaActionBar(
@@ -39,6 +43,8 @@ fun MediaActionBar(
     modifier: Modifier = Modifier,
     isFavorite: Boolean = false,
     onToggleFavorite: (() -> Unit)? = null,
+    onMoveTo: (() -> Unit)? = null,
+    onCopyTo: (() -> Unit)? = null,
 ) {
     var overflowExpanded by remember { mutableStateOf(false) }
     Row(modifier = modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
@@ -54,6 +60,12 @@ fun MediaActionBar(
             }
         }
         IconButton(onClick = onShare) { Icon(Icons.Filled.Share, contentDescription = "Share") }
+        if (onMoveTo != null) {
+            IconButton(onClick = onMoveTo) { Icon(Icons.Filled.DriveFileMove, contentDescription = "Move to") }
+        }
+        if (onCopyTo != null) {
+            IconButton(onClick = onCopyTo) { Icon(Icons.Filled.ContentCopy, contentDescription = "Copy to") }
+        }
         IconButton(onClick = onDelete) { Icon(Icons.Filled.Delete, contentDescription = "Delete") }
         if (overflowActions.isNotEmpty()) {
             Box {

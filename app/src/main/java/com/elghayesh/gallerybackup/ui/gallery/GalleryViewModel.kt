@@ -87,6 +87,9 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         prefs.folderSort.stateIn(viewModelScope, SharingStarted.Eagerly, FolderSortOrder.NAME_ASC)
     val includedFolders: StateFlow<Set<String>> =
         prefs.includedFolders.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
+    /** Paths of folders created in-app before they have any real media -- see [FolderNode.withVirtualFolders]. */
+    val virtualFolders: StateFlow<Set<String>> =
+        prefs.virtualFolders.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
     val hiddenFolders: StateFlow<Set<String>> =
         prefs.hiddenFolders.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
     val hiddenMediaIds: StateFlow<Set<Long>> =

@@ -337,6 +337,8 @@ fun GalleryScreen(
                         } else {
                             null
                         },
+                        onMoveTo = { transferMode = FolderTransferMode.MOVE },
+                        onCopyTo = { transferMode = FolderTransferMode.COPY },
                         overflowActions = buildList {
                             add(
                                 (if (allSelectedHidden) "Unhide" else "Hide") to {
@@ -350,8 +352,6 @@ fun GalleryScreen(
                             if (selectedFolderNodes.size == 1 && selectedItems.isEmpty()) {
                                 add("Set cover" to { coverDialogFor = selectedFolderNodes.first() })
                             }
-                            add("Move to..." to { transferMode = FolderTransferMode.MOVE })
-                            add("Copy to..." to { transferMode = FolderTransferMode.COPY })
                             add("Properties" to { showProperties = true })
                         },
                     )
