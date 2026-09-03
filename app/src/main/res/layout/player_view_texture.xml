@@ -2,8 +2,9 @@
 <!-- TextureView instead of the default SurfaceView: SurfaceView is composited by the OS as a
      separate window layer positioned by absolute screen coordinates, which doesn't reliably stay
      in sync with a parent that's inside a pager (pages recomposing) and under a pinch-zoom
-     graphicsLayer transform -- the video can end up rendered shrunk and mispositioned. TextureView
-     draws as a normal View layer instead, so it always follows its Compose-measured bounds. -->
+     graphicsLayer transform, so the video can end up rendered shrunk and mispositioned.
+     TextureView draws as a normal View layer instead, so it always follows its Compose-measured
+     bounds. -->
 <androidx.media3.ui.PlayerView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/player_view"
