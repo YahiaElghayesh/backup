@@ -30,6 +30,10 @@ jobs:
 
       - name: Upload APK
         if: success()
+        # This is just a convenience copy for the Actions UI, separate from the GitHub Release
+        # below (which the in-app updater actually reads) -- a transient failure here (e.g. the
+        # repo's Actions artifact storage quota) must never block the release from publishing.
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: gallery-backup-debug-apk
