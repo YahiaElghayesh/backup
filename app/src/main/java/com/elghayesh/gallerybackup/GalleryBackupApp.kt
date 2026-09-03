@@ -4,6 +4,8 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
+import androidx.work.Configuration
+import androidx.work.WorkManager
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.decode.VideoFrameDecoder
@@ -24,6 +26,7 @@ class GalleryBackupApp : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
         CrashReporter.install(this)
+        initializeWorkManager()
         createNotificationChannel()
 
         MediaChangeObserver(this, appScope).register()
@@ -39,6 +42,26 @@ class GalleryBackupApp : Application(), ImageLoaderFactory {
             } catch (e: Exception) {
                 // Nothing to do -- periodic sync just won't be (re)scheduled this launch.
             }
+        }
+    }
+
+    /**
+     * WorkManager's default self-initialization is disabled in the manifest (see the comment on
+     * the androidx.startup provider there) because it normally runs inside a ContentProvider --
+     * created by Android before this Application object even exists, let alone before
+     * CrashReporter is installed above. If that initialization ever throws (e.g. a corrupted
+     * persisted job left over from a previous crash), the result is a crash on every single
+     * launch that never reaches any crash handler of ours, with no way back in short of
+     * clearing all app data. Doing it here instead means it happens after CrashReporter is
+     * installed, and it's guarded directly: if it still fails, background sync just won't work
+     * this session rather than the whole app refusing to open.
+     */
+    private fun initializeWorkManager() {
+        try {
+            WorkManager.initialize(this, Configuration.Builder().build())
+        } catch (e: Exception) {
+            // Nothing more to do -- WorkManager-backed features (periodic/on-demand sync) won't
+            // work this session, but the rest of the app remains usable.
         }
     }
 

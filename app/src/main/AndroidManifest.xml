@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -56,7 +57,25 @@
             </intent-filter>
         </activity>
 
-        <!-- WorkManager schedules and survives reboot on its own; no custom boot receiver needed. -->
+        <!-- WorkManager schedules and survives reboot on its own; no custom boot receiver needed.
+             Its default self-initialization normally runs via this same androidx.startup
+             ContentProvider, which Android creates BEFORE Application.onCreate() -- before
+             GalleryBackupApp has installed CrashReporter or done anything else. If that init
+             ever throws (e.g. a corrupted persisted job), the app crash-loops on every single
+             launch with no crash ever reaching CrashReporter, and no way back in short of
+             clearing all app data. Removing WorkManager's entry here and initializing it
+             ourselves in GalleryBackupApp.onCreate() (after CrashReporter is installed, and
+             inside a try/catch) closes that gap. -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.work.WorkManagerInitializer"
+                android:value="androidx.startup"
+                tools:node="remove" />
+        </provider>
 
         <!-- Hands a downloaded update APK to the system installer via a content:// Uri instead of a
              raw file:// path (blocked by FileUriExposedException on Android 7+). -->
