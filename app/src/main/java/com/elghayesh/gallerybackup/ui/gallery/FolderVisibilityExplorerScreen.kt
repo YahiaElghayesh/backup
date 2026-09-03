@@ -1,5 +1,6 @@
 package com.elghayesh.gallerybackup.ui.gallery
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -69,6 +70,10 @@ fun FolderVisibilityExplorerScreen(
     val node = root?.findNode(currentPath)
     val children = node?.children?.values?.sortedBy { it.name.lowercase() } ?: emptyList()
 
+    BackHandler(enabled = currentPath.isNotEmpty()) {
+        currentPath = currentPath.substringBeforeLast('/', "")
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -126,6 +131,12 @@ fun FolderVisibilityExplorerScreen(
                         items(children, key = { it.path }) { folder ->
                             val pinned = folder.path in includedFolders
                             val hidden = folder.path in hiddenFolders
+                            val pinnedInside = includedFolders.count {
+                                it != folder.path && it.startsWith("${folder.path}/")
+                            }
+                            val hiddenInside = hiddenFolders.count {
+                                it != folder.path && it.startsWith("${folder.path}/")
+                            }
                             Row(
                                 Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically,
@@ -159,6 +170,8 @@ fun FolderVisibilityExplorerScreen(
                                                 append("${folder.totalItemCount()} items")
                                                 if (pinned) append(" · pinned to home")
                                                 if (hidden) append(" · hidden")
+                                                if (pinnedInside > 0) append(" · $pinnedInside subfolder${if (pinnedInside == 1) "" else "s"} pinned")
+                                                if (hiddenInside > 0) append(" · $hiddenInside subfolder${if (hiddenInside == 1) "" else "s"} hidden")
                                             },
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,

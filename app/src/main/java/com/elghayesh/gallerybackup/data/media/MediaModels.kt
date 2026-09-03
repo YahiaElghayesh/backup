@@ -96,7 +96,15 @@ fun FolderNode.filtered(
     val result = FolderNode(path, name)
     for ((childName, child) in children) {
         if (!showHidden && child.path in hiddenFolders) continue
-        result.children[childName] = child.filtered(hiddenFolders, hiddenMediaIds, showHidden, trashedMediaIds)
+        val filteredChild = child.filtered(hiddenFolders, hiddenMediaIds, showHidden, trashedMediaIds)
+        // Drop a folder that's left with nothing in it -- e.g. every item in it was just trashed
+        // by a move, which copies to the new location and trashes the original MediaStore row
+        // rather than deleting it, so the row (and this folder) would otherwise keep showing up
+        // as empty until the trash is actually purged. A deliberately-kept-empty user-created
+        // folder is re-added afterward by withVirtualFolders, so this is safe to prune.
+        if (filteredChild.items.isNotEmpty() || filteredChild.children.isNotEmpty()) {
+            result.children[childName] = filteredChild
+        }
     }
     for (item in items) {
         if (item.id in trashedMediaIds) continue

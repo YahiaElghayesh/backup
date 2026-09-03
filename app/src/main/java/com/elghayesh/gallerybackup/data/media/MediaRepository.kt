@@ -3,12 +3,20 @@ package com.elghayesh.gallerybackup.data.media
 import android.content.ContentUris
 import android.content.Context
 import android.database.Cursor
+import android.media.MediaScannerConnection
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.File
+import kotlin.coroutines.resume
+
+private val MEDIA_EXTENSIONS = setOf(
+    "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp",
+    "mp4", "3gp", "3gpp", "mkv", "webm", "mov", "avi", "m4v",
+)
 
 /**
  * Reads the device's photo/video library from MediaStore and reconstructs the real
@@ -28,6 +36,78 @@ class MediaRepository(private val context: Context) {
             isVideo = true,
         )
         FolderNode.buildTree(items)
+    }
+
+    /**
+     * Files written straight to storage by something other than MediaStore's own insert() API --
+     * a cloud-sync client, a cable/MTP transfer, another file manager -- can sit on disk without
+     * MediaStore ever noticing them; there's no guaranteed background rescan, so a plain refresh
+     * (which only re-queries MediaStore) can miss files that are plainly there. With "All files
+     * access" granted, this walks the real filesystem, finds media files MediaStore doesn't know
+     * about yet, and explicitly asks the system to scan just those, so the next [scanFolderTree]
+     * picks them up. A no-op without that permission -- there's no way to discover them otherwise.
+     */
+    suspend fun rescanUnindexedMedia() = withContext(Dispatchers.IO) {
+        if (!hasAllFilesAccess()) return@withContext
+        val indexed = indexedAbsolutePaths()
+        val missing = mutableListOf<String>()
+        val root = Environment.getExternalStorageDirectory()
+        fun walk(dir: File, isRoot: Boolean) {
+            val children = runCatching { dir.listFiles() }.getOrNull() ?: return
+            for (child in children) {
+                if (child.name.startsWith(".")) continue
+                if (child.isDirectory) {
+                    if (isRoot && child.name == "Android") continue
+                    walk(child, false)
+                } else if (child.extension.lowercase() in MEDIA_EXTENSIONS && child.absolutePath !in indexed) {
+                    missing += child.absolutePath
+                }
+            }
+        }
+        walk(root, true)
+        if (missing.isEmpty()) return@withContext
+        suspendCancellableCoroutine<Unit> { cont ->
+            var remaining = missing.size
+            MediaScannerConnection.scanFile(context, missing.toTypedArray(), null) { _, _ ->
+                remaining--
+                if (remaining <= 0 && cont.isActive) cont.resume(Unit)
+            }
+        }
+    }
+
+    /** Absolute filesystem paths of every image/video MediaStore currently has indexed. */
+    private fun indexedAbsolutePaths(): Set<String> {
+        val result = mutableSetOf<String>()
+        val storageRoot = Environment.getExternalStorageDirectory().path.trimEnd('/')
+        val useRelativePath = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+        for (collection in listOf(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, MediaStore.Video.Media.EXTERNAL_CONTENT_URI)) {
+            val projection = buildList {
+                add(MediaStore.MediaColumns.DISPLAY_NAME)
+                if (useRelativePath) {
+                    add(MediaStore.MediaColumns.RELATIVE_PATH)
+                } else {
+                    @Suppress("DEPRECATION")
+                    add(MediaStore.MediaColumns.DATA)
+                }
+            }.toTypedArray()
+            context.contentResolver.query(collection, projection, null, null, null)?.use { cursor ->
+                val nameCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
+                if (useRelativePath) {
+                    val relCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.RELATIVE_PATH)
+                    while (cursor.moveToNext()) {
+                        val rel = cursor.getString(relCol) ?: ""
+                        result += "$storageRoot/$rel${cursor.getString(nameCol) ?: ""}"
+                    }
+                } else {
+                    @Suppress("DEPRECATION")
+                    val dataCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATA)
+                    while (cursor.moveToNext()) {
+                        cursor.getString(dataCol)?.let { result += it }
+                    }
+                }
+            }
+        }
+        return result
     }
 
     /**

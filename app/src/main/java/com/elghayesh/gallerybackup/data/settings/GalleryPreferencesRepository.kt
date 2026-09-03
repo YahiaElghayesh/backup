@@ -49,7 +49,11 @@ data class FolderCover(val text: String, val colorSeed: Long)
 class GalleryPreferencesRepository(private val context: Context) {
 
     private object Keys {
+        /** Legacy single view-type key, from before folder and media view types were split. Still
+         * read as the fallback default for both new keys, so an existing install's choice carries over. */
         val VIEW_TYPE = stringPreferencesKey("view_type")
+        val FOLDER_VIEW_TYPE = stringPreferencesKey("folder_view_type")
+        val MEDIA_VIEW_TYPE = stringPreferencesKey("media_view_type")
         /** Column count for folder tiles. Key name kept as "grid_columns" for compatibility with
          * installs from before folder and media tile sizes were split into separate settings. */
         val FOLDER_GRID_COLUMNS = intPreferencesKey("grid_columns")
@@ -70,8 +74,19 @@ class GalleryPreferencesRepository(private val context: Context) {
         val FAVORITE_MEDIA_IDS = stringSetPreferencesKey("favorite_media_ids")
     }
 
-    val viewType: Flow<ViewType> = context.galleryPrefsStore.data.map { prefs ->
-        prefs[Keys.VIEW_TYPE]?.let { runCatching { ViewType.valueOf(it) }.getOrNull() } ?: ViewType.GRID
+    private fun legacyViewType(prefs: androidx.datastore.preferences.core.Preferences): ViewType? =
+        prefs[Keys.VIEW_TYPE]?.let { runCatching { ViewType.valueOf(it) }.getOrNull() }
+
+    /** Grid vs. list for folder tiles -- independent of [mediaViewType]. */
+    val folderViewType: Flow<ViewType> = context.galleryPrefsStore.data.map { prefs ->
+        prefs[Keys.FOLDER_VIEW_TYPE]?.let { runCatching { ViewType.valueOf(it) }.getOrNull() }
+            ?: legacyViewType(prefs) ?: ViewType.GRID
+    }
+
+    /** Grid vs. list for photo/video tiles -- independent of [folderViewType]. */
+    val mediaViewType: Flow<ViewType> = context.galleryPrefsStore.data.map { prefs ->
+        prefs[Keys.MEDIA_VIEW_TYPE]?.let { runCatching { ViewType.valueOf(it) }.getOrNull() }
+            ?: legacyViewType(prefs) ?: ViewType.GRID
     }
 
     /** How many folder tiles sit across the gallery's width -- independent of [mediaGridColumns]. */
@@ -151,8 +166,12 @@ class GalleryPreferencesRepository(private val context: Context) {
             (prefs[Keys.FAVORITE_MEDIA_IDS] ?: emptySet()).mapNotNull { it.toLongOrNull() }.toSet()
         }
 
-    suspend fun setViewType(type: ViewType) {
-        context.galleryPrefsStore.edit { it[Keys.VIEW_TYPE] = type.name }
+    suspend fun setFolderViewType(type: ViewType) {
+        context.galleryPrefsStore.edit { it[Keys.FOLDER_VIEW_TYPE] = type.name }
+    }
+
+    suspend fun setMediaViewType(type: ViewType) {
+        context.galleryPrefsStore.edit { it[Keys.MEDIA_VIEW_TYPE] = type.name }
     }
 
     suspend fun setFolderGridColumns(columns: Int) {

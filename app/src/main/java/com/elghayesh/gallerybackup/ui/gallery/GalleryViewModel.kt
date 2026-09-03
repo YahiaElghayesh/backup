@@ -84,8 +84,10 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    val viewType: StateFlow<ViewType> =
-        prefs.viewType.stateIn(viewModelScope, SharingStarted.Eagerly, ViewType.GRID)
+    val folderViewType: StateFlow<ViewType> =
+        prefs.folderViewType.stateIn(viewModelScope, SharingStarted.Eagerly, ViewType.GRID)
+    val mediaViewType: StateFlow<ViewType> =
+        prefs.mediaViewType.stateIn(viewModelScope, SharingStarted.Eagerly, ViewType.GRID)
     val folderGridColumns: StateFlow<Int> =
         prefs.folderGridColumns.stateIn(viewModelScope, SharingStarted.Eagerly, 3)
     val mediaGridColumns: StateFlow<Int> =
@@ -163,12 +165,14 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     fun refresh() {
         viewModelScope.launch {
             _isLoading.value = true
+            repository.rescanUnindexedMedia()
             _rawRoot.value = repository.scanFolderTree()
             _isLoading.value = false
         }
     }
 
-    fun setViewType(type: ViewType) = viewModelScope.launch { prefs.setViewType(type) }
+    fun setFolderViewType(type: ViewType) = viewModelScope.launch { prefs.setFolderViewType(type) }
+    fun setMediaViewType(type: ViewType) = viewModelScope.launch { prefs.setMediaViewType(type) }
     fun setFolderGridColumns(columns: Int) = viewModelScope.launch { prefs.setFolderGridColumns(columns) }
     fun setMediaGridColumns(columns: Int) = viewModelScope.launch { prefs.setMediaGridColumns(columns) }
     fun setFolderRowSize(sizeDp: Int) = viewModelScope.launch { prefs.setFolderRowSize(sizeDp) }

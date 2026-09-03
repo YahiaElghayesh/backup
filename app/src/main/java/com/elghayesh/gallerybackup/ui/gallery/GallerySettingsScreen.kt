@@ -38,6 +38,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.elghayesh.gallerybackup.data.settings.AccentColor
 import com.elghayesh.gallerybackup.data.settings.ThemeMode
+import com.elghayesh.gallerybackup.data.settings.ViewType
 import com.elghayesh.gallerybackup.data.update.UpdateCheckCoordinator
 import kotlin.math.roundToInt
 
@@ -50,6 +51,8 @@ fun GallerySettingsScreen(
 ) {
     val themeMode by viewModel.themeMode.collectAsState()
     val accentColor by viewModel.accentColor.collectAsState()
+    val folderViewType by viewModel.folderViewType.collectAsState()
+    val mediaViewType by viewModel.mediaViewType.collectAsState()
     val folderGridColumns by viewModel.folderGridColumns.collectAsState()
     val mediaGridColumns by viewModel.mediaGridColumns.collectAsState()
     val folderRowSize by viewModel.folderRowSize.collectAsState()
@@ -99,6 +102,37 @@ fun GallerySettingsScreen(
                                         shape = CircleShape,
                                     )
                                     .clickable { viewModel.setAccentColor(color) },
+                            )
+                        }
+                    }
+                }
+                HorizontalDivider()
+            }
+
+            item {
+                Column(Modifier.padding(16.dp)) {
+                    Text("Layout", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(8.dp))
+                    Text("Folders", style = MaterialTheme.typography.titleSmall)
+                    Spacer(Modifier.height(4.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ViewType.entries.forEach { type ->
+                            FilterChip(
+                                selected = type == folderViewType,
+                                onClick = { viewModel.setFolderViewType(type) },
+                                label = { Text(if (type == ViewType.GRID) "Grid" else "List") },
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Text("Photos & videos", style = MaterialTheme.typography.titleSmall)
+                    Spacer(Modifier.height(4.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ViewType.entries.forEach { type ->
+                            FilterChip(
+                                selected = type == mediaViewType,
+                                onClick = { viewModel.setMediaViewType(type) },
+                                label = { Text(if (type == ViewType.GRID) "Grid" else "List") },
                             )
                         }
                     }

@@ -1,5 +1,6 @@
 package com.elghayesh.gallerybackup.ui.settings
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -73,6 +74,10 @@ fun BackupFolderExplorerScreen(
     val node = root?.findNode(currentPath)
     val children = node?.children?.values?.sortedBy { it.name.lowercase() } ?: emptyList()
 
+    BackHandler(enabled = currentPath.isNotEmpty()) {
+        currentPath = currentPath.substringBeforeLast('/', "")
+    }
+
     if (showCreateFolderDialog) {
         CreateFolderDialog(
             onConfirm = { name ->
@@ -143,6 +148,9 @@ fun BackupFolderExplorerScreen(
                     LazyColumn(Modifier.fillMaxWidth()) {
                         items(children, key = { it.path }) { folder ->
                             val checked = folder.path in selectedFolders
+                            val selectedInside = selectedFolders.count {
+                                it != folder.path && it.startsWith("${folder.path}/")
+                            }
                             Row(
                                 Modifier
                                     .fillMaxWidth()
@@ -158,7 +166,10 @@ fun BackupFolderExplorerScreen(
                                 Column(Modifier.padding(start = 12.dp).weight(1f)) {
                                     Text(folder.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     Text(
-                                        "${folder.items.size} items directly inside",
+                                        buildString {
+                                            append("${folder.items.size} items directly inside")
+                                            if (selectedInside > 0) append(" · $selectedInside subfolder${if (selectedInside == 1) "" else "s"} selected")
+                                        },
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )

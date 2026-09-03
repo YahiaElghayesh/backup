@@ -2,27 +2,41 @@ package com.elghayesh.gallerybackup.ui.viewer
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Forward10
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -32,6 +46,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEvent
@@ -45,6 +60,8 @@ import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
+import kotlinx.coroutines.delay
+import java.util.concurrent.TimeUnit
 import com.elghayesh.gallerybackup.data.media.MediaItem
 import com.elghayesh.gallerybackup.data.media.findNode
 import com.elghayesh.gallerybackup.ui.common.FolderTreePickerDialog
@@ -110,9 +127,9 @@ fun MediaViewerScreen(
     }
     transferMode?.let { mode ->
         FolderTreePickerDialog(
+            viewModel = viewModel,
             root = visibleRoot,
             title = if (mode == ViewerTransferMode.MOVE) "Move to..." else "Copy to...",
-            onCreateFolder = { parentPath, name -> viewModel.createFolder(parentPath, name) },
             onPick = { destination ->
                 currentItem?.let { item ->
                     if (mode == ViewerTransferMode.MOVE) {
@@ -270,6 +287,12 @@ private fun ZoomableMediaBox(
     }
 }
 
+/**
+ * A minimal, always-on progress bar at the bottom, matching the rest of the player's controls
+ * (play/pause, skip 10s) staying hidden until the video itself is tapped -- rather than Media3's
+ * default controller, which shows and auto-hides the whole control surface (progress bar
+ * included) as one unit.
+ */
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
 private fun VideoPlayer(item: MediaItem) {
@@ -284,13 +307,121 @@ private fun VideoPlayer(item: MediaItem) {
     DisposableEffect(exoPlayer) {
         onDispose { exoPlayer.release() }
     }
-    AndroidView(
-        factory = { ctx ->
-            PlayerView(ctx).apply {
-                player = exoPlayer
-                useController = true
+
+    var controlsVisible by remember { mutableStateOf(false) }
+    var isPlaying by remember { mutableStateOf(true) }
+    var positionMs by remember { mutableStateOf(0L) }
+    var durationMs by remember { mutableStateOf(0L) }
+    var isScrubbing by remember { mutableStateOf(false) }
+
+    LaunchedEffect(exoPlayer) {
+        while (true) {
+            if (!isScrubbing) {
+                positionMs = exoPlayer.currentPosition.coerceAtLeast(0)
+                durationMs = exoPlayer.duration.coerceAtLeast(0)
             }
-        },
-        modifier = Modifier.fillMaxSize(),
+            isPlaying = exoPlayer.isPlaying
+            delay(300)
+        }
+    }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+            ) { controlsVisible = !controlsVisible },
+    ) {
+        AndroidView(
+            factory = { ctx ->
+                PlayerView(ctx).apply {
+                    player = exoPlayer
+                    useController = false
+                }
+            },
+            modifier = Modifier.fillMaxSize(),
+        )
+
+        if (controlsVisible) {
+            Row(
+                Modifier.align(Alignment.Center),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                PlayerControlButton(Icons.Filled.Replay10, "Rewind 10 seconds") {
+                    exoPlayer.seekTo((exoPlayer.currentPosition - 10_000).coerceAtLeast(0))
+                }
+                PlayerControlButton(
+                    icon = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                    contentDescription = if (isPlaying) "Pause" else "Play",
+                    size = 72.dp,
+                ) {
+                    if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
+                }
+                PlayerControlButton(Icons.Filled.Forward10, "Forward 10 seconds") {
+                    exoPlayer.seekTo((exoPlayer.currentPosition + 10_000).coerceAtMost(exoPlayer.duration.coerceAtLeast(0)))
+                }
+            }
+        }
+
+        Row(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.6f))))
+                .padding(horizontal = 12.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(formatVideoTime(positionMs), color = Color.White, style = MaterialTheme.typography.labelSmall)
+            Slider(
+                value = if (durationMs > 0) (positionMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f,
+                onValueChange = { fraction ->
+                    isScrubbing = true
+                    positionMs = (fraction * durationMs).toLong()
+                },
+                onValueChangeFinished = {
+                    exoPlayer.seekTo(positionMs)
+                    isScrubbing = false
+                },
+                colors = SliderDefaults.colors(
+                    activeTrackColor = Color.White,
+                    thumbColor = Color.White,
+                    inactiveTrackColor = Color.White.copy(alpha = 0.35f),
+                ),
+                modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+            )
+            Text(formatVideoTime(durationMs), color = Color.White, style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
+@Composable
+private fun PlayerControlButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    size: androidx.compose.ui.unit.Dp = 48.dp,
+    onClick: () -> Unit,
+) {
+    Icon(
+        imageVector = icon,
+        contentDescription = contentDescription,
+        tint = Color.White,
+        modifier = Modifier
+            .padding(12.dp)
+            .size(size)
+            .background(Color.Black.copy(alpha = 0.35f), CircleShape)
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            )
+            .padding(size / 5),
     )
+}
+
+private fun formatVideoTime(ms: Long): String {
+    val totalSec = TimeUnit.MILLISECONDS.toSeconds(ms.coerceAtLeast(0))
+    val min = totalSec / 60
+    val sec = totalSec % 60
+    return "%d:%02d".format(min, sec)
 }
