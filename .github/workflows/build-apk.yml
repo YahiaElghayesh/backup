@@ -28,18 +28,6 @@ jobs:
           echo "Using apksigner: $APKSIGNER"
           "$APKSIGNER" verify --print-certs -v app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Upload APK
-        if: success()
-        # This is just a convenience copy for the Actions UI, separate from the GitHub Release
-        # below (which the in-app updater actually reads) -- a transient failure here (e.g. the
-        # repo's Actions artifact storage quota) must never block the release from publishing.
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: gallery-backup-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
-          retention-days: 30
-
       - name: Publish GitHub Release with APK
         # Source stays private; app-releases is a small public repo (shared across projects) that
         # holds nothing but built binaries -- the in-app updater reads it with no credential at
