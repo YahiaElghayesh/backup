@@ -52,6 +52,8 @@ fun GallerySettingsScreen(
     val accentColor by viewModel.accentColor.collectAsState()
     val folderGridColumns by viewModel.folderGridColumns.collectAsState()
     val mediaGridColumns by viewModel.mediaGridColumns.collectAsState()
+    val folderRowSize by viewModel.folderRowSize.collectAsState()
+    val mediaRowSize by viewModel.mediaRowSize.collectAsState()
     val isCheckingForUpdate by UpdateCheckCoordinator.isChecking.collectAsState()
     val lastCheckFoundUpdate by UpdateCheckCoordinator.lastCheckFoundUpdate.collectAsState()
 
@@ -120,6 +122,35 @@ fun GallerySettingsScreen(
                         onValueChange = { viewModel.setMediaGridColumns(it.roundToInt()) },
                         valueRange = 2f..6f,
                         steps = 3,
+                    )
+                }
+                HorizontalDivider()
+            }
+
+            item {
+                Column(Modifier.padding(16.dp)) {
+                    Text("List view row sizes", style = MaterialTheme.typography.titleSmall)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Only used when the list view is selected, instead of the grid.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text("Folder row size: ${folderRowSize}dp", style = MaterialTheme.typography.titleMedium)
+                    Slider(
+                        value = folderRowSize.toFloat(),
+                        onValueChange = { viewModel.setFolderRowSize(it.roundToInt()) },
+                        valueRange = 40f..112f,
+                        steps = 8,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text("Photo/video row size: ${mediaRowSize}dp", style = MaterialTheme.typography.titleMedium)
+                    Slider(
+                        value = mediaRowSize.toFloat(),
+                        onValueChange = { viewModel.setMediaRowSize(it.roundToInt()) },
+                        valueRange = 40f..112f,
+                        steps = 8,
                     )
                 }
                 HorizontalDivider()

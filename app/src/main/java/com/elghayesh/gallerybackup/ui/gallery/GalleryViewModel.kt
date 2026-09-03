@@ -79,6 +79,10 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         prefs.folderGridColumns.stateIn(viewModelScope, SharingStarted.Eagerly, 3)
     val mediaGridColumns: StateFlow<Int> =
         prefs.mediaGridColumns.stateIn(viewModelScope, SharingStarted.Eagerly, 3)
+    val folderRowSize: StateFlow<Int> =
+        prefs.folderRowSize.stateIn(viewModelScope, SharingStarted.Eagerly, 48)
+    val mediaRowSize: StateFlow<Int> =
+        prefs.mediaRowSize.stateIn(viewModelScope, SharingStarted.Eagerly, 48)
     val themeMode: StateFlow<ThemeMode> =
         prefs.themeMode.stateIn(viewModelScope, SharingStarted.Eagerly, ThemeMode.SYSTEM)
     val accentColor: StateFlow<AccentColor> =
@@ -156,6 +160,8 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     fun setViewType(type: ViewType) = viewModelScope.launch { prefs.setViewType(type) }
     fun setFolderGridColumns(columns: Int) = viewModelScope.launch { prefs.setFolderGridColumns(columns) }
     fun setMediaGridColumns(columns: Int) = viewModelScope.launch { prefs.setMediaGridColumns(columns) }
+    fun setFolderRowSize(sizeDp: Int) = viewModelScope.launch { prefs.setFolderRowSize(sizeDp) }
+    fun setMediaRowSize(sizeDp: Int) = viewModelScope.launch { prefs.setMediaRowSize(sizeDp) }
     fun setThemeMode(mode: ThemeMode) = viewModelScope.launch { prefs.setThemeMode(mode) }
     fun setAccentColor(color: AccentColor) = viewModelScope.launch { prefs.setAccentColor(color) }
     fun setFolderSort(order: FolderSortOrder) = viewModelScope.launch { prefs.setFolderSort(order) }

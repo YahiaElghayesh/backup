@@ -136,6 +136,8 @@ fun GalleryScreen(
     val viewType by viewModel.viewType.collectAsState()
     val folderGridColumns by viewModel.folderGridColumns.collectAsState()
     val mediaGridColumns by viewModel.mediaGridColumns.collectAsState()
+    val folderRowSize by viewModel.folderRowSize.collectAsState()
+    val mediaRowSize by viewModel.mediaRowSize.collectAsState()
     val folderSort by viewModel.folderSort.collectAsState()
     val showHidden by viewModel.showHidden.collectAsState()
     val hiddenFolders by viewModel.hiddenFolders.collectAsState()
@@ -497,6 +499,7 @@ fun GalleryScreen(
                                     isSelected = folder.path in selectedFolderPaths,
                                     cover = folderCovers[folder.path],
                                     includedFolders = includedFolders,
+                                    thumbnailSizeDp = folderRowSize,
                                     onClick = {
                                         if (isSelectionMode) {
                                             viewModel.toggleFolderSelection(folder.path)
@@ -512,6 +515,7 @@ fun GalleryScreen(
                                     item = item,
                                     isHidden = item.id in hiddenMediaIds,
                                     isSelected = item.id in selectedMediaIds,
+                                    thumbnailSizeDp = mediaRowSize,
                                     onClick = {
                                         if (isSelectionMode) {
                                             viewModel.toggleMediaSelection(item.id)
@@ -838,6 +842,7 @@ private fun GalleryListItem(
     subtitle: String,
     isHidden: Boolean,
     isSelected: Boolean,
+    thumbnailSizeDp: Int,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
@@ -856,7 +861,7 @@ private fun GalleryListItem(
         ) {
             Box(
                 Modifier
-                    .size(48.dp)
+                    .size(thumbnailSizeDp.dp)
                     .clip(RoundedCornerShape(8.dp))
                     .background(cover?.let { Color(it.colorSeed) } ?: MaterialTheme.colorScheme.surfaceVariant),
             ) {
@@ -898,6 +903,7 @@ private fun FolderListRow(
     isSelected: Boolean,
     cover: FolderCover?,
     includedFolders: Set<String>,
+    thumbnailSizeDp: Int,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
@@ -909,6 +915,7 @@ private fun FolderListRow(
         subtitle = "${folder.promotionAwareItemCount(includedFolders)} items",
         isHidden = isHidden,
         isSelected = isSelected,
+        thumbnailSizeDp = thumbnailSizeDp,
         onClick = onClick,
         onLongClick = onLongClick,
     )
@@ -919,6 +926,7 @@ private fun MediaListRow(
     item: MediaItem,
     isHidden: Boolean,
     isSelected: Boolean,
+    thumbnailSizeDp: Int,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
@@ -930,6 +938,7 @@ private fun MediaListRow(
         subtitle = if (item.isVideo) "Video - ${formatDuration(item.durationMs)}" else "Photo",
         isHidden = isHidden,
         isSelected = isSelected,
+        thumbnailSizeDp = thumbnailSizeDp,
         onClick = onClick,
         onLongClick = onLongClick,
     )

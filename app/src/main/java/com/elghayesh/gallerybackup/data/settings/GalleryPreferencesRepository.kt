@@ -54,6 +54,8 @@ class GalleryPreferencesRepository(private val context: Context) {
          * installs from before folder and media tile sizes were split into separate settings. */
         val FOLDER_GRID_COLUMNS = intPreferencesKey("grid_columns")
         val MEDIA_GRID_COLUMNS = intPreferencesKey("media_grid_columns")
+        val FOLDER_ROW_SIZE = intPreferencesKey("folder_row_size")
+        val MEDIA_ROW_SIZE = intPreferencesKey("media_row_size")
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val ACCENT_COLOR = stringPreferencesKey("accent_color")
         val FOLDER_SORT = stringPreferencesKey("folder_sort")
@@ -80,6 +82,16 @@ class GalleryPreferencesRepository(private val context: Context) {
     /** How many photo/video tiles sit across the gallery's width -- independent of [folderGridColumns]. */
     val mediaGridColumns: Flow<Int> = context.galleryPrefsStore.data.map { prefs ->
         (prefs[Keys.MEDIA_GRID_COLUMNS] ?: 3).coerceIn(2, 6)
+    }
+
+    /** List-view row thumbnail size (dp) for folder rows -- independent of [mediaRowSize], the grid-view analog of [folderGridColumns]. */
+    val folderRowSize: Flow<Int> = context.galleryPrefsStore.data.map { prefs ->
+        (prefs[Keys.FOLDER_ROW_SIZE] ?: 48).coerceIn(40, 112)
+    }
+
+    /** List-view row thumbnail size (dp) for photo/video rows -- independent of [folderRowSize]. */
+    val mediaRowSize: Flow<Int> = context.galleryPrefsStore.data.map { prefs ->
+        (prefs[Keys.MEDIA_ROW_SIZE] ?: 48).coerceIn(40, 112)
     }
 
     val themeMode: Flow<ThemeMode> = context.galleryPrefsStore.data.map { prefs ->
@@ -149,6 +161,14 @@ class GalleryPreferencesRepository(private val context: Context) {
 
     suspend fun setMediaGridColumns(columns: Int) {
         context.galleryPrefsStore.edit { it[Keys.MEDIA_GRID_COLUMNS] = columns.coerceIn(2, 6) }
+    }
+
+    suspend fun setFolderRowSize(sizeDp: Int) {
+        context.galleryPrefsStore.edit { it[Keys.FOLDER_ROW_SIZE] = sizeDp.coerceIn(40, 112) }
+    }
+
+    suspend fun setMediaRowSize(sizeDp: Int) {
+        context.galleryPrefsStore.edit { it[Keys.MEDIA_ROW_SIZE] = sizeDp.coerceIn(40, 112) }
     }
 
     suspend fun setThemeMode(mode: ThemeMode) {
