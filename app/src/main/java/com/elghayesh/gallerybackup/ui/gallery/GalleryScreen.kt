@@ -95,6 +95,7 @@ import com.elghayesh.gallerybackup.data.media.promotionAwareCoverUri
 import com.elghayesh.gallerybackup.data.media.promotionAwareItemCount
 import com.elghayesh.gallerybackup.data.settings.FolderCover
 import com.elghayesh.gallerybackup.data.settings.FolderSortOrder
+import com.elghayesh.gallerybackup.data.settings.FolderSortOverride
 import com.elghayesh.gallerybackup.data.settings.ViewType
 import com.elghayesh.gallerybackup.ui.common.CreateFolderDialog
 import com.elghayesh.gallerybackup.ui.common.FolderCoverDialog
@@ -138,6 +139,10 @@ fun GalleryScreen(
     val folderRowSize by viewModel.folderRowSize.collectAsState()
     val mediaRowSize by viewModel.mediaRowSize.collectAsState()
     val folderSort by viewModel.folderSort.collectAsState()
+    val folderSortOverrides by viewModel.folderSortOverrides.collectAsState()
+    val effectiveFolderSort = remember(path, folderSort, folderSortOverrides) {
+        effectiveFolderSort(path, folderSort, folderSortOverrides)
+    }
     val showHidden by viewModel.showHidden.collectAsState()
     val hiddenFolders by viewModel.hiddenFolders.collectAsState()
     val hiddenMediaIds by viewModel.hiddenMediaIds.collectAsState()
@@ -163,7 +168,7 @@ fun GalleryScreen(
             else -> emptyList()
         }
         val pinnedExtras = if (path.isEmpty()) includedFolders.mapNotNull { visibleRoot?.findNode(it) } else emptyList()
-        sortedFolders(ownChildren + pinnedExtras, folderSort, includedFolders)
+        sortedFolders(ownChildren + pinnedExtras, effectiveFolderSort, includedFolders)
     } else {
         emptyList()
     }
@@ -188,7 +193,12 @@ fun GalleryScreen(
     var isDragSelecting by remember { mutableStateOf(false) }
 
     if (showSortDialog) {
-        SortDialog(current = folderSort, onSelect = { viewModel.setFolderSort(it) }, onDismiss = { showSortDialog = false })
+        SortDialog(
+            current = effectiveFolderSort,
+            folderName = if (path.isEmpty()) "Gallery" else path.substringAfterLast('/'),
+            onSelect = { order, scope -> viewModel.setFolderSort(order, scope, path) },
+            onDismiss = { showSortDialog = false },
+        )
     }
     if (showCreateFolderDialog) {
         CreateFolderDialog(
@@ -267,20 +277,6 @@ fun GalleryScreen(
                                 DropdownMenuItem(
                                     text = { Text("Sort by...") },
                                     onClick = { overflowExpanded = false; showSortDialog = true },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text(if (folderViewType == ViewType.GRID) "Folders as list" else "Folders as grid") },
-                                    onClick = {
-                                        viewModel.setFolderViewType(if (folderViewType == ViewType.GRID) ViewType.LIST else ViewType.GRID)
-                                        overflowExpanded = false
-                                    },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text(if (mediaViewType == ViewType.GRID) "Photos/videos as list" else "Photos/videos as grid") },
-                                    onClick = {
-                                        viewModel.setMediaViewType(if (mediaViewType == ViewType.GRID) ViewType.LIST else ViewType.GRID)
-                                        overflowExpanded = false
-                                    },
                                 )
                                 DropdownMenuItem(
                                     text = { Text(if (showHidden) "Hide hidden items" else "Show hidden items") },
@@ -653,6 +649,23 @@ private fun openOrToggle(
     }
 }
 
+/** The sort order that actually applies at [path]: its own override if it has one, else the
+ * nearest ancestor's override that was scoped to include subfolders, else the global default. */
+private fun effectiveFolderSort(
+    path: String,
+    globalDefault: FolderSortOrder,
+    overrides: Map<String, FolderSortOverride>,
+): FolderSortOrder {
+    overrides[path]?.let { return it.order }
+    var ancestor = path
+    while (ancestor.isNotEmpty()) {
+        ancestor = ancestor.substringBeforeLast('/', "")
+        val override = overrides[ancestor]
+        if (override != null && override.includeSubfolders) return override.order
+    }
+    return globalDefault
+}
+
 private fun sortedFolders(folders: List<FolderNode>, order: FolderSortOrder, includedFolders: Set<String>): List<FolderNode> =
     when (order) {
         FolderSortOrder.NAME_ASC -> folders.sortedBy { it.name.lowercase() }
@@ -700,31 +713,78 @@ private fun BoxScope.EmptyState(icon: ImageVector, title: String, subtitle: Stri
     }
 }
 
+/** Picking an order doesn't apply it immediately -- it first asks which folders it should apply
+ * to (matching [SortScope]), since a folder's sort can now be scoped rather than always global. */
 @Composable
-private fun SortDialog(current: FolderSortOrder, onSelect: (FolderSortOrder) -> Unit, onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Sort folders by") },
-        text = {
-            Column {
-                FolderSortOrder.entries.forEach { order ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onSelect(order); onDismiss() }
-                            .padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        RadioButton(selected = order == current, onClick = { onSelect(order); onDismiss() })
-                        Text(order.label, modifier = Modifier.padding(start = 8.dp))
+private fun SortDialog(
+    current: FolderSortOrder,
+    folderName: String,
+    onSelect: (FolderSortOrder, SortScope) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var pendingOrder by remember { mutableStateOf<FolderSortOrder?>(null) }
+    val order = pendingOrder
+    if (order == null) {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Sort folders by") },
+            text = {
+                Column {
+                    FolderSortOrder.entries.forEach { entry ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { pendingOrder = entry }
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(selected = entry == current, onClick = { pendingOrder = entry })
+                            Text(entry.label, modifier = Modifier.padding(start = 8.dp))
+                        }
                     }
                 }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Close") }
-        },
-    )
+            },
+            confirmButton = {
+                TextButton(onClick = onDismiss) { Text("Close") }
+            },
+        )
+    } else {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Apply to") },
+            text = {
+                Column {
+                    Text(
+                        "Sort by \"${order.label}\" for:",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(bottom = 4.dp),
+                    )
+                    SortScopeOption("All folders") { onSelect(order, SortScope.ALL); onDismiss() }
+                    SortScopeOption("Just \"$folderName\"") { onSelect(order, SortScope.THIS_FOLDER); onDismiss() }
+                    SortScopeOption("\"$folderName\" and its subfolders") {
+                        onSelect(order, SortScope.THIS_FOLDER_AND_SUBFOLDERS)
+                        onDismiss()
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { pendingOrder = null }) { Text("Back") }
+            },
+        )
+    }
+}
+
+@Composable
+private fun SortScopeOption(label: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label)
+    }
 }
 
 @Composable

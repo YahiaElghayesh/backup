@@ -18,6 +18,7 @@ import com.elghayesh.gallerybackup.data.media.withVirtualFolders
 import com.elghayesh.gallerybackup.data.settings.AccentColor
 import com.elghayesh.gallerybackup.data.settings.FolderCover
 import com.elghayesh.gallerybackup.data.settings.FolderSortOrder
+import com.elghayesh.gallerybackup.data.settings.FolderSortOverride
 import com.elghayesh.gallerybackup.data.settings.GalleryPreferencesRepository
 import com.elghayesh.gallerybackup.data.settings.ThemeMode
 import com.elghayesh.gallerybackup.data.settings.ViewType
@@ -35,6 +36,10 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+
+/** Scope for a sort choice made from a specific folder: the new global default, just that
+ * folder's own listing, or that folder plus every descendant beneath it. */
+enum class SortScope { ALL, THIS_FOLDER, THIS_FOLDER_AND_SUBFOLDERS }
 
 private data class RootFilterInputs(
     val raw: FolderNode?,
@@ -102,6 +107,8 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         prefs.accentColor.stateIn(viewModelScope, SharingStarted.Eagerly, AccentColor.BLUE)
     val folderSort: StateFlow<FolderSortOrder> =
         prefs.folderSort.stateIn(viewModelScope, SharingStarted.Eagerly, FolderSortOrder.NAME_ASC)
+    val folderSortOverrides: StateFlow<Map<String, FolderSortOverride>> =
+        prefs.folderSortOverrides.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
     val includedFolders: StateFlow<Set<String>> =
         prefs.includedFolders.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
     /** Paths of folders created in-app before they have any real media -- see [FolderNode.withVirtualFolders]. */
@@ -179,7 +186,21 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     fun setMediaRowSize(sizeDp: Int) = viewModelScope.launch { prefs.setMediaRowSize(sizeDp) }
     fun setThemeMode(mode: ThemeMode) = viewModelScope.launch { prefs.setThemeMode(mode) }
     fun setAccentColor(color: AccentColor) = viewModelScope.launch { prefs.setAccentColor(color) }
-    fun setFolderSort(order: FolderSortOrder) = viewModelScope.launch { prefs.setFolderSort(order) }
+    /** Applies [order] either as the new global default (also clearing any override sitting at
+     * [path] so the change is visible immediately where it was made), to just [path]'s own
+     * listing, or to [path] and everything beneath it that doesn't have its own override. */
+    fun setFolderSort(order: FolderSortOrder, scope: SortScope, path: String) {
+        viewModelScope.launch {
+            when (scope) {
+                SortScope.ALL -> {
+                    prefs.setFolderSort(order)
+                    prefs.clearFolderSortOverride(path)
+                }
+                SortScope.THIS_FOLDER -> prefs.setFolderSortOverride(path, order, includeSubfolders = false)
+                SortScope.THIS_FOLDER_AND_SUBFOLDERS -> prefs.setFolderSortOverride(path, order, includeSubfolders = true)
+            }
+        }
+    }
     fun setFolderHidden(path: String, hidden: Boolean) =
         viewModelScope.launch { prefs.setFolderHidden(path, hidden) }
     fun setFolderIncluded(path: String, included: Boolean) =

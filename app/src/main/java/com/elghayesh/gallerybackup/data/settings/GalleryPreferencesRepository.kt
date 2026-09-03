@@ -40,6 +40,13 @@ enum class AccentColor(val seed: Long) {
 /** A custom folder tile: solid [colorSeed] background with [text] instead of a photo thumbnail. */
 data class FolderCover(val text: String, val colorSeed: Long)
 
+/** A per-folder sort override, set from the sort dialog's "this folder" / "this folder and
+ * subfolders" scope choices. [includeSubfolders] false = applies to just this exact folder's own
+ * listing; true = also applies to every descendant that doesn't have its own, more specific
+ * override. Picking "all folders" instead updates [GalleryPreferencesRepository.folderSort], the
+ * global default, and doesn't create one of these. */
+data class FolderSortOverride(val order: FolderSortOrder, val includeSubfolders: Boolean)
+
 /**
  * Gallery display/browsing preferences: how folders look and sort, theming, and which
  * folders/items are excluded or hidden from view. Separate from [SettingsRepository],
@@ -63,6 +70,7 @@ class GalleryPreferencesRepository(private val context: Context) {
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val ACCENT_COLOR = stringPreferencesKey("accent_color")
         val FOLDER_SORT = stringPreferencesKey("folder_sort")
+        val FOLDER_SORT_OVERRIDES_JSON = stringPreferencesKey("folder_sort_overrides_json")
         val EXCLUDED_FOLDERS = stringSetPreferencesKey("excluded_folders")
         val INCLUDED_FOLDERS = stringSetPreferencesKey("included_folders")
         val HIDDEN_FOLDERS = stringSetPreferencesKey("hidden_folders")
@@ -120,6 +128,10 @@ class GalleryPreferencesRepository(private val context: Context) {
     val folderSort: Flow<FolderSortOrder> = context.galleryPrefsStore.data.map { prefs ->
         prefs[Keys.FOLDER_SORT]?.let { runCatching { FolderSortOrder.valueOf(it) }.getOrNull() } ?: FolderSortOrder.NAME_ASC
     }
+
+    /** Per-folder sort overrides, keyed by folder path (root is ""). See [FolderSortOverride]. */
+    val folderSortOverrides: Flow<Map<String, FolderSortOverride>> =
+        context.galleryPrefsStore.data.map { parseFolderSortOverrides(it[Keys.FOLDER_SORT_OVERRIDES_JSON]) }
 
     /**
      * Folders pinned to the gallery's home page from the folder explorer. A flat set -- pinning a
@@ -200,6 +212,28 @@ class GalleryPreferencesRepository(private val context: Context) {
 
     suspend fun setFolderSort(order: FolderSortOrder) {
         context.galleryPrefsStore.edit { it[Keys.FOLDER_SORT] = order.name }
+    }
+
+    /** Sets [path]'s own sort order, scoped to just that folder or to it and its subfolders (see
+     * [FolderSortOverride]). Also clears any previous override at that exact path. */
+    suspend fun setFolderSortOverride(path: String, order: FolderSortOrder, includeSubfolders: Boolean) {
+        context.galleryPrefsStore.edit { prefs ->
+            val current = parseFolderSortOverrides(prefs[Keys.FOLDER_SORT_OVERRIDES_JSON]).toMutableMap()
+            current[path] = FolderSortOverride(order, includeSubfolders)
+            prefs[Keys.FOLDER_SORT_OVERRIDES_JSON] = serializeFolderSortOverrides(current)
+        }
+    }
+
+    /** Clears any sort override at exactly [path] -- used when the new choice is "all folders", so
+     * the folder the user made the choice from immediately reflects the new global default instead
+     * of still being shadowed by whatever override it had before. */
+    suspend fun clearFolderSortOverride(path: String) {
+        context.galleryPrefsStore.edit { prefs ->
+            val current = parseFolderSortOverrides(prefs[Keys.FOLDER_SORT_OVERRIDES_JSON]).toMutableMap()
+            if (current.remove(path) != null) {
+                prefs[Keys.FOLDER_SORT_OVERRIDES_JSON] = serializeFolderSortOverrides(current)
+            }
+        }
     }
 
     /** Hides or unhides one folder. Unhiding always clears it from both [hiddenFolders]'s keys. */
@@ -298,6 +332,36 @@ class GalleryPreferencesRepository(private val context: Context) {
                     put("path", path)
                     put("text", cover.text)
                     put("color", cover.colorSeed)
+                },
+            )
+        }
+        return array.toString()
+    }
+
+    private fun parseFolderSortOverrides(json: String?): Map<String, FolderSortOverride> {
+        if (json.isNullOrBlank()) return emptyMap()
+        return try {
+            val array = org.json.JSONArray(json)
+            buildMap {
+                for (i in 0 until array.length()) {
+                    val obj = array.getJSONObject(i)
+                    val order = runCatching { FolderSortOrder.valueOf(obj.getString("order")) }.getOrNull() ?: continue
+                    put(obj.getString("path"), FolderSortOverride(order, obj.getBoolean("subfolders")))
+                }
+            }
+        } catch (e: Exception) {
+            emptyMap()
+        }
+    }
+
+    private fun serializeFolderSortOverrides(map: Map<String, FolderSortOverride>): String {
+        val array = org.json.JSONArray()
+        for ((path, override) in map) {
+            array.put(
+                org.json.JSONObject().apply {
+                    put("path", path)
+                    put("order", override.order.name)
+                    put("subfolders", override.includeSubfolders)
                 },
             )
         }

@@ -62,6 +62,7 @@ import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
 import java.util.concurrent.TimeUnit
+import com.elghayesh.gallerybackup.R
 import com.elghayesh.gallerybackup.data.media.MediaItem
 import com.elghayesh.gallerybackup.data.media.findNode
 import com.elghayesh.gallerybackup.ui.common.FolderTreePickerDialog
@@ -198,12 +199,25 @@ fun MediaViewerScreen(
         ) { page ->
             val item = media.getOrNull(page) ?: return@HorizontalPager
             val isCurrent = pagerState.currentPage == page
-            ZoomableMediaBox(
-                onScaleChanged = { if (isCurrent) currentScale = it },
-            ) {
-                if (item.isVideo && isCurrent) {
-                    VideoPlayer(item)
-                } else {
+            if (item.isVideo && isCurrent) {
+                // The controls (play/pause, skip, progress bar) are a sibling drawn on top of the
+                // zoomed content, not inside it -- so pinching/panning the video doesn't also
+                // scale or move them. ZoomableMediaBox reports plain taps back via onTap so this
+                // overlay's visibility can be driven by the same gesture that handles pinch/pan.
+                val videoState = rememberVideoPlayerState(item)
+                Box(Modifier.fillMaxSize()) {
+                    ZoomableMediaBox(
+                        onScaleChanged = { currentScale = it },
+                        onTap = { videoState.controlsVisible = !videoState.controlsVisible },
+                    ) {
+                        VideoSurface(videoState.exoPlayer, modifier = Modifier.fillMaxSize())
+                    }
+                    VideoControlsOverlay(videoState)
+                }
+            } else {
+                ZoomableMediaBox(
+                    onScaleChanged = { if (isCurrent) currentScale = it },
+                ) {
                     AsyncImage(
                         model = item.uri,
                         contentDescription = item.displayName,
@@ -222,6 +236,7 @@ fun MediaViewerScreen(
 @Composable
 private fun ZoomableMediaBox(
     onScaleChanged: (Float) -> Unit,
+    onTap: () -> Unit = {},
     content: @Composable () -> Unit,
 ) {
     var scale by remember { mutableFloatStateOf(1f) }
@@ -263,6 +278,7 @@ private fun ZoomableMediaBox(
                         val now = System.currentTimeMillis()
                         val isDoubleTap = now - lastTapUpTimeMs < 300 &&
                             (upPosition - lastTapPosition).getDistance() < tapSlopPx * 3
+                        onTap()
                         if (isDoubleTap) {
                             scale = if (scale > 1f) 1f else 3f
                             offset = Offset.Zero
@@ -287,15 +303,18 @@ private fun ZoomableMediaBox(
     }
 }
 
-/**
- * A minimal, always-on progress bar at the bottom, matching the rest of the player's controls
- * (play/pause, skip 10s) staying hidden until the video itself is tapped -- rather than Media3's
- * default controller, which shows and auto-hides the whole control surface (progress bar
- * included) as one unit.
- */
-@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+/** Playback state shared between [VideoSurface] and [VideoControlsOverlay] -- split apart so the
+ * overlay can be drawn outside the pinch-zoom transform while still driving the same player. */
+private class VideoPlayerState(val exoPlayer: ExoPlayer) {
+    var controlsVisible by mutableStateOf(false)
+    var isPlaying by mutableStateOf(true)
+    var positionMs by mutableStateOf(0L)
+    var durationMs by mutableStateOf(0L)
+    var isScrubbing by mutableStateOf(false)
+}
+
 @Composable
-private fun VideoPlayer(item: MediaItem) {
+private fun rememberVideoPlayerState(item: MediaItem): VideoPlayerState {
     val context = LocalContext.current
     val exoPlayer = remember(item.id) {
         ExoPlayer.Builder(context).build().apply {
@@ -304,46 +323,55 @@ private fun VideoPlayer(item: MediaItem) {
             playWhenReady = true
         }
     }
+    val state = remember(exoPlayer) { VideoPlayerState(exoPlayer) }
     DisposableEffect(exoPlayer) {
         onDispose { exoPlayer.release() }
     }
-
-    var controlsVisible by remember { mutableStateOf(false) }
-    var isPlaying by remember { mutableStateOf(true) }
-    var positionMs by remember { mutableStateOf(0L) }
-    var durationMs by remember { mutableStateOf(0L) }
-    var isScrubbing by remember { mutableStateOf(false) }
-
     LaunchedEffect(exoPlayer) {
         while (true) {
-            if (!isScrubbing) {
-                positionMs = exoPlayer.currentPosition.coerceAtLeast(0)
-                durationMs = exoPlayer.duration.coerceAtLeast(0)
+            if (!state.isScrubbing) {
+                state.positionMs = exoPlayer.currentPosition.coerceAtLeast(0)
+                state.durationMs = exoPlayer.duration.coerceAtLeast(0)
             }
-            isPlaying = exoPlayer.isPlaying
+            state.isPlaying = exoPlayer.isPlaying
             delay(300)
         }
     }
+    return state
+}
 
-    Box(
-        Modifier
-            .fillMaxSize()
-            .clickable(
-                indication = null,
-                interactionSource = remember { MutableInteractionSource() },
-            ) { controlsVisible = !controlsVisible },
-    ) {
-        AndroidView(
-            factory = { ctx ->
-                PlayerView(ctx).apply {
-                    player = exoPlayer
-                    useController = false
-                }
-            },
-            modifier = Modifier.fillMaxSize(),
-        )
+/**
+ * Just the raw video surface -- meant to sit inside [ZoomableMediaBox] so pinch-zoom/pan applies
+ * to the picture itself. Uses a TextureView (via a plain layout resource) rather than Media3's
+ * default SurfaceView: a SurfaceView is its own OS-composited layer positioned by absolute screen
+ * coordinates, which doesn't reliably stay lined up with a parent that recomposes inside a pager
+ * and is scaled/translated by a graphicsLayer transform -- it can end up rendered shrunk and
+ * mispositioned. TextureView draws as a normal View layer, so it always follows Compose's
+ * measured bounds.
+ */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+@Composable
+private fun VideoSurface(exoPlayer: ExoPlayer, modifier: Modifier = Modifier) {
+    AndroidView(
+        factory = { ctx ->
+            (android.view.LayoutInflater.from(ctx).inflate(R.layout.player_view_texture, null) as PlayerView).apply {
+                player = exoPlayer
+            }
+        },
+        modifier = modifier,
+    )
+}
 
-        if (controlsVisible) {
+/**
+ * The play/pause/skip buttons and progress bar, drawn as a sibling on top of the zoomed video
+ * content (not inside it) so pinching/panning the video never scales or moves the controls.
+ * [VideoPlayerState.controlsVisible] is toggled from [ZoomableMediaBox]'s tap handler.
+ */
+@Composable
+private fun VideoControlsOverlay(state: VideoPlayerState) {
+    val exoPlayer = state.exoPlayer
+    Box(Modifier.fillMaxSize()) {
+        if (state.controlsVisible) {
             Row(
                 Modifier.align(Alignment.Center),
                 verticalAlignment = Alignment.CenterVertically,
@@ -352,8 +380,8 @@ private fun VideoPlayer(item: MediaItem) {
                     exoPlayer.seekTo((exoPlayer.currentPosition - 10_000).coerceAtLeast(0))
                 }
                 PlayerControlButton(
-                    icon = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                    contentDescription = if (isPlaying) "Pause" else "Play",
+                    icon = if (state.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                    contentDescription = if (state.isPlaying) "Pause" else "Play",
                     size = 72.dp,
                 ) {
                     if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
@@ -372,16 +400,16 @@ private fun VideoPlayer(item: MediaItem) {
                 .padding(horizontal = 12.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(formatVideoTime(positionMs), color = Color.White, style = MaterialTheme.typography.labelSmall)
+            Text(formatVideoTime(state.positionMs), color = Color.White, style = MaterialTheme.typography.labelSmall)
             Slider(
-                value = if (durationMs > 0) (positionMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f,
+                value = if (state.durationMs > 0) (state.positionMs.toFloat() / state.durationMs).coerceIn(0f, 1f) else 0f,
                 onValueChange = { fraction ->
-                    isScrubbing = true
-                    positionMs = (fraction * durationMs).toLong()
+                    state.isScrubbing = true
+                    state.positionMs = (fraction * state.durationMs).toLong()
                 },
                 onValueChangeFinished = {
-                    exoPlayer.seekTo(positionMs)
-                    isScrubbing = false
+                    exoPlayer.seekTo(state.positionMs)
+                    state.isScrubbing = false
                 },
                 colors = SliderDefaults.colors(
                     activeTrackColor = Color.White,
@@ -390,7 +418,7 @@ private fun VideoPlayer(item: MediaItem) {
                 ),
                 modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
             )
-            Text(formatVideoTime(durationMs), color = Color.White, style = MaterialTheme.typography.labelSmall)
+            Text(formatVideoTime(state.durationMs), color = Color.White, style = MaterialTheme.typography.labelSmall)
         }
     }
 }

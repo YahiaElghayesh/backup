@@ -112,79 +112,33 @@ fun GallerySettingsScreen(
             item {
                 Column(Modifier.padding(16.dp)) {
                     Text("Layout", style = MaterialTheme.typography.titleMedium)
-                    Spacer(Modifier.height(8.dp))
-                    Text("Folders", style = MaterialTheme.typography.titleSmall)
-                    Spacer(Modifier.height(4.dp))
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        ViewType.entries.forEach { type ->
-                            FilterChip(
-                                selected = type == folderViewType,
-                                onClick = { viewModel.setFolderViewType(type) },
-                                label = { Text(if (type == ViewType.GRID) "Grid" else "List") },
-                            )
-                        }
-                    }
-                    Spacer(Modifier.height(12.dp))
-                    Text("Photos & videos", style = MaterialTheme.typography.titleSmall)
-                    Spacer(Modifier.height(4.dp))
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        ViewType.entries.forEach { type ->
-                            FilterChip(
-                                selected = type == mediaViewType,
-                                onClick = { viewModel.setMediaViewType(type) },
-                                label = { Text(if (type == ViewType.GRID) "Grid" else "List") },
-                            )
-                        }
-                    }
-                }
-                HorizontalDivider()
-            }
-
-            item {
-                Column(Modifier.padding(16.dp)) {
-                    Text("Folder tile size: $folderGridColumns per row", style = MaterialTheme.typography.titleMedium)
-                    Slider(
-                        value = folderGridColumns.toFloat(),
-                        onValueChange = { viewModel.setFolderGridColumns(it.roundToInt()) },
-                        valueRange = 2f..6f,
-                        steps = 3,
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    Text("Photo/video tile size: $mediaGridColumns per row", style = MaterialTheme.typography.titleMedium)
-                    Slider(
-                        value = mediaGridColumns.toFloat(),
-                        onValueChange = { viewModel.setMediaGridColumns(it.roundToInt()) },
-                        valueRange = 2f..6f,
-                        steps = 3,
-                    )
-                }
-                HorizontalDivider()
-            }
-
-            item {
-                Column(Modifier.padding(16.dp)) {
-                    Text("List view row sizes", style = MaterialTheme.typography.titleSmall)
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "Only used when the list view is selected, instead of the grid.",
+                        "Grid or list, and tile/row size, chosen separately for folders and for photos & videos.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    Spacer(Modifier.height(8.dp))
-                    Text("Folder row size: ${folderRowSize}dp", style = MaterialTheme.typography.titleMedium)
-                    Slider(
-                        value = folderRowSize.toFloat(),
-                        onValueChange = { viewModel.setFolderRowSize(it.roundToInt()) },
-                        valueRange = 40f..112f,
-                        steps = 8,
+                    Spacer(Modifier.height(16.dp))
+                    LayoutTargetSettings(
+                        label = "Folders",
+                        viewType = folderViewType,
+                        onViewTypeChange = { viewModel.setFolderViewType(it) },
+                        gridColumns = folderGridColumns,
+                        onGridColumnsChange = { viewModel.setFolderGridColumns(it) },
+                        rowSize = folderRowSize,
+                        onRowSizeChange = { viewModel.setFolderRowSize(it) },
                     )
-                    Spacer(Modifier.height(12.dp))
-                    Text("Photo/video row size: ${mediaRowSize}dp", style = MaterialTheme.typography.titleMedium)
-                    Slider(
-                        value = mediaRowSize.toFloat(),
-                        onValueChange = { viewModel.setMediaRowSize(it.roundToInt()) },
-                        valueRange = 40f..112f,
-                        steps = 8,
+                    Spacer(Modifier.height(20.dp))
+                    HorizontalDivider()
+                    Spacer(Modifier.height(20.dp))
+                    LayoutTargetSettings(
+                        label = "Photos & videos",
+                        viewType = mediaViewType,
+                        onViewTypeChange = { viewModel.setMediaViewType(it) },
+                        gridColumns = mediaGridColumns,
+                        onGridColumnsChange = { viewModel.setMediaGridColumns(it) },
+                        rowSize = mediaRowSize,
+                        onRowSizeChange = { viewModel.setMediaRowSize(it) },
                     )
                 }
                 HorizontalDivider()
@@ -233,5 +187,49 @@ fun GallerySettingsScreen(
                 }
             }
         }
+    }
+}
+
+/** One target's (folders, or photos & videos) view type plus whichever size control actually
+ * applies to it right now -- tile columns for grid, row height for list -- instead of showing
+ * both sliders regardless of which view is selected. */
+@Composable
+private fun LayoutTargetSettings(
+    label: String,
+    viewType: ViewType,
+    onViewTypeChange: (ViewType) -> Unit,
+    gridColumns: Int,
+    onGridColumnsChange: (Int) -> Unit,
+    rowSize: Int,
+    onRowSizeChange: (Int) -> Unit,
+) {
+    Text(label, style = MaterialTheme.typography.titleSmall)
+    Spacer(Modifier.height(8.dp))
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        ViewType.entries.forEach { type ->
+            FilterChip(
+                selected = type == viewType,
+                onClick = { onViewTypeChange(type) },
+                label = { Text(if (type == ViewType.GRID) "Grid" else "List") },
+            )
+        }
+    }
+    Spacer(Modifier.height(12.dp))
+    if (viewType == ViewType.GRID) {
+        Text("$gridColumns per row", style = MaterialTheme.typography.bodyMedium)
+        Slider(
+            value = gridColumns.toFloat(),
+            onValueChange = { onGridColumnsChange(it.roundToInt()) },
+            valueRange = 2f..6f,
+            steps = 3,
+        )
+    } else {
+        Text("${rowSize}dp row size", style = MaterialTheme.typography.bodyMedium)
+        Slider(
+            value = rowSize.toFloat(),
+            onValueChange = { onRowSizeChange(it.roundToInt()) },
+            valueRange = 40f..112f,
+            steps = 8,
+        )
     }
 }
