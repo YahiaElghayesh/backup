@@ -37,6 +37,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.elghayesh.gallerybackup.data.media.findNode
+import com.elghayesh.gallerybackup.data.media.withVirtualFolders
+import com.elghayesh.gallerybackup.ui.common.AllFilesAccessPrompt
 
 /**
  * A file-explorer-style browser with two independent checkboxes per folder:
@@ -55,12 +57,15 @@ fun FolderVisibilityExplorerScreen(
     viewModel: GalleryViewModel,
     onBack: () -> Unit,
 ) {
-    val root by viewModel.root.collectAsState()
+    val rawRoot by viewModel.root.collectAsState()
+    val virtualFolders by viewModel.virtualFolders.collectAsState()
+    val allDeviceFolderPaths by viewModel.allDeviceFolderPaths.collectAsState()
     val includedFolders by viewModel.includedFolders.collectAsState()
     val hiddenFolders by viewModel.hiddenFolders.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     var currentPath by remember { mutableStateOf("") }
 
+    val root = rawRoot?.withVirtualFolders(virtualFolders + allDeviceFolderPaths)
     val node = root?.findNode(currentPath)
     val children = node?.children?.values?.sortedBy { it.name.lowercase() } ?: emptyList()
 
@@ -94,10 +99,14 @@ fun FolderVisibilityExplorerScreen(
     ) { padding ->
         PullToRefreshBox(
             isRefreshing = isLoading,
-            onRefresh = { viewModel.refresh() },
+            onRefresh = {
+                viewModel.refresh()
+                viewModel.refreshAllDeviceFolders()
+            },
             modifier = Modifier.padding(padding).fillMaxSize(),
         ) {
             Column(Modifier.fillMaxSize()) {
+                AllFilesAccessPrompt(onGranted = { viewModel.refreshAllDeviceFolders() })
                 if (currentPath.isEmpty()) {
                     Text(
                         "Show pins a folder to the gallery's home page and moves it out of its parent's " +

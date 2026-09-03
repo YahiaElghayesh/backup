@@ -36,6 +36,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.elghayesh.gallerybackup.data.media.findNode
 import com.elghayesh.gallerybackup.data.media.withVirtualFolders
+import com.elghayesh.gallerybackup.ui.common.AllFilesAccessPrompt
 import com.elghayesh.gallerybackup.ui.common.CreateFolderDialog
 import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
 
@@ -62,12 +63,13 @@ fun BackupFolderExplorerScreen(
 ) {
     val rawRoot by galleryViewModel.root.collectAsState()
     val virtualFolders by galleryViewModel.virtualFolders.collectAsState()
+    val allDeviceFolderPaths by galleryViewModel.allDeviceFolderPaths.collectAsState()
     val isLoading by galleryViewModel.isLoading.collectAsState()
     val selectedFolders by backupViewModel.selectedFolders.collectAsState(initial = emptySet())
     var currentPath by remember { mutableStateOf("") }
     var showCreateFolderDialog by remember { mutableStateOf(false) }
 
-    val root = rawRoot?.withVirtualFolders(virtualFolders)
+    val root = rawRoot?.withVirtualFolders(virtualFolders + allDeviceFolderPaths)
     val node = root?.findNode(currentPath)
     val children = node?.children?.values?.sortedBy { it.name.lowercase() } ?: emptyList()
 
@@ -113,10 +115,14 @@ fun BackupFolderExplorerScreen(
     ) { padding ->
         PullToRefreshBox(
             isRefreshing = isLoading,
-            onRefresh = { galleryViewModel.refresh() },
+            onRefresh = {
+                galleryViewModel.refresh()
+                galleryViewModel.refreshAllDeviceFolders()
+            },
             modifier = Modifier.padding(padding).fillMaxSize(),
         ) {
             Column(Modifier.fillMaxSize()) {
+                AllFilesAccessPrompt(onGranted = { galleryViewModel.refreshAllDeviceFolders() })
                 if (currentPath.isEmpty()) {
                     Text(
                         "Check a folder to back it up. Each folder is independent -- checking one " +

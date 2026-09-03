@@ -12,6 +12,16 @@
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
 
+    <!-- Lets the backup and include/exclude folder pickers browse every real folder on the
+         device, not just ones MediaStore already knows have media in them (e.g. an app's video
+         cache the user periodically clears out). Requested lazily, only from those two screens,
+         via Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, since this can't be granted
+         through a normal runtime permission dialog. The main gallery itself never needs this;
+         it keeps browsing the MediaStore-derived tree as before. -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+
     <!-- Only needed on Android 9 and below for saving edited photos/videos and permanent
          delete; Android 10+ scoped storage lets the app create/write its own new media
          files without this. -->

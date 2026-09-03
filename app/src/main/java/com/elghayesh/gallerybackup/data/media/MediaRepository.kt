@@ -8,6 +8,7 @@ import android.os.Environment
 import android.provider.MediaStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
  * Reads the device's photo/video library from MediaStore and reconstructs the real
@@ -27,6 +28,35 @@ class MediaRepository(private val context: Context) {
             isVideo = true,
         )
         FolderNode.buildTree(items)
+    }
+
+    /**
+     * Every real directory under external storage, regardless of whether MediaStore has indexed
+     * any media in it -- unlike [scanFolderTree], which only sees folders MediaStore already
+     * knows about. Meant for folder pickers that want "the whole filesystem" (e.g. picking a
+     * folder to back up before it has anything in it yet), not the main gallery, which should
+     * keep showing only folders that currently have media.
+     *
+     * Without "All files access" granted (see [com.elghayesh.gallerybackup.data.media.hasAllFilesAccess]),
+     * scoped storage blocks raw directory listing outside this app's own sandbox, so this
+     * silently returns whatever it can see -- typically nothing -- rather than throwing.
+     */
+    suspend fun listAllDeviceFolderPaths(): Set<String> = withContext(Dispatchers.IO) {
+        val result = mutableSetOf<String>()
+        fun walk(dir: File, relativePath: String) {
+            val children = runCatching { dir.listFiles() }.getOrNull() ?: return
+            for (child in children) {
+                if (!child.isDirectory || child.name.startsWith(".")) continue
+                // Android/data and Android/obb are other apps' private storage -- inaccessible
+                // even with All files access on modern Android, and not something to back up.
+                if (relativePath.isEmpty() && child.name == "Android") continue
+                val childPath = if (relativePath.isEmpty()) child.name else "$relativePath/${child.name}"
+                result += childPath
+                walk(child, childPath)
+            }
+        }
+        walk(Environment.getExternalStorageDirectory(), "")
+        result
     }
 
     private fun queryCollection(collection: android.net.Uri, isVideo: Boolean): List<MediaItem> {

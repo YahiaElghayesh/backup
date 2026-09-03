@@ -73,6 +73,17 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
+    /** Every real folder on the device, MediaStore-indexed or not -- see [MediaRepository.listAllDeviceFolderPaths].
+     * Loaded lazily by the folder pickers that need it, not on every gallery refresh. */
+    private val _allDeviceFolderPaths = MutableStateFlow<Set<String>>(emptySet())
+    val allDeviceFolderPaths: StateFlow<Set<String>> = _allDeviceFolderPaths.asStateFlow()
+
+    fun refreshAllDeviceFolders() {
+        viewModelScope.launch {
+            _allDeviceFolderPaths.value = repository.listAllDeviceFolderPaths()
+        }
+    }
+
     val viewType: StateFlow<ViewType> =
         prefs.viewType.stateIn(viewModelScope, SharingStarted.Eagerly, ViewType.GRID)
     val folderGridColumns: StateFlow<Int> =
