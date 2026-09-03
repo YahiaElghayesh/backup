@@ -42,6 +42,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,7 +54,9 @@ import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem as ExoMediaItem
@@ -61,6 +64,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
 import com.elghayesh.gallerybackup.R
 import com.elghayesh.gallerybackup.data.media.MediaItem
@@ -106,6 +110,7 @@ fun MediaViewerScreen(
         initialPage = startIndex.coerceIn(0, media.lastIndex),
         pageCount = { media.size },
     )
+    val pagerScope = rememberCoroutineScope()
     var currentScale by remember { mutableFloatStateOf(1f) }
 
     var transferMode by remember { mutableStateOf<ViewerTransferMode?>(null) }
@@ -199,6 +204,18 @@ fun MediaViewerScreen(
         ) { page ->
             val item = media.getOrNull(page) ?: return@HorizontalPager
             val isCurrent = pagerState.currentPage == page
+            // Panning is only useful up to the zoomed content's own edge; dragging further in
+            // that direction past the edge instead advances to the next/previous item, the same
+            // as an unzoomed swipe would, rather than being stuck once the pager's own swipe is
+            // disabled by being zoomed in.
+            val onSwipeNext: () -> Unit = {
+                currentScale = 1f
+                if (page < media.lastIndex) pagerScope.launch { pagerState.animateScrollToPage(page + 1) }
+            }
+            val onSwipePrevious: () -> Unit = {
+                currentScale = 1f
+                if (page > 0) pagerScope.launch { pagerState.animateScrollToPage(page - 1) }
+            }
             if (item.isVideo && isCurrent) {
                 // The controls (play/pause, skip, progress bar) are a sibling drawn on top of the
                 // zoomed content, not inside it -- so pinching/panning the video doesn't also
@@ -209,6 +226,8 @@ fun MediaViewerScreen(
                     ZoomableMediaBox(
                         onScaleChanged = { currentScale = it },
                         onTap = { videoState.controlsVisible = !videoState.controlsVisible },
+                        onSwipeNext = onSwipeNext,
+                        onSwipePrevious = onSwipePrevious,
                     ) {
                         VideoSurface(videoState.exoPlayer, modifier = Modifier.fillMaxSize())
                     }
@@ -217,6 +236,8 @@ fun MediaViewerScreen(
             } else {
                 ZoomableMediaBox(
                     onScaleChanged = { if (isCurrent) currentScale = it },
+                    onSwipeNext = onSwipeNext,
+                    onSwipePrevious = onSwipePrevious,
                 ) {
                     AsyncImage(
                         model = item.uri,
@@ -232,26 +253,35 @@ fun MediaViewerScreen(
 
 /** Pinch to zoom (up to 8x) and drag to pan once zoomed, plus double-tap to toggle between
  * 1x and 3x. Only intercepts single-finger drags once already zoomed in, so swiping between
- * photos at normal (1x) zoom is unaffected. */
+ * photos at normal (1x) zoom is unaffected. Panning is clamped to the zoomed content's own edge;
+ * continuing to drag past that edge instead calls [onSwipeNext]/[onSwipePrevious], the same as an
+ * unzoomed swipe would -- otherwise there'd be no way to move to the next item without first
+ * zooming back out, since the pager's own swipe is disabled while zoomed in. */
 @Composable
 private fun ZoomableMediaBox(
     onScaleChanged: (Float) -> Unit,
     onTap: () -> Unit = {},
+    onSwipeNext: () -> Unit = {},
+    onSwipePrevious: () -> Unit = {},
     content: @Composable () -> Unit,
 ) {
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
+    var boxSize by remember { mutableStateOf(IntSize.Zero) }
 
     Box(
         Modifier
             .fillMaxSize()
+            .onSizeChanged { boxSize = it }
             .pointerInput(Unit) {
                 var lastTapUpTimeMs = 0L
                 var lastTapPosition = Offset.Zero
                 val tapSlopPx = 24.dp.toPx()
+                val swipeThresholdPx = 72.dp.toPx()
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
                     var totalPan = 0f
+                    var edgeOverscrollX = 0f
                     var lastEvent: PointerEvent
                     do {
                         val event = awaitPointerEvent()
@@ -264,16 +294,40 @@ private fun ZoomableMediaBox(
                             if (zoomChange != 1f || panChange != Offset.Zero) {
                                 val newScale = (scale * zoomChange).coerceIn(1f, 8f)
                                 scale = newScale
-                                offset = if (newScale > 1f) offset + panChange else Offset.Zero
+                                if (newScale > 1f) {
+                                    val maxOffsetX = boxSize.width * (newScale - 1f) / 2f
+                                    val maxOffsetY = boxSize.height * (newScale - 1f) / 2f
+                                    val unclampedX = offset.x + panChange.x
+                                    val clampedX = unclampedX.coerceIn(-maxOffsetX, maxOffsetX)
+                                    val clampedY = (offset.y + panChange.y).coerceIn(-maxOffsetY, maxOffsetY)
+                                    val overscrollX = unclampedX - clampedX
+                                    // Only a single-finger drag pinned at the edge counts -- reset
+                                    // as soon as it isn't (pinch gesture, or panning within bounds).
+                                    edgeOverscrollX = if (pointerCount == 1 && overscrollX != 0f) {
+                                        edgeOverscrollX + overscrollX
+                                    } else {
+                                        0f
+                                    }
+                                    offset = Offset(clampedX, clampedY)
+                                } else {
+                                    offset = Offset.Zero
+                                    edgeOverscrollX = 0f
+                                }
                                 onScaleChanged(newScale)
                                 event.changes.forEach { change ->
                                     if (change.positionChanged()) change.consume()
                                 }
                             }
+                        } else {
+                            edgeOverscrollX = 0f
                         }
                     } while (event.changes.any { it.pressed })
 
-                    if (totalPan < tapSlopPx && lastEvent.changes.size == 1) {
+                    if (edgeOverscrollX <= -swipeThresholdPx) {
+                        onSwipeNext()
+                    } else if (edgeOverscrollX >= swipeThresholdPx) {
+                        onSwipePrevious()
+                    } else if (totalPan < tapSlopPx && lastEvent.changes.size == 1) {
                         val upPosition = lastEvent.changes.first().position
                         val now = System.currentTimeMillis()
                         val isDoubleTap = now - lastTapUpTimeMs < 300 &&

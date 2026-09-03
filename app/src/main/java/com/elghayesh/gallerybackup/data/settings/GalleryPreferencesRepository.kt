@@ -37,8 +37,13 @@ enum class AccentColor(val seed: Long) {
     INDIGO(0xFF3949AB),
 }
 
-/** A custom folder tile: solid [colorSeed] background with [text] instead of a photo thumbnail. */
-data class FolderCover(val text: String, val colorSeed: Long)
+/** A custom folder tile, overriding the default (the folder's own first photo, recursing into
+ * subfolders if it's empty). Either plain [Text] over a solid background color, or a specific
+ * [Photo] the user picked from the folder's own items. */
+sealed class FolderCover {
+    data class Text(val text: String, val colorSeed: Long) : FolderCover()
+    data class Photo(val uri: String) : FolderCover()
+}
 
 /** A per-folder sort override, set from the sort dialog's "this folder" / "this folder and
  * subfolders" scope choices. [includeSubfolders] false = applies to just this exact folder's own
@@ -316,7 +321,13 @@ class GalleryPreferencesRepository(private val context: Context) {
             buildMap {
                 for (i in 0 until array.length()) {
                     val obj = array.getJSONObject(i)
-                    put(obj.getString("path"), FolderCover(obj.getString("text"), obj.getLong("color")))
+                    // Installs from before photo covers existed never wrote a "type" -- those
+                    // entries are all text covers, so that's the default when it's missing.
+                    val cover = when (obj.optString("type", "text")) {
+                        "photo" -> FolderCover.Photo(obj.getString("uri"))
+                        else -> FolderCover.Text(obj.getString("text"), obj.getLong("color"))
+                    }
+                    put(obj.getString("path"), cover)
                 }
             }
         } catch (e: Exception) {
@@ -330,8 +341,17 @@ class GalleryPreferencesRepository(private val context: Context) {
             array.put(
                 org.json.JSONObject().apply {
                     put("path", path)
-                    put("text", cover.text)
-                    put("color", cover.colorSeed)
+                    when (cover) {
+                        is FolderCover.Text -> {
+                            put("type", "text")
+                            put("text", cover.text)
+                            put("color", cover.colorSeed)
+                        }
+                        is FolderCover.Photo -> {
+                            put("type", "photo")
+                            put("uri", cover.uri)
+                        }
+                    }
                 },
             )
         }

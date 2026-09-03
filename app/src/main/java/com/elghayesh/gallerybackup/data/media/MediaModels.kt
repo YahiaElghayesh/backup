@@ -61,12 +61,16 @@ class FolderNode(
     }
 }
 
-/** Walks [root] down [path] (e.g. "DCIM/Camera"), returning null if the path no longer exists. */
+/** Walks [root] down [path] (e.g. "DCIM/Camera"), returning null if the path no longer exists.
+ * A "." segment (e.g. "DCIM/Camera/.") stays on the current node instead of descending -- used
+ * by the gallery to link to "just this folder's own items" as a path distinct from the folder
+ * itself, without needing a real child by that name. A literal "." never occurs in a real
+ * MediaStore relative path or filesystem folder name, both of which skip dot-prefixed entries. */
 fun FolderNode.findNode(path: String): FolderNode? {
     if (path.isBlank()) return this
     var node = this
     for (segment in path.trim('/').split(FolderNode.PATH_SEPARATOR)) {
-        node = node.children[segment] ?: return null
+        node = if (segment == ".") node else (node.children[segment] ?: return null)
     }
     return node
 }

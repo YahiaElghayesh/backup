@@ -161,7 +161,10 @@ fun GalleryScreen(
     // top-level children stop showing automatically too, and the tile list becomes purely whatever
     // was pinned. Before anything's ever been pinned, the root falls back to showing its real
     // top-level children as usual, so a fresh install isn't an empty gallery.
-    val folders = if (node != null) {
+    // A "." at the end of the path means "just this folder's own items", distinct from the
+    // folder's normal listing -- see the self-tile logic below and FolderNode.findNode.
+    val isSelfView = path.endsWith("/.")
+    val realFolders = if (node != null && !isSelfView) {
         val ownChildren = when {
             path.isNotEmpty() -> node.promotedChildren(includedFolders)
             includedFolders.isEmpty() -> node.children.values.toList()
@@ -172,7 +175,17 @@ fun GalleryScreen(
     } else {
         emptyList()
     }
-    val media = node?.items?.sortedByDescending { it.dateModifiedSec } ?: emptyList()
+    // A folder that has both real subfolders and its own direct items gets an extra tile, named
+    // the same as the folder, for just those items -- rather than mixing loose media in with the
+    // subfolder tiles. Opening it (path + "/.") shows only that folder's own items, nothing else.
+    val hasSelfTile = !isSelfView && path.isNotEmpty() && node != null && realFolders.isNotEmpty() && node.items.isNotEmpty()
+    val folders = if (hasSelfTile) {
+        val selfNode = node!!
+        realFolders + FolderNode("$path/.", selfNode.name).apply { items.addAll(selfNode.items) }
+    } else {
+        realFolders
+    }
+    val media = if (hasSelfTile) emptyList() else node?.items?.sortedByDescending { it.dateModifiedSec } ?: emptyList()
     val selectedItems = media.filter { it.id in selectedMediaIds }
     val selectedFolderNodes = folders.filter { it.path in selectedFolderPaths }
     val isSelectionMode = selectedMediaIds.isNotEmpty() || selectedFolderPaths.isNotEmpty()
@@ -202,13 +215,13 @@ fun GalleryScreen(
     }
     if (showCreateFolderDialog) {
         CreateFolderDialog(
-            onConfirm = { name -> viewModel.createFolder(path, name); showCreateFolderDialog = false },
+            onConfirm = { name -> viewModel.createFolder(path.removeSuffix("/."), name); showCreateFolderDialog = false },
             onDismiss = { showCreateFolderDialog = false },
         )
     }
     coverDialogFor?.let { folder ->
         FolderCoverDialog(
-            folderName = folder.name,
+            folder = folder,
             current = folderCovers[folder.path],
             onConfirm = { cover -> viewModel.setFolderCover(folder.path, cover); coverDialogFor = null },
             onDismiss = { coverDialogFor = null },
@@ -676,8 +689,10 @@ private fun sortedFolders(folders: List<FolderNode>, order: FolderSortOrder, inc
         FolderSortOrder.COUNT_ASC -> folders.sortedBy { it.promotionAwareItemCount(includedFolders) }
     }
 
-private fun breadcrumbTitle(path: String): String =
-    if (path.isEmpty()) "Gallery" else path.substringAfterLast('/')
+private fun breadcrumbTitle(path: String): String {
+    val realPath = path.removeSuffix("/.")
+    return if (realPath.isEmpty()) "Gallery" else realPath.substringAfterLast('/')
+}
 
 @Composable
 private fun BoxScope.EmptyState(icon: ImageVector, title: String, subtitle: String) {
@@ -789,7 +804,7 @@ private fun SortScopeOption(label: String, onClick: () -> Unit) {
 
 @Composable
 private fun FolderCoverContent(folder: FolderNode, cover: FolderCover?, includedFolders: Set<String>) {
-    if (cover != null) {
+    if (cover is FolderCover.Text) {
         Box(Modifier.fillMaxSize().background(Color(cover.colorSeed)), contentAlignment = Alignment.Center) {
             Text(
                 text = cover.text,
@@ -801,7 +816,7 @@ private fun FolderCoverContent(folder: FolderNode, cover: FolderCover?, included
         }
         return
     }
-    val coverUri = folder.promotionAwareCoverUri(includedFolders)
+    val coverUri = if (cover is FolderCover.Photo) android.net.Uri.parse(cover.uri) else folder.promotionAwareCoverUri(includedFolders)
     if (coverUri != null) {
         AsyncImage(
             model = coverUri,
@@ -1007,10 +1022,12 @@ private fun GalleryListItem(
                 Modifier
                     .size(thumbnailSizeDp.dp)
                     .clip(RoundedCornerShape(8.dp))
-                    .background(cover?.let { Color(it.colorSeed) } ?: MaterialTheme.colorScheme.surfaceVariant),
+                    .background(
+                        (cover as? FolderCover.Text)?.let { Color(it.colorSeed) } ?: MaterialTheme.colorScheme.surfaceVariant,
+                    ),
             ) {
                 when {
-                    cover != null -> Text(
+                    cover is FolderCover.Text -> Text(
                         cover.text,
                         color = Color.White,
                         style = MaterialTheme.typography.labelSmall,
@@ -1052,7 +1069,11 @@ internal fun FolderListRow(
     onLongClick: () -> Unit,
 ) {
     GalleryListItem(
-        thumbnailModel = folder.promotionAwareCoverUri(includedFolders),
+        thumbnailModel = if (cover is FolderCover.Photo) {
+            android.net.Uri.parse(cover.uri)
+        } else {
+            folder.promotionAwareCoverUri(includedFolders)
+        },
         icon = Icons.Filled.Folder,
         cover = cover,
         title = folder.name,
