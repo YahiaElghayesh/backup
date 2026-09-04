@@ -9,6 +9,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -18,14 +19,17 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -55,7 +59,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -69,11 +72,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -87,10 +94,14 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
@@ -206,6 +217,7 @@ fun GalleryScreen(
     val selectedFolderNodes = folders.filter { it.path in selectedFolderPaths }
     val isSelectionMode = selectedMediaIds.isNotEmpty() || selectedFolderPaths.isNotEmpty()
     val totalSelectedCount = selectedItems.size + selectedFolderNodes.size
+    val totalSelectableCount = folders.size + media.size
 
     BackHandler(enabled = isSelectionMode) { viewModel.clearSelection() }
 
@@ -226,24 +238,31 @@ fun GalleryScreen(
     // little enough of it that the viewport isn't full -- pushing it down as far as it'll go
     // without changing order, the same trick a chat screen uses for a short conversation. Once
     // there's enough content to fill (or overflow) the screen, this must be a complete no-op:
-    // normal top-anchored layout, normal scrolling, unchanged order. Checking that every item is
-    // simultaneously present in visibleItemsInfo is a direct, order-independent "does this even
-    // need pinning" signal -- deliberately not canScrollForward/canScrollBackward, which turned
-    // out unreliable for this grid's multi-section custom-span layout (media and folders declared
-    // as two separate gridItems() blocks sharing one column-span scheme). These are plain
-    // functions (not vals) so every call site reads the live layout state fresh, the same way
-    // reading pinContentToBottom itself always does -- including from inside the drag-select
-    // gesture callback below, which must never work off a value captured when that gesture began.
-    fun gridPinToBottom(): Boolean {
-        if (!pinContentToBottom) return false
-        val info = gridState.layoutInfo
-        return info.totalItemsCount == 0 || info.visibleItemsInfo.size >= info.totalItemsCount
+    // normal top-anchored layout, normal scrolling, unchanged order -- someone opening an
+    // overflowing folder must always land at its actual top, never at the bottom needing to
+    // scroll up.
+    //
+    // This can only be decided once, right after the FIRST layout at the natural (non-reversed,
+    // scrolled-to-top) resting position, and then LOCKED until the folder/media content itself
+    // changes -- never re-derived from live scroll state on every recomposition. An earlier
+    // version re-checked visibleItemsInfo.size >= totalItemsCount continuously, which is only a
+    // valid "does this fit" signal AT that first rest position; re-evaluated mid-scroll on a
+    // genuinely overflowing list, it can briefly go true near either scroll extreme (e.g. the
+    // last screenful of a long list can itself "fit" the viewport), incorrectly flipping
+    // reverseLayout on and snapping the scroll position -- exactly the "keeps returning to the
+    // start while scrolling" bug that caused.
+    var gridFits by remember(folders, media) { mutableStateOf<Boolean?>(null) }
+    var listFits by remember(folders, media) { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(folders, media) {
+        val info = snapshotFlow { gridState.layoutInfo }.first { it.totalItemsCount > 0 }
+        gridFits = info.visibleItemsInfo.size >= info.totalItemsCount
     }
-    fun listPinToBottom(): Boolean {
-        if (!pinContentToBottom) return false
-        val info = listState.layoutInfo
-        return info.totalItemsCount == 0 || info.visibleItemsInfo.size >= info.totalItemsCount
+    LaunchedEffect(folders, media) {
+        val info = snapshotFlow { listState.layoutInfo }.first { it.totalItemsCount > 0 }
+        listFits = info.visibleItemsInfo.size >= info.totalItemsCount
     }
+    fun gridPinToBottom(): Boolean = pinContentToBottom && gridFits == true
+    fun listPinToBottom(): Boolean = pinContentToBottom && listFits == true
 
     if (showSortDialog) {
         SortDialog(
@@ -325,6 +344,9 @@ fun GalleryScreen(
                         }
                     },
                     actions = {
+                        IconButton(onClick = onOpenTrash) {
+                            Icon(Icons.Filled.Delete, contentDescription = "Trash")
+                        }
                         Box {
                             IconButton(onClick = { overflowExpanded = true }) {
                                 Icon(Icons.Filled.MoreVert, contentDescription = "More options")
@@ -360,7 +382,7 @@ fun GalleryScreen(
                 )
             } else {
                 TopAppBar(
-                    title = { Text("$totalSelectedCount selected") },
+                    title = { Text("$totalSelectedCount / $totalSelectableCount selected") },
                     navigationIcon = {
                         IconButton(onClick = { viewModel.clearSelection() }) {
                             Icon(Icons.Filled.Close, contentDescription = "Cancel selection")
@@ -431,13 +453,6 @@ fun GalleryScreen(
                 }
             }
         },
-        floatingActionButton = {
-            if (!isSelectionMode) {
-                FloatingActionButton(onClick = onOpenTrash) {
-                    Icon(Icons.Filled.Delete, contentDescription = "Trash")
-                }
-            }
-        },
     ) { padding ->
         // Pull-to-refresh is the "faster, on demand" rescan the user can trigger manually; automatic
         // rescans on device media changes are debounced in GalleryViewModel's init block.
@@ -499,6 +514,13 @@ fun GalleryScreen(
                                         val longPress = awaitLongPressOrCancellation(down.id)
                                         if (longPress != null) {
                                             isDragSelecting = true
+                                            // Forcibly cancel any scroll the grid's own internal
+                                            // scrollable may have already started capturing during
+                                            // the long-press wait -- consuming events afterward
+                                            // (Initial pass, below) isn't enough to interrupt a
+                                            // drag gesture it already committed to before we knew
+                                            // this would become a long press.
+                                            gridState.stopScroll()
                                             downIndex?.let {
                                                 selectAt(it, currentFolders.value, currentMedia.value, viewModel, gridPinToBottom())
                                             }
@@ -562,16 +584,13 @@ fun GalleryScreen(
                                 // different number of, so the two can have independent apparent column counts
                                 // (GRID_SPAN_UNITS is divisible by every column count 2..6) within one grid.
                                 columns = GridCells.Fixed(GRID_SPAN_UNITS),
-                                // Extra bottom clearance for the Trash FAB, which floats over this content
-                                // rather than reserving space for itself -- without it, the FAB sits directly
-                                // on top of the last row instead of floating above a scroll-revealable one.
-                                // top/bottom always refer to the actual visual edges regardless of
-                                // reverseLayout, so this stays correct whether or not content is pinned.
+                                // Extra end clearance so no tile ever renders behind the fast-scrollbar
+                                // overlaid on top of this Box -- see FastScrollbar below.
                                 contentPadding = PaddingValues(
                                     start = 4.dp,
                                     top = 4.dp,
-                                    end = 4.dp,
-                                    bottom = if (isSelectionMode) 4.dp else 88.dp,
+                                    end = FAST_SCROLLBAR_CLEARANCE,
+                                    bottom = 4.dp,
                                 ),
                                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                                 verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -638,6 +657,10 @@ fun GalleryScreen(
                                     }
                                 }
                             }
+                            FastScrollbar(
+                                gridState = gridState,
+                                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
+                            )
                         }
                     } else {
                         // At least one of folders/media is in list view -- no unified drag-select
@@ -751,25 +774,128 @@ fun GalleryScreen(
                                 }
                             }
                         }
-                        LazyColumn(
-                            state = listState,
-                            modifier = Modifier.fillMaxSize(),
-                            reverseLayout = listPinToBottom(),
-                            // Same Trash-FAB clearance as the full-grid branch above.
-                            contentPadding = PaddingValues(bottom = if (isSelectionMode) 0.dp else 88.dp),
-                        ) {
-                            if (listPinToBottom()) {
-                                mediaSection()
-                                folderSection()
-                            } else {
-                                folderSection()
-                                mediaSection()
+                        Box(Modifier.fillMaxSize()) {
+                            LazyColumn(
+                                state = listState,
+                                modifier = Modifier.fillMaxSize(),
+                                reverseLayout = listPinToBottom(),
+                                // End clearance so no row renders behind the fast-scrollbar overlaid
+                                // on top of this Box -- see FastScrollbar below.
+                                contentPadding = PaddingValues(end = FAST_SCROLLBAR_CLEARANCE),
+                            ) {
+                                if (listPinToBottom()) {
+                                    mediaSection()
+                                    folderSection()
+                                } else {
+                                    folderSection()
+                                    mediaSection()
+                                }
                             }
+                            FastScrollbar(
+                                listState = listState,
+                                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
+                            )
                         }
                     }
                 }
             }
         }
+    }
+}
+
+private val FAST_SCROLLBAR_WIDTH = 20.dp
+private val FAST_SCROLLBAR_GUTTER = 8.dp
+
+/** How much end space the grid/list needs to reserve (as contentPadding) so no tile or row ever
+ * renders behind [FastScrollbar] -- the bar's own width plus a small tinted gutter of clear space
+ * between it and the content. */
+private val FAST_SCROLLBAR_CLEARANCE = FAST_SCROLLBAR_WIDTH + FAST_SCROLLBAR_GUTTER
+
+/** A thick, far-right, drag-to-jump scrollbar for quickly moving through a long folder/media
+ * listing -- ordinary drag-to-scroll only covers a screenful at a time. Sized and positioned to
+ * never overlap real content: [FAST_SCROLLBAR_CLEARANCE] is reserved as the grid/list's own end
+ * contentPadding, so this whole bar (plus its gutter) sits in space no tile is ever drawn into. */
+@Composable
+private fun FastScrollbar(gridState: LazyGridState, modifier: Modifier = Modifier) {
+    val scope = rememberCoroutineScope()
+    val info = gridState.layoutInfo
+    FastScrollbarTrack(
+        firstVisibleIndex = gridState.firstVisibleItemIndex,
+        visibleCount = info.visibleItemsInfo.size,
+        totalCount = info.totalItemsCount,
+        onDragToFraction = { fraction ->
+            val total = gridState.layoutInfo.totalItemsCount
+            if (total > 0) {
+                val target = (fraction * total).roundToInt().coerceIn(0, total - 1)
+                scope.launch { gridState.scrollToItem(target) }
+            }
+        },
+        modifier = modifier,
+    )
+}
+
+/** See the [LazyGridState] overload -- same idea, for the mixed grid/list branch's [LazyColumn]. */
+@Composable
+private fun FastScrollbar(listState: LazyListState, modifier: Modifier = Modifier) {
+    val scope = rememberCoroutineScope()
+    val info = listState.layoutInfo
+    FastScrollbarTrack(
+        firstVisibleIndex = listState.firstVisibleItemIndex,
+        visibleCount = info.visibleItemsInfo.size,
+        totalCount = info.totalItemsCount,
+        onDragToFraction = { fraction ->
+            val total = listState.layoutInfo.totalItemsCount
+            if (total > 0) {
+                val target = (fraction * total).roundToInt().coerceIn(0, total - 1)
+                scope.launch { listState.scrollToItem(target) }
+            }
+        },
+        modifier = modifier,
+    )
+}
+
+@Composable
+private fun FastScrollbarTrack(
+    firstVisibleIndex: Int,
+    visibleCount: Int,
+    totalCount: Int,
+    onDragToFraction: (Float) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    // Nothing to jump to if everything's already on screen -- no bar needed (and no risk of a
+    // near-invisible sliver thumb spanning the whole track).
+    if (totalCount == 0 || visibleCount >= totalCount) return
+    BoxWithConstraints(modifier.width(FAST_SCROLLBAR_WIDTH)) {
+        val density = LocalDensity.current
+        val trackHeightPx = with(density) { maxHeight.toPx() }
+        val thumbHeightPx = trackHeightPx * (visibleCount.toFloat() / totalCount.toFloat()).coerceIn(0.08f, 1f)
+        val scrollRange = (totalCount - visibleCount).coerceAtLeast(1)
+        val positionFraction = (firstVisibleIndex.toFloat() / scrollRange).coerceIn(0f, 1f)
+        val thumbOffsetPx = (trackHeightPx - thumbHeightPx) * positionFraction
+
+        fun onDragTo(yPx: Float) {
+            val usableTrack = (trackHeightPx - thumbHeightPx).coerceAtLeast(1f)
+            onDragToFraction(((yPx - thumbHeightPx / 2f) / usableTrack).coerceIn(0f, 1f))
+        }
+
+        Box(
+            Modifier
+                .fillMaxSize()
+                .pointerInput(totalCount, visibleCount) {
+                    detectDragGestures(onDragStart = { offset -> onDragTo(offset.y) }) { change, _ ->
+                        change.consume()
+                        onDragTo(change.position.y)
+                    }
+                },
+        )
+        Box(
+            Modifier
+                .offset { IntOffset(0, thumbOffsetPx.roundToInt()) }
+                .width(FAST_SCROLLBAR_WIDTH)
+                .height(with(density) { thumbHeightPx.toDp() })
+                .clip(RoundedCornerShape(FAST_SCROLLBAR_WIDTH / 2))
+                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)),
+        )
     }
 }
 
@@ -1040,11 +1166,21 @@ private fun FolderCoverContent(folder: FolderNode, cover: FolderCover?, included
  * -- a big cover-dialog preview and a small grid tile included -- instead of comfortably fitting
  * in one and being forced tiny (or wrapping badly) in the other. */
 private const val COVER_FONT_WIDTH_FRACTION = 0.18f
+private const val COVER_FONT_MIN_SCALE = 0.35f
+private const val COVER_FONT_SHRINK_STEP = 0.85f
 
 /** A text folder cover's label, starting at [userScale] (the size the user picked in the cover
- * dialog) and shrinking further step by step until it fits within [modifier]'s bounds (falling
- * back to a 2-line ellipsis at the smallest size), so a long or large custom cover name never
- * spills past the thumbnail it's drawn on, however small the tile or row is. */
+ * dialog) and shrinking further step by step until it fits within its own measured bounds
+ * (falling back to a 2-line ellipsis at the smallest size), so a long or large custom cover name
+ * never spills past the thumbnail it's drawn on, however small the tile or row is.
+ *
+ * The right size is computed in one deterministic pass with [TextMeasurer] before anything is
+ * drawn, rather than the previous approach of rendering at a guess and reactively shrinking one
+ * step per recomposition in response to [Text]'s own onTextLayout -- that iterative version could
+ * visibly settle on a still-wrapping size (e.g. "Devonics Task" breaking mid-word into "Devoni" /
+ * "cs Task") if the multi-frame convergence it depended on didn't fully play out. Measuring every
+ * candidate size up front and picking the best BEFORE the first frame renders can't get stuck
+ * partway like that. */
 @Composable
 internal fun CoverText(
     text: String,
@@ -1054,33 +1190,35 @@ internal fun CoverText(
     wrap: Boolean = false,
     textColor: Color = Color.White,
 ) {
+    val textMeasurer = rememberTextMeasurer()
     BoxWithConstraints(modifier, contentAlignment = Alignment.Center) {
-        val baseFontSizeSp = maxWidth.value * COVER_FONT_WIDTH_FRACTION * userScale
-        var fontScale by remember(text, userScale) { mutableFloatStateOf(1f) }
+        val fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal
+        val constraints = Constraints(maxWidth = with(LocalDensity.current) { maxWidth.roundToPx() })
+        val resolvedFontSizeSp = remember(text, userScale, bold, wrap, maxWidth) {
+            val baseFontSizeSp = maxWidth.value * COVER_FONT_WIDTH_FRACTION * userScale
+            var scale = 1f
+            var fontSizeSp = baseFontSizeSp
+            while (true) {
+                fontSizeSp = baseFontSizeSp * scale
+                val result = textMeasurer.measure(
+                    text = text,
+                    style = TextStyle(fontSize = fontSizeSp.sp, fontWeight = fontWeight, textAlign = TextAlign.Center),
+                    constraints = constraints,
+                    maxLines = 2,
+                )
+                val needsShrink = result.didOverflowWidth || result.didOverflowHeight || (!wrap && result.lineCount > 1)
+                if (!needsShrink || scale <= COVER_FONT_MIN_SCALE) break
+                scale = (scale * COVER_FONT_SHRINK_STEP).coerceAtLeast(COVER_FONT_MIN_SCALE)
+            }
+            fontSizeSp
+        }
         Text(
             text = text,
             color = textColor,
-            style = TextStyle(
-                fontSize = (baseFontSizeSp * fontScale).sp,
-                fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal,
-            ),
-            textAlign = TextAlign.Center,
+            style = TextStyle(fontSize = resolvedFontSizeSp.sp, fontWeight = fontWeight, textAlign = TextAlign.Center),
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.fillMaxWidth(),
-            onTextLayout = { result ->
-                // With wrap off (the default), shrink not just on outright overflow but also whenever
-                // the text had to wrap at all -- a wrap can still "fit" within maxLines=2 (no overflow
-                // reported) but land as an ugly, arbitrary mid-word break (e.g. a single orphaned
-                // letter stranded on line 2). Preferring a smaller single line over that, all the way
-                // down to the size floor, is what actually avoids it. With wrap on, a normal 2-line
-                // wrap at the chosen size is exactly what the user asked for, so only real overflow
-                // (text that doesn't fit even wrapped) triggers a shrink.
-                val needsShrink = result.didOverflowWidth || result.didOverflowHeight || (!wrap && result.lineCount > 1)
-                if (needsShrink && fontScale > 0.35f) {
-                    fontScale *= 0.85f
-                }
-            },
         )
     }
 }
