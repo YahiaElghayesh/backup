@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
@@ -79,10 +80,12 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -95,7 +98,6 @@ import com.elghayesh.gallerybackup.data.media.latestModifiedSec
 import com.elghayesh.gallerybackup.data.media.promotedChildren
 import com.elghayesh.gallerybackup.data.media.promotionAwareCoverUri
 import com.elghayesh.gallerybackup.data.media.promotionAwareItemCount
-import com.elghayesh.gallerybackup.data.settings.AccentColor
 import com.elghayesh.gallerybackup.data.settings.FolderCover
 import com.elghayesh.gallerybackup.data.settings.FolderSortOrder
 import com.elghayesh.gallerybackup.data.settings.FolderSortOverride
@@ -203,11 +205,25 @@ fun GalleryScreen(
     var showProperties by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
     var showCreateFolderDialog by remember { mutableStateOf(false) }
-    var coverDialogFor by remember { mutableStateOf<FolderNode?>(null) }
+    var coverDialogFolders by remember { mutableStateOf<List<FolderNode>>(emptyList()) }
 
     val requestDelete = rememberDeleteRequester(viewModel)
     val gridState = rememberLazyGridState()
+    val listState = rememberLazyListState()
     var isDragSelecting by remember { mutableStateOf(false) }
+
+    // "Pin content to the bottom" should only actually anchor content to the bottom when there's
+    // little enough of it that the viewport isn't full -- pushing it down as far as it'll go
+    // without changing order, the same trick a chat screen uses for a short conversation. Once
+    // there's enough content to fill (or overflow) the screen, this must be a complete no-op:
+    // normal top-anchored layout, normal scrolling, unchanged order. canScrollForward/Backward
+    // both false means every item already fits without scrolling, regardless of layout direction,
+    // so it's a safe, order-independent signal for "would this even need pinning". These are
+    // plain functions (not vals) so every call site reads the live scroll state fresh, the same
+    // way reading pinContentToBottom itself always does -- including from inside the drag-select
+    // gesture callback below, which must never work off a value captured when that gesture began.
+    fun gridPinToBottom() = pinContentToBottom && !gridState.canScrollForward && !gridState.canScrollBackward
+    fun listPinToBottom() = pinContentToBottom && !listState.canScrollForward && !listState.canScrollBackward
 
     if (showSortDialog) {
         SortDialog(
@@ -223,12 +239,15 @@ fun GalleryScreen(
             onDismiss = { showCreateFolderDialog = false },
         )
     }
-    coverDialogFor?.let { folder ->
+    if (coverDialogFolders.isNotEmpty()) {
         FolderCoverDialog(
-            folder = folder,
-            current = folderCovers[folder.path],
-            onConfirm = { cover -> viewModel.setFolderCover(folder.path, cover); coverDialogFor = null },
-            onDismiss = { coverDialogFor = null },
+            folders = coverDialogFolders,
+            current = if (coverDialogFolders.size == 1) folderCovers[coverDialogFolders.first().path] else null,
+            onConfirm = { perFolder ->
+                perFolder.forEach { (path, cover) -> viewModel.setFolderCover(path, cover) }
+                coverDialogFolders = emptyList()
+            },
+            onDismiss = { coverDialogFolders = emptyList() },
         )
     }
     if (showRenameDialog) {
@@ -369,15 +388,10 @@ fun GalleryScreen(
                             if (totalSelectedCount == 1) {
                                 add("Rename" to { showRenameDialog = true })
                             }
-                            if (selectedFolderNodes.size == 1 && selectedItems.isEmpty()) {
-                                add("Set cover" to { coverDialogFor = selectedFolderNodes.first() })
-                            } else if (selectedFolderNodes.size > 1 && selectedItems.isEmpty()) {
+                            if (selectedFolderNodes.isNotEmpty() && selectedItems.isEmpty()) {
                                 add(
-                                    "Set covers to folder names" to {
-                                        selectedFolderNodes.forEach { folder ->
-                                            viewModel.setFolderCover(folder.path, FolderCover.Text(folder.name, AccentColor.BLUE.seed))
-                                        }
-                                        viewModel.clearSelection()
+                                    (if (selectedFolderNodes.size == 1) "Set cover" else "Set covers") to {
+                                        coverDialogFolders = selectedFolderNodes
                                     },
                                 )
                             }
@@ -448,18 +462,25 @@ fun GalleryScreen(
                                         val longPress = awaitLongPressOrCancellation(down.id)
                                         if (longPress != null) {
                                             isDragSelecting = true
-                                            downIndex?.let { selectAt(it, folders, media, viewModel, pinContentToBottom) }
+                                            downIndex?.let { selectAt(it, folders, media, viewModel, gridPinToBottom()) }
                                             var pointerId = down.id
                                             try {
                                                 while (true) {
-                                                    val event = awaitPointerEvent()
+                                                    // Read (and consume) on the Initial pass, which Compose
+                                                    // dispatches parent-to-child -- i.e. before the grid's own
+                                                    // internal scroll gesture detector (a descendant) gets to see
+                                                    // this event on its default Main pass. Consuming here first
+                                                    // is what actually stops the grid from treating an in-progress
+                                                    // drag-select as a scroll, regardless of whether the
+                                                    // userScrollEnabled recomposition has applied yet.
+                                                    val event = awaitPointerEvent(PointerEventPass.Initial)
                                                     val change = event.changes.firstOrNull { it.id == pointerId } ?: break
                                                     if (!change.pressed) {
                                                         change.consume()
                                                         break
                                                     }
                                                     itemIndexAt(gridState, change.position)
-                                                        ?.let { selectAt(it, folders, media, viewModel, pinContentToBottom) }
+                                                        ?.let { selectAt(it, folders, media, viewModel, gridPinToBottom()) }
                                                     change.consume()
                                                     pointerId = change.id
                                                 }
@@ -479,7 +500,7 @@ fun GalleryScreen(
                                                     media,
                                                     viewModel,
                                                     path,
-                                                    pinContentToBottom,
+                                                    gridPinToBottom(),
                                                     onOpenFolder,
                                                     onOpenMedia,
                                                 )
@@ -502,11 +523,13 @@ fun GalleryScreen(
                                 // first, each block internally reversed too) so the *visual* result
                                 // is still folders-then-media in their normal order, just anchored to
                                 // the bottom of the viewport instead of the top when it's not full --
-                                // see selectAt/openOrToggle for the matching index math.
-                                reverseLayout = pinContentToBottom,
+                                // see selectAt/openOrToggle for the matching index math. Only actually
+                                // kicks in once gridPinToBottom() confirms the content doesn't already
+                                // fill the viewport -- see its own doc comment above.
+                                reverseLayout = gridPinToBottom(),
                                 modifier = Modifier.fillMaxSize(),
                             ) {
-                                if (pinContentToBottom) {
+                                if (gridPinToBottom()) {
                                     gridItems(
                                         media.asReversed(),
                                         key = { "media:${it.id}" },
@@ -572,7 +595,7 @@ fun GalleryScreen(
                         // newest message to the bottom while scrolling normally.
                         val folderSection: LazyListScope.() -> Unit = {
                             if (folderViewType == ViewType.GRID) {
-                                val rows = folders.chunked(folderGridColumns).let { if (pinContentToBottom) it.asReversed() else it }
+                                val rows = folders.chunked(folderGridColumns).let { if (listPinToBottom()) it.asReversed() else it }
                                 items(rows, key = { row -> "folderRow:" + row.joinToString("|") { it.path } }) { row ->
                                     Row(
                                         Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
@@ -601,7 +624,7 @@ fun GalleryScreen(
                                     }
                                 }
                             } else {
-                                val ordered = if (pinContentToBottom) folders.asReversed() else folders
+                                val ordered = if (listPinToBottom()) folders.asReversed() else folders
                                 items(ordered, key = { "folder:${it.path}" }) { folder ->
                                     FolderListRow(
                                         folder = folder,
@@ -625,7 +648,7 @@ fun GalleryScreen(
                         val mediaSection: LazyListScope.() -> Unit = {
                             if (mediaViewType == ViewType.GRID) {
                                 val rows = media.withIndex().toList().chunked(mediaGridColumns)
-                                    .let { if (pinContentToBottom) it.asReversed() else it }
+                                    .let { if (listPinToBottom()) it.asReversed() else it }
                                 items(rows, key = { row -> "mediaRow:" + row.joinToString("|") { it.value.id.toString() } }) { row ->
                                     Row(
                                         Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
@@ -652,7 +675,7 @@ fun GalleryScreen(
                                     }
                                 }
                             } else {
-                                val ordered = media.withIndex().toList().let { if (pinContentToBottom) it.asReversed() else it }
+                                val ordered = media.withIndex().toList().let { if (listPinToBottom()) it.asReversed() else it }
                                 items(ordered, key = { (_, item) -> "media:${item.id}" }) { (index, item) ->
                                     MediaListRow(
                                         item = item,
@@ -671,8 +694,12 @@ fun GalleryScreen(
                                 }
                             }
                         }
-                        LazyColumn(modifier = Modifier.fillMaxSize(), reverseLayout = pinContentToBottom) {
-                            if (pinContentToBottom) {
+                        LazyColumn(
+                            state = listState,
+                            modifier = Modifier.fillMaxSize(),
+                            reverseLayout = listPinToBottom(),
+                        ) {
+                            if (listPinToBottom()) {
                                 mediaSection()
                                 folderSection()
                             } else {
@@ -914,6 +941,7 @@ private fun FolderCoverContent(folder: FolderNode, cover: FolderCover?, included
                 baseStyle = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.fillMaxWidth().padding(8.dp),
                 userScale = cover.sizeScale,
+                bold = cover.bold,
             )
         }
         return
@@ -942,18 +970,34 @@ private fun FolderCoverContent(folder: FolderNode, cover: FolderCover?, included
  * back to a 2-line ellipsis at the smallest size), so a long or large custom cover name never
  * spills past the thumbnail it's drawn on, however small the tile or row is. */
 @Composable
-private fun CoverText(text: String, baseStyle: TextStyle, modifier: Modifier = Modifier, userScale: Float = 1f) {
+private fun CoverText(
+    text: String,
+    baseStyle: TextStyle,
+    modifier: Modifier = Modifier,
+    userScale: Float = 1f,
+    bold: Boolean = false,
+) {
     var fontScale by remember(text, userScale) { mutableFloatStateOf(userScale) }
     Text(
         text = text,
         color = Color.White,
-        style = baseStyle.copy(fontSize = baseStyle.fontSize * fontScale, lineHeight = baseStyle.lineHeight * fontScale),
+        style = baseStyle.copy(
+            fontSize = baseStyle.fontSize * fontScale,
+            lineHeight = baseStyle.lineHeight * fontScale,
+            fontWeight = if (bold) FontWeight.Bold else baseStyle.fontWeight,
+        ),
         textAlign = TextAlign.Center,
         maxLines = 2,
         overflow = TextOverflow.Ellipsis,
         modifier = modifier,
         onTextLayout = { result ->
-            if ((result.didOverflowWidth || result.didOverflowHeight) && fontScale > 0.35f) {
+            // Shrink not just on outright overflow but also whenever the text had to wrap at all --
+            // a wrap can still "fit" within maxLines=2 (no overflow reported) but land as an ugly,
+            // arbitrary mid-word break (e.g. a single orphaned letter stranded on line 2). Preferring
+            // a smaller single line over that kind of wrap, all the way down to the size floor, is
+            // what actually avoids it; only once the floor is hit does a real 2-line wrap stand.
+            val needsShrink = result.didOverflowWidth || result.didOverflowHeight || result.lineCount > 1
+            if (needsShrink && fontScale > 0.35f) {
                 fontScale *= 0.85f
             }
         },
@@ -1157,6 +1201,7 @@ private fun GalleryListItem(
                         baseStyle = MaterialTheme.typography.labelSmall,
                         modifier = Modifier.align(Alignment.Center).fillMaxWidth(0.9f).padding(2.dp),
                         userScale = cover.sizeScale,
+                        bold = cover.bold,
                     )
                     thumbnailModel != null -> AsyncImage(
                         model = thumbnailModel,

@@ -41,4 +41,17 @@ class TrashManager(private val context: Context) {
             }
         }
     }
+
+    /** Un-trashes [uris] in MediaStore itself (the same API as trashing, with the flag flipped),
+     * via the same one-time system consent dialog. Below Android 11 there's no OS-level trash to
+     * reverse -- soft delete there is pure local bookkeeping, so restoring is too. */
+    fun requestRestore(uris: List<Uri>): DeleteResult {
+        if (uris.isEmpty()) return DeleteResult.Deleted
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val pendingIntent = MediaStore.createTrashRequest(context.contentResolver, uris, false)
+            DeleteResult.ConsentRequired(pendingIntent)
+        } else {
+            DeleteResult.Deleted
+        }
+    }
 }

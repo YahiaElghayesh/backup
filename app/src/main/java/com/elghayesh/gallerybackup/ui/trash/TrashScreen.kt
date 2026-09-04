@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -57,6 +58,7 @@ fun TrashScreen(
     val retentionDays by viewModel.trashRetentionDays.collectAsState()
     var selectedIds by remember { mutableStateOf(setOf<Long>()) }
     var confirmPermanentDelete by remember { mutableStateOf(false) }
+    var confirmEmptyTrash by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { viewModel.purgeExpiredTrash() }
 
@@ -80,6 +82,24 @@ fun TrashScreen(
         )
     }
 
+    if (confirmEmptyTrash) {
+        AlertDialog(
+            onDismissRequest = { confirmEmptyTrash = false },
+            title = { Text("Empty recycle bin?") },
+            text = { Text("All ${trashedItems.size} item(s) in the trash will be permanently deleted. This cannot be undone.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.emptyTrash()
+                    selectedIds = emptySet()
+                    confirmEmptyTrash = false
+                }) { Text("Empty") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmEmptyTrash = false }) { Text("Cancel") }
+            },
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -87,6 +107,13 @@ fun TrashScreen(
                 navigationIcon = {
                     IconButton(onClick = { if (selectedIds.isNotEmpty()) selectedIds = emptySet() else onBack() }) {
                         Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    if (selectedIds.isEmpty() && trashedItems.isNotEmpty()) {
+                        IconButton(onClick = { confirmEmptyTrash = true }) {
+                            Icon(Icons.Filled.DeleteForever, contentDescription = "Empty recycle bin")
+                        }
                     }
                 },
             )

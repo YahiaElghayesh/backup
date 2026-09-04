@@ -25,16 +25,26 @@ enum class FolderSortOrder(val label: String) {
     COUNT_ASC("Fewest items first"),
 }
 
-/** One of a handful of preset accent colors -- deliberately not a full color picker, to keep this simple. */
+/** One of a handful of preset accent colors -- deliberately not a full color picker, to keep this
+ * simple. Deliberately muted/desaturated rather than the bright, saturated tones a picker would
+ * default to -- easier to stare at across a whole grid of folder covers. */
 enum class AccentColor(val seed: Long) {
-    BLUE(0xFF1A73E8),
-    TEAL(0xFF00897B),
-    PURPLE(0xFF8E24AA),
-    ORANGE(0xFFF4511E),
-    GREEN(0xFF43A047),
-    PINK(0xFFD81B60),
-    RED(0xFFE53935),
-    INDIGO(0xFF3949AB),
+    BLUE(0xFF3B6FA0),
+    TEAL(0xFF3F7C74),
+    PURPLE(0xFF7C5295),
+    ORANGE(0xFFC1652E),
+    GREEN(0xFF4F7A52),
+    PINK(0xFFB05C7A),
+    RED(0xFFB0413E),
+    INDIGO(0xFF4A5586),
+    BROWN(0xFF7B5E4A),
+    SLATE(0xFF5C6B73),
+    OLIVE(0xFF6E7B4F),
+    MUSTARD(0xFFB08D3F),
+    MAROON(0xFF7A3B4A),
+    NAVY(0xFF34495E),
+    PLUM(0xFF6B4C6E),
+    GRAY(0xFF5A5F66),
 }
 
 /** A custom folder tile, overriding the default (the folder's own first photo, recursing into
@@ -44,7 +54,12 @@ sealed class FolderCover {
     /** [sizeScale] is the user's chosen starting size (1f = the tile's normal default size) --
      * the text still shrinks further from there if it doesn't fit, it just starts bigger or
      * smaller depending on preference. */
-    data class Text(val text: String, val colorSeed: Long, val sizeScale: Float = 1f) : FolderCover()
+    data class Text(
+        val text: String,
+        val colorSeed: Long,
+        val sizeScale: Float = 1f,
+        val bold: Boolean = false,
+    ) : FolderCover()
     data class Photo(val uri: String) : FolderCover()
 }
 
@@ -343,6 +358,7 @@ class GalleryPreferencesRepository(private val context: Context) {
                             obj.getString("text"),
                             obj.getLong("color"),
                             obj.optDouble("sizeScale", 1.0).toFloat(),
+                            obj.optBoolean("bold", false),
                         )
                     }
                     put(obj.getString("path"), cover)
@@ -365,6 +381,7 @@ class GalleryPreferencesRepository(private val context: Context) {
                             put("text", cover.text)
                             put("color", cover.colorSeed)
                             put("sizeScale", cover.sizeScale.toDouble())
+                            put("bold", cover.bold)
                         }
                         is FolderCover.Photo -> {
                             put("type", "photo")

@@ -61,6 +61,10 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     private var pendingDeleteIds: List<Long> = emptyList()
     private var pendingDeleteIsSoft: Boolean = false
 
+    private val restoreConsentChannel = Channel<PendingIntent>(Channel.CONFLATED)
+    val restoreConsentRequests: Flow<PendingIntent> = restoreConsentChannel.receiveAsFlow()
+    private var pendingRestoreIds: List<Long> = emptyList()
+
     private val _selectedMediaIds = MutableStateFlow<Set<Long>>(emptySet())
     val selectedMediaIds: StateFlow<Set<Long>> = _selectedMediaIds.asStateFlow()
     private val _selectedFolderPaths = MutableStateFlow<Set<String>>(emptySet())
@@ -151,12 +155,28 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
             ?.withVirtualFolders(virtualFolders)
     }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
-    /** Every trashed item, resolved from the raw scan (the file itself is never moved on trash). */
-    val trashedItems: StateFlow<List<MediaItem>> = combine(_rawRoot, trashedEntries) { raw, entries ->
-        raw?.allItemsRecursive()?.filter { it.id in entries.keys } ?: emptyList()
+    /** A MediaStore-trashed-rows-only scan, refreshed whenever [trashedEntries] changes -- see
+     * [MediaRepository.scanTrashedItems]. Needed because [_rawRoot]'s regular scan excludes
+     * IS_TRASHED rows entirely on Android 11+, no matter the selection, so a trashed item can no
+     * longer be found there once MediaStore's own trash actually holds it. */
+    private val _trashedScan = MutableStateFlow<List<MediaItem>>(emptyList())
+
+    /** Every trashed item. On Android 11+ these come from [_trashedScan], since MediaStore's real
+     * trash removes the item from [_rawRoot]'s normal scan the moment it's trashed. Below Android
+     * 11, trashing is pure local bookkeeping with the file left untouched, so it's still resolved
+     * from the regular scan there instead. */
+    val trashedItems: StateFlow<List<MediaItem>> = combine(_rawRoot, trashedEntries, _trashedScan) { raw, entries, scanned ->
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            scanned.filter { it.id in entries.keys }
+        } else {
+            raw?.allItemsRecursive()?.filter { it.id in entries.keys } ?: emptyList()
+        }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     init {
+        trashedEntries
+            .onEach { refreshTrashedScan() }
+            .launchIn(viewModelScope)
         // MediaChangeObserver fires once per changed row, which can be many times in a row for a
         // burst (e.g. an app writing several photos back to back) -- debounce so a burst settles
         // into a single rescan instead of one per row. This is the "refresh automatically" half of
@@ -180,6 +200,10 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
             _rawRoot.value = repository.scanFolderTree()
             _isLoading.value = false
         }
+    }
+
+    private fun refreshTrashedScan() {
+        viewModelScope.launch { _trashedScan.value = repository.scanTrashedItems() }
     }
 
     fun setFolderViewType(type: ViewType) = viewModelScope.launch { prefs.setFolderViewType(type) }
@@ -313,14 +337,67 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun restoreFromTrash(ids: List<Long>) = viewModelScope.launch { trashRepository.restore(ids) }
+    /** Restores [ids] out of the trash. On Android 11+ this un-trashes the underlying MediaStore
+     * rows themselves (one system consent dialog, the same API used to trash them) so the items
+     * actually come back everywhere, not just in MediaHub's own bookkeeping -- clearing only the
+     * local bookkeeping would leave the file genuinely trashed in MediaStore, so it would neither
+     * show back up in the gallery nor still show in Trash. Below Android 11 there's no OS trash
+     * to reverse, so this stays local bookkeeping there, same as trashing does. */
+    fun restoreFromTrash(ids: List<Long>) {
+        viewModelScope.launch {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                trashRepository.restore(ids)
+                return@launch
+            }
+            val items = _trashedScan.value.filter { it.id in ids }
+            if (items.isEmpty()) {
+                trashRepository.restore(ids)
+                return@launch
+            }
+            pendingRestoreIds = items.map { it.id }
+            when (val result = trashManager.requestRestore(items.map { it.uri })) {
+                is DeleteResult.ConsentRequired -> restoreConsentChannel.send(result.pendingIntent)
+                DeleteResult.Deleted -> onRestoreConfirmed(approved = true)
+                is DeleteResult.Error -> Unit
+            }
+        }
+    }
+
+    /** Call after the system dialog launched from [restoreConsentRequests] resolves. */
+    fun onRestoreConfirmed(approved: Boolean) {
+        viewModelScope.launch {
+            if (approved) {
+                trashRepository.restore(pendingRestoreIds)
+                refresh()
+                refreshTrashedScan()
+            }
+            pendingRestoreIds = emptyList()
+        }
+    }
 
     /** Checks for trash past [trashRetentionDays] and, if any, starts permanently deleting it. */
     fun purgeExpiredTrash() {
         viewModelScope.launch {
             val expiredIds = trashRepository.expiredIds(trashRetentionDays.value)
             if (expiredIds.isEmpty()) return@launch
-            val items = _rawRoot.value?.allItemsRecursive()?.filter { it.id in expiredIds } ?: return@launch
+            val items = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                _trashedScan.value.filter { it.id in expiredIds }
+            } else {
+                _rawRoot.value?.allItemsRecursive()?.filter { it.id in expiredIds } ?: emptyList()
+            }
+            if (items.isNotEmpty()) deleteMediaItems(items, skipTrash = true)
+        }
+    }
+
+    /** Empties the trash entirely: permanently deletes every currently-trashed item. */
+    fun emptyTrash() {
+        viewModelScope.launch {
+            val items = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                _trashedScan.value
+            } else {
+                val ids = trashedEntries.value.keys
+                _rawRoot.value?.allItemsRecursive()?.filter { it.id in ids } ?: emptyList()
+            }
             if (items.isNotEmpty()) deleteMediaItems(items, skipTrash = true)
         }
     }

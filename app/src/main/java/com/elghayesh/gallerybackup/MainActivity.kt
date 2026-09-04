@@ -86,6 +86,12 @@ class MainActivity : ComponentActivity() {
         galleryViewModel.onDeleteConfirmed(approved = result.resultCode == android.app.Activity.RESULT_OK)
     }
 
+    private val restoreConsentLauncher = registerForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult(),
+    ) { result ->
+        galleryViewModel.onRestoreConfirmed(approved = result.resultCode == android.app.Activity.RESULT_OK)
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -144,6 +150,11 @@ class MainActivity : ComponentActivity() {
                     LaunchedEffect(Unit) {
                         galleryViewModel.deleteConsentRequests.collect { pendingIntent ->
                             deleteConsentLauncher.launch(IntentSenderRequest.Builder(pendingIntent).build())
+                        }
+                    }
+                    LaunchedEffect(Unit) {
+                        galleryViewModel.restoreConsentRequests.collect { pendingIntent ->
+                            restoreConsentLauncher.launch(IntentSenderRequest.Builder(pendingIntent).build())
                         }
                     }
                     LaunchedEffect(Unit) {

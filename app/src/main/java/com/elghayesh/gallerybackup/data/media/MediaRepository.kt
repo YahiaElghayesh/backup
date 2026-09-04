@@ -39,6 +39,33 @@ class MediaRepository(private val context: Context) {
     }
 
     /**
+     * Items currently sitting in MediaStore's own OS-level trash (Android 11+ only). The default
+     * query used by [scanFolderTree] silently excludes IS_TRASHED rows no matter what selection
+     * is passed -- that's on purpose, so the gallery itself never shows trashed items -- but it
+     * also means those items never show up in [scanFolderTree]'s results to filter down for
+     * MediaHub's own Trash screen. This asks for the opposite: only rows MediaStore has marked
+     * trashed, via [MediaStore.QUERY_ARG_MATCH_TRASHED].
+     */
+    suspend fun scanTrashedItems(): List<MediaItem> = withContext(Dispatchers.IO) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@withContext emptyList()
+        val queryArgs = android.os.Bundle().apply {
+            putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_ONLY)
+        }
+        val items = mutableListOf<MediaItem>()
+        items += queryCollection(
+            collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            isVideo = false,
+            queryArgs = queryArgs,
+        )
+        items += queryCollection(
+            collection = MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+            isVideo = true,
+            queryArgs = queryArgs,
+        )
+        items
+    }
+
+    /**
      * Files written straight to storage by something other than MediaStore's own insert() API --
      * a cloud-sync client, a cable/MTP transfer, another file manager -- can sit on disk without
      * MediaStore ever noticing them; there's no guaranteed background rescan, so a plain refresh
@@ -139,7 +166,11 @@ class MediaRepository(private val context: Context) {
         result
     }
 
-    private fun queryCollection(collection: android.net.Uri, isVideo: Boolean): List<MediaItem> {
+    private fun queryCollection(
+        collection: android.net.Uri,
+        isVideo: Boolean,
+        queryArgs: android.os.Bundle? = null,
+    ): List<MediaItem> {
         val result = mutableListOf<MediaItem>()
         val useRelativePath = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
 
@@ -158,7 +189,7 @@ class MediaRepository(private val context: Context) {
             if (isVideo) add(MediaStore.Video.VideoColumns.DURATION)
         }.toTypedArray()
 
-        context.contentResolver.query(collection, projection, null, null, null)?.use { cursor: Cursor ->
+        context.contentResolver.query(collection, projection, queryArgs, null)?.use { cursor: Cursor ->
             val idCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
             val nameCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
             val dateCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_MODIFIED)

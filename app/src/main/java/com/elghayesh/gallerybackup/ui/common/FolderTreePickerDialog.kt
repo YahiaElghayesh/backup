@@ -75,12 +75,22 @@ fun FolderTreePickerDialog(
     val folderSort by viewModel.folderSort.collectAsState()
     val folderSortOverrides by viewModel.folderSortOverrides.collectAsState()
 
-    // Same promotion (a pinned folder is hidden from its real parent's own listing) and sort
-    // order the gallery itself would use browsing this same path, so a destination looks exactly
-    // like the folder it really is instead of a differently-ordered file-explorer view.
-    val children = remember(node, includedFolders, folderSort, folderSortOverrides, currentPath) {
-        val ownChildren = node?.promotedChildren(includedFolders) ?: emptyList()
-        sortedFolders(ownChildren, effectiveFolderSort(currentPath, folderSort, folderSortOverrides), includedFolders)
+    // Same promotion (a pinned folder is hidden from its real parent's own listing, and -- at the
+    // very top level -- surfaces instead as its own separate tile there) and sort order the
+    // gallery itself would use browsing this same path, so a destination looks exactly like the
+    // folder it really is instead of a differently-ordered file-explorer view. Without mirroring
+    // the root's "pinned folders replace the real top-level listing" rule here too, a user who's
+    // pinned every one of their top-level folders would see this picker's root as completely
+    // empty -- promotedChildren excludes each pinned folder from its real parent, but only the
+    // gallery's own root re-adds them back as pinnedExtras; this picker used to just drop them.
+    val children = remember(node, includedFolders, folderSort, folderSortOverrides, currentPath, root) {
+        val ownChildren = when {
+            currentPath.isNotEmpty() -> node?.promotedChildren(includedFolders) ?: emptyList()
+            includedFolders.isEmpty() -> node?.children?.values?.toList() ?: emptyList()
+            else -> emptyList()
+        }
+        val pinnedExtras = if (currentPath.isEmpty()) includedFolders.mapNotNull { root?.findNode(it) } else emptyList()
+        sortedFolders(ownChildren + pinnedExtras, effectiveFolderSort(currentPath, folderSort, folderSortOverrides), includedFolders)
     }
 
     if (showCreateFolderDialog) {

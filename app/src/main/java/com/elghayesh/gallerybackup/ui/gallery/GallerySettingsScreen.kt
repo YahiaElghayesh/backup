@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -24,14 +25,19 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -43,6 +49,9 @@ import com.elghayesh.gallerybackup.data.settings.ViewType
 import com.elghayesh.gallerybackup.data.update.UpdateCheckCoordinator
 import kotlin.math.roundToInt
 
+/** Which categorized sub-menu, if any, is currently open. Null means the top-level menu list. */
+private enum class SettingsSection { APPEARANCE, LAYOUT, RECYCLE_BIN }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun GallerySettingsScreen(
@@ -50,22 +59,112 @@ fun GallerySettingsScreen(
     onOpenFolderExplorer: () -> Unit,
     onBack: () -> Unit,
 ) {
-    val themeMode by viewModel.themeMode.collectAsState()
-    val accentColor by viewModel.accentColor.collectAsState()
-    val folderViewType by viewModel.folderViewType.collectAsState()
-    val mediaViewType by viewModel.mediaViewType.collectAsState()
-    val folderGridColumns by viewModel.folderGridColumns.collectAsState()
-    val mediaGridColumns by viewModel.mediaGridColumns.collectAsState()
-    val folderRowSize by viewModel.folderRowSize.collectAsState()
-    val mediaRowSize by viewModel.mediaRowSize.collectAsState()
-    val pinContentToBottom by viewModel.pinContentToBottom.collectAsState()
+    var openSection by remember { mutableStateOf<SettingsSection?>(null) }
     val isCheckingForUpdate by UpdateCheckCoordinator.isChecking.collectAsState()
     val lastCheckFoundUpdate by UpdateCheckCoordinator.lastCheckFoundUpdate.collectAsState()
 
+    when (openSection) {
+        SettingsSection.APPEARANCE -> AppearanceSettingsScreen(viewModel, onBack = { openSection = null })
+        SettingsSection.LAYOUT -> LayoutSettingsScreen(viewModel, onBack = { openSection = null })
+        SettingsSection.RECYCLE_BIN -> RecycleBinSettingsScreen(viewModel, onBack = { openSection = null })
+        null -> Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text("Gallery settings") },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
+                        }
+                    },
+                )
+            },
+        ) { padding ->
+            LazyColumn(modifier = Modifier.padding(padding).fillMaxWidth()) {
+                item {
+                    SettingsMenuRow(
+                        title = "Appearance",
+                        subtitle = "Theme and accent color.",
+                        onClick = { openSection = SettingsSection.APPEARANCE },
+                    )
+                    HorizontalDivider()
+                }
+                item {
+                    SettingsMenuRow(
+                        title = "Layout",
+                        subtitle = "Grid or list, tile/row size, and pinning short lists to the bottom.",
+                        onClick = { openSection = SettingsSection.LAYOUT },
+                    )
+                    HorizontalDivider()
+                }
+                item {
+                    SettingsMenuRow(
+                        title = "Recycle bin",
+                        subtitle = "Empty the recycle bin, or change how long deleted items stay in it.",
+                        onClick = { openSection = SettingsSection.RECYCLE_BIN },
+                    )
+                    HorizontalDivider()
+                }
+                item {
+                    SettingsMenuRow(
+                        title = "Choose gallery folders",
+                        subtitle = "Pin folders to the gallery's home page, or hide folders entirely -- " +
+                            "file-explorer style, with a separate checkbox for each.",
+                        onClick = onOpenFolderExplorer,
+                    )
+                    HorizontalDivider()
+                }
+                item {
+                    Column(Modifier.padding(16.dp)) {
+                        Text("Updates", style = MaterialTheme.typography.titleMedium)
+                        Spacer(Modifier.height(8.dp))
+                        Button(
+                            onClick = { UpdateCheckCoordinator.requestCheck() },
+                            enabled = !isCheckingForUpdate,
+                        ) {
+                            Text(if (isCheckingForUpdate) "Checking..." else "Check for updates")
+                        }
+                        if (!isCheckingForUpdate && lastCheckFoundUpdate == false) {
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                "You're on the latest version.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsMenuRow(title: String, subtitle: String, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Icon(Icons.Filled.ChevronRight, contentDescription = null)
+    }
+}
+
+@Composable
+private fun SettingsSubScaffold(title: String, onBack: () -> Unit, content: @Composable (Modifier) -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Gallery settings") },
+                title = { Text(title) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
@@ -73,48 +172,69 @@ fun GallerySettingsScreen(
                 },
             )
         },
-    ) { padding ->
-        LazyColumn(modifier = Modifier.padding(padding).fillMaxWidth()) {
-            item {
-                Column(Modifier.padding(16.dp)) {
-                    Text("Appearance", style = MaterialTheme.typography.titleMedium)
-                    Spacer(Modifier.height(8.dp))
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        ThemeMode.entries.forEach { mode ->
-                            FilterChip(
-                                selected = mode == themeMode,
-                                onClick = { viewModel.setThemeMode(mode) },
-                                label = { Text(mode.name.lowercase().replaceFirstChar { it.uppercase() }) },
-                            )
-                        }
-                    }
-                    Spacer(Modifier.height(16.dp))
-                    Text("Accent color", style = MaterialTheme.typography.titleSmall)
-                    Spacer(Modifier.height(8.dp))
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        AccentColor.entries.forEach { color ->
-                            Box(
-                                modifier = Modifier
-                                    .size(36.dp)
-                                    .clip(CircleShape)
-                                    .background(Color(color.seed))
-                                    .border(
-                                        width = if (color == accentColor) 3.dp else 0.dp,
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                        shape = CircleShape,
-                                    )
-                                    .clickable { viewModel.setAccentColor(color) },
-                            )
-                        }
+    ) { padding -> content(Modifier.padding(padding)) }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AppearanceSettingsScreen(viewModel: GalleryViewModel, onBack: () -> Unit) {
+    val themeMode by viewModel.themeMode.collectAsState()
+    val accentColor by viewModel.accentColor.collectAsState()
+
+    SettingsSubScaffold(title = "Appearance", onBack = onBack) { modifier ->
+        Column(modifier.fillMaxWidth().padding(16.dp)) {
+            Text("Theme", style = MaterialTheme.typography.titleSmall)
+            Spacer(Modifier.height(8.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ThemeMode.entries.forEach { mode ->
+                    FilterChip(
+                        selected = mode == themeMode,
+                        onClick = { viewModel.setThemeMode(mode) },
+                        label = { Text(mode.name.lowercase().replaceFirstChar { it.uppercase() }) },
+                    )
+                }
+            }
+            Spacer(Modifier.height(20.dp))
+            Text("Accent color", style = MaterialTheme.typography.titleSmall)
+            Spacer(Modifier.height(8.dp))
+            AccentColor.entries.chunked(8).forEach { row ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    row.forEach { color ->
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(Color(color.seed))
+                                .border(
+                                    width = if (color == accentColor) 3.dp else 0.dp,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    shape = CircleShape,
+                                )
+                                .clickable { viewModel.setAccentColor(color) },
+                        )
                     }
                 }
-                HorizontalDivider()
+                Spacer(Modifier.height(8.dp))
             }
+        }
+    }
+}
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LayoutSettingsScreen(viewModel: GalleryViewModel, onBack: () -> Unit) {
+    val folderViewType by viewModel.folderViewType.collectAsState()
+    val mediaViewType by viewModel.mediaViewType.collectAsState()
+    val folderGridColumns by viewModel.folderGridColumns.collectAsState()
+    val mediaGridColumns by viewModel.mediaGridColumns.collectAsState()
+    val folderRowSize by viewModel.folderRowSize.collectAsState()
+    val mediaRowSize by viewModel.mediaRowSize.collectAsState()
+    val pinContentToBottom by viewModel.pinContentToBottom.collectAsState()
+
+    SettingsSubScaffold(title = "Layout", onBack = onBack) { modifier ->
+        LazyColumn(modifier = modifier.fillMaxWidth()) {
             item {
                 Column(Modifier.padding(16.dp)) {
-                    Text("Layout", style = MaterialTheme.typography.titleMedium)
-                    Spacer(Modifier.height(4.dp))
                     Text(
                         "Grid or list, and tile/row size, chosen separately for folders and for photos & videos.",
                         style = MaterialTheme.typography.bodySmall,
@@ -145,7 +265,6 @@ fun GallerySettingsScreen(
                 }
                 HorizontalDivider()
             }
-
             item {
                 Row(
                     Modifier.fillMaxWidth().padding(16.dp),
@@ -155,58 +274,71 @@ fun GallerySettingsScreen(
                         Text("Pin content to the bottom", style = MaterialTheme.typography.titleMedium)
                         Text(
                             "When a folder or list of photos doesn't fill the screen, anchor it to " +
-                                "the bottom instead of the top -- doesn't change sort order, just makes " +
-                                "short lists easier to reach with your thumb.",
+                                "the bottom instead of the top -- doesn't change sort order, and stops " +
+                                "applying the moment there's enough content to fill the screen, so it " +
+                                "never fights normal scrolling once a list is actually long.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                     Switch(checked = pinContentToBottom, onCheckedChange = { viewModel.setPinContentToBottom(it) })
                 }
-                HorizontalDivider()
             }
+        }
+    }
+}
 
-            item {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clickable(onClick = onOpenFolderExplorer)
-                        .padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Choose gallery folders", style = MaterialTheme.typography.titleMedium)
-                        Text(
-                            "Pin folders to the gallery's home page, or hide folders entirely -- " +
-                                "file-explorer style, with a separate checkbox for each.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Icon(Icons.Filled.ChevronRight, contentDescription = null)
-                }
-            }
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RecycleBinSettingsScreen(viewModel: GalleryViewModel, onBack: () -> Unit) {
+    val retentionDays by viewModel.trashRetentionDays.collectAsState()
+    val trashedItems by viewModel.trashedItems.collectAsState()
+    var confirmEmpty by remember { mutableStateOf(false) }
 
-            item {
-                HorizontalDivider()
-                Column(Modifier.padding(16.dp)) {
-                    Text("Updates", style = MaterialTheme.typography.titleMedium)
-                    Spacer(Modifier.height(8.dp))
-                    Button(
-                        onClick = { UpdateCheckCoordinator.requestCheck() },
-                        enabled = !isCheckingForUpdate,
-                    ) {
-                        Text(if (isCheckingForUpdate) "Checking..." else "Check for updates")
-                    }
-                    if (!isCheckingForUpdate && lastCheckFoundUpdate == false) {
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            "You're on the latest version.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
+    if (confirmEmpty) {
+        AlertDialog(
+            onDismissRequest = { confirmEmpty = false },
+            title = { Text("Empty recycle bin?") },
+            text = { Text("All ${trashedItems.size} item(s) in the trash will be permanently deleted. This cannot be undone.") },
+            confirmButton = {
+                TextButton(onClick = { viewModel.emptyTrash(); confirmEmpty = false }) { Text("Empty") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmEmpty = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    SettingsSubScaffold(title = "Recycle bin", onBack = onBack) { modifier ->
+        Column(modifier.fillMaxWidth().padding(16.dp)) {
+            Text("Retention period", style = MaterialTheme.typography.titleSmall)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Deleted items are automatically removed forever after this many days.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            Text("$retentionDays days", style = MaterialTheme.typography.bodyMedium)
+            Slider(
+                value = retentionDays.toFloat(),
+                onValueChange = { viewModel.setTrashRetentionDays(it.roundToInt()) },
+                valueRange = 1f..90f,
+                steps = 88,
+            )
+            Spacer(Modifier.height(20.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(20.dp))
+            Text("Empty recycle bin", style = MaterialTheme.typography.titleSmall)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Permanently deletes everything currently in the trash (${trashedItems.size} item(s)). This cannot be undone.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(onClick = { confirmEmpty = true }, enabled = trashedItems.isNotEmpty()) {
+                Text("Empty recycle bin")
             }
         }
     }
