@@ -159,6 +159,7 @@ private fun SettingsMenuRow(title: String, subtitle: String, onClick: () -> Unit
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsSubScaffold(title: String, onBack: () -> Unit, content: @Composable (Modifier) -> Unit) {
     Scaffold(
