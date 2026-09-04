@@ -231,6 +231,7 @@ fun GalleryScreen(
     var coverDialogFolders by remember { mutableStateOf<List<FolderNode>>(emptyList()) }
 
     val requestDelete = rememberDeleteRequester(viewModel)
+    val coroutineScope = rememberCoroutineScope()
     val gridState = rememberLazyGridState()
     val listState = rememberLazyListState()
     var isDragSelecting by remember { mutableStateOf(false) }
@@ -520,8 +521,11 @@ fun GalleryScreen(
                                             // the long-press wait -- consuming events afterward
                                             // (Initial pass, below) isn't enough to interrupt a
                                             // drag gesture it already committed to before we knew
-                                            // this would become a long press.
-                                            gridState.stopScroll()
+                                            // this would become a long press. Launched separately
+                                            // since awaitEachGesture's block runs in a restricted
+                                            // suspend scope that can't call arbitrary suspend
+                                            // functions like stopScroll directly.
+                                            coroutineScope.launch { gridState.stopScroll() }
                                             downIndex?.let {
                                                 selectAt(it, currentFolders.value, currentMedia.value, viewModel, gridPinToBottom())
                                             }
