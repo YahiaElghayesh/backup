@@ -322,6 +322,29 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Trashes [items]' underlying MediaStore rows -- used after a move or rename, which copies
+     * to the new location and then needs the original gone. Goes through the same real
+     * MediaStore trash (a system consent dialog) as [deleteMediaItems] on Android 11+, so the
+     * originals are actually hidden from every other app immediately -- move/rename used to call
+     * [TrashRepository.trash] directly here, which is pure local bookkeeping that never touches
+     * MediaStore at all, leaving the "moved" original fully visible everywhere else. Below
+     * Android 11, where there's no real OS trash to hook into, this stays local bookkeeping.
+     */
+    private suspend fun trashOriginals(items: List<MediaItem>) {
+        if (items.isEmpty()) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            trashRepository.trash(items.map { it.id })
+            return
+        }
+        pendingDeleteIds = items.map { it.id }
+        pendingDeleteIsSoft = true
+        val result = trashManager.requestDelete(items.map { it.uri }, skipTrash = false)
+        if (result is DeleteResult.ConsentRequired) {
+            deleteConsentChannel.send(result.pendingIntent)
+        }
+    }
+
     /** Copies [items] into [destinationFolderPath], leaving the originals in place. */
     fun copyMediaItems(items: List<MediaItem>, destinationFolderPath: String) {
         viewModelScope.launch {
@@ -336,10 +359,8 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     fun moveMediaItems(items: List<MediaItem>, destinationFolderPath: String) {
         viewModelScope.launch {
             val context: Context = getApplication()
-            val copiedIds = items.mapNotNull { item ->
-                if (copyMediaTo(context, item, destinationFolderPath) != null) item.id else null
-            }
-            if (copiedIds.isNotEmpty()) trashRepository.trash(copiedIds)
+            val copiedItems = items.filter { copyMediaTo(context, it, destinationFolderPath) != null }
+            trashOriginals(copiedItems)
             refresh()
             clearSelection()
         }
@@ -357,7 +378,7 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
             }
             val renamed = item.copy(displayName = finalName)
             if (copyMediaTo(context, renamed, item.folderPath) != null) {
-                trashRepository.trash(listOf(item.id))
+                trashOriginals(listOf(item))
             }
             refresh()
             clearSelection()
@@ -385,11 +406,11 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val context: Context = getApplication()
             val newFolderPath = if (destinationParentPath.isEmpty()) folder.name else "$destinationParentPath/${folder.name}"
-            val copiedIds = folder.allItemsRecursive().mapNotNull { item ->
+            val copiedItems = folder.allItemsRecursive().filter { item ->
                 val target = remapFolderPath(item.folderPath, folder.path, newFolderPath)
-                if (copyMediaTo(context, item, target) != null) item.id else null
+                copyMediaTo(context, item, target) != null
             }
-            if (copiedIds.isNotEmpty()) trashRepository.trash(copiedIds)
+            trashOriginals(copiedItems)
             refresh()
             clearSelection()
         }
@@ -402,11 +423,11 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
             val parentPath = if (lastSlash < 0) "" else folder.path.substring(0, lastSlash)
             val newFolderPath = if (parentPath.isEmpty()) newName else "$parentPath/$newName"
 
-            val copiedIds = folder.allItemsRecursive().mapNotNull { item ->
+            val copiedItems = folder.allItemsRecursive().filter { item ->
                 val target = remapFolderPath(item.folderPath, folder.path, newFolderPath)
-                if (copyMediaTo(context, item, target) != null) item.id else null
+                copyMediaTo(context, item, target) != null
             }
-            if (copiedIds.isNotEmpty()) trashRepository.trash(copiedIds)
+            trashOriginals(copiedItems)
 
             folderCovers.value[folder.path]?.let { cover ->
                 prefs.setFolderCover(folder.path, null)
