@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -64,6 +65,7 @@ private const val MAX_TEXT_SCALE = 3.5f
  * (color, size, bold, alternating colors), plus a checkbox to use each folder's own name as its
  * text instead of one typed-in string for all of them -- rather than a separate, stripped-down
  * bulk action with none of the single-folder dialog's customization. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun FolderCoverDialog(
     folders: List<FolderNode>,
