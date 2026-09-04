@@ -59,7 +59,7 @@ fun FolderCoverDialog(
         mutableStateOf(AccentColor.entries.find { it.seed == (current as? FolderCover.Text)?.colorSeed } ?: AccentColor.BLUE)
     }
     var selectedPhotoUri by remember { mutableStateOf((current as? FolderCover.Photo)?.uri) }
-    val items = remember(folder) { folder.allItemsRecursive() }
+    val items = remember(folder) { folder.allItemsRecursive().sortedByDescending { it.dateModifiedSec } }
 
     AlertDialog(
         onDismissRequest = onDismiss,

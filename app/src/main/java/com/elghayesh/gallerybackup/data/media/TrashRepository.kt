@@ -8,9 +8,12 @@ import kotlinx.coroutines.flow.map
 import java.util.concurrent.TimeUnit
 
 /**
- * MediaHub's own recycle bin (separate from Android's OS-level trash, which has a fixed
- * ~30 day window no app can configure). Soft-deleting here is pure local bookkeeping --
- * no OS consent dialog, since the real file is never touched until a permanent delete.
+ * MediaHub's own recycle bin bookkeeping: which items are trashed and when, so the UI can show
+ * "N days left" against a retention period the user configures (unlike Android's own OS-level
+ * trash, which has a fixed ~30 day window no app can control). On Android 11+, this is layered
+ * on top of MediaStore's real trash (see [TrashManager] and [GalleryViewModel.deleteMediaItems])
+ * rather than replacing it -- the file itself is genuinely hidden from every other app the
+ * moment it lands here, not just from MediaHub's own UI.
  */
 class TrashRepository(context: Context) {
 

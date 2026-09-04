@@ -79,9 +79,11 @@ class MainActivity : ComponentActivity() {
 
     private val deleteConsentLauncher = registerForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult(),
-    ) {
-        // Whether confirmed or cancelled, a rescan is harmless and keeps the gallery in sync.
-        galleryViewModel.onDeleteConfirmed()
+    ) { result ->
+        // MediaStore only actually trashes/deletes the files if the user approved the system
+        // dialog -- on cancel, nothing happened, so MediaHub's own trash bookkeeping shouldn't
+        // pretend otherwise.
+        galleryViewModel.onDeleteConfirmed(approved = result.resultCode == android.app.Activity.RESULT_OK)
     }
 
     override fun onNewIntent(intent: Intent) {

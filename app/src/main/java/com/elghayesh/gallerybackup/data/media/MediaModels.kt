@@ -34,8 +34,11 @@ class FolderNode(
     fun totalItemCount(): Int =
         items.size + children.values.sumOf { it.totalItemCount() }
 
+    /** The most recently modified item directly in this folder, or (recursing) in a subfolder --
+     * "first" as in what the gallery itself shows first, not MediaStore's raw query order, which
+     * has no defined chronological meaning at all. */
     fun coverUri(): Uri? =
-        items.firstOrNull()?.uri ?: children.values.firstNotNullOfOrNull { it.coverUri() }
+        items.maxByOrNull { it.dateModifiedSec }?.uri ?: children.values.firstNotNullOfOrNull { it.coverUri() }
 
     companion object {
         const val PATH_SEPARATOR = "/"
@@ -129,7 +132,7 @@ fun FolderNode.promotionAwareItemCount(includedFolders: Set<String>): Int =
 
 /** Like [FolderNode.coverUri], but skips any child promoted out via [includedFolders]. See [promotionAwareItemCount]. */
 fun FolderNode.promotionAwareCoverUri(includedFolders: Set<String>): Uri? =
-    items.firstOrNull()?.uri
+    items.maxByOrNull { it.dateModifiedSec }?.uri
         ?: promotedChildren(includedFolders).firstNotNullOfOrNull { it.promotionAwareCoverUri(includedFolders) }
 
 /**

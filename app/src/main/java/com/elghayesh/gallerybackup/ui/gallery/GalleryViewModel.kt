@@ -3,6 +3,7 @@ package com.elghayesh.gallerybackup.ui.gallery
 import android.app.Application
 import android.app.PendingIntent
 import android.content.Context
+import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.elghayesh.gallerybackup.data.media.DeleteResult
@@ -57,7 +58,8 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
 
     private val deleteConsentChannel = Channel<PendingIntent>(Channel.CONFLATED)
     val deleteConsentRequests: Flow<PendingIntent> = deleteConsentChannel.receiveAsFlow()
-    private var pendingPermanentDeleteIds: List<Long> = emptyList()
+    private var pendingDeleteIds: List<Long> = emptyList()
+    private var pendingDeleteIsSoft: Boolean = false
 
     private val _selectedMediaIds = MutableStateFlow<Set<Long>>(emptySet())
     val selectedMediaIds: StateFlow<Set<Long>> = _selectedMediaIds.asStateFlow()
@@ -260,38 +262,50 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Deletes [items]. By default this is pure local bookkeeping (MediaHub's own trash --
-     * no OS interaction at all). [skipTrash] permanently deletes instead, which on Android
-     * 11+ always needs one round trip through a system confirmation dialog (see
-     * [TrashManager]) -- the caller (an Activity) must launch the [PendingIntent] sent on
-     * [deleteConsentRequests] and report back via [onDeleteConfirmed].
+     * Deletes [items]. On Android 11+, soft-deleting now goes through MediaStore's own trash
+     * (one system confirmation dialog, same as [skipTrash]'s permanent delete) so the item is
+     * actually hidden from every other app immediately -- not just from MediaHub's own UI. It
+     * used to be pure local bookkeeping with the underlying file left completely untouched and
+     * still fully visible everywhere else (another app's share sheet, a file manager, ...),
+     * which defeated the point of a recycle bin. MediaHub's own trash tracking, layered on top
+     * regardless, is still what drives the custom retention period and "N days left" -- the OS
+     * trash itself has no per-app-configurable retention. Below Android 11 there's no real OS
+     * trash concept at all ([TrashManager] would hard-delete immediately), so soft delete stays
+     * pure local bookkeeping there; the file remains visible to other apps until permanently
+     * deleted, a real platform limitation on those versions, not an oversight.
      */
     fun deleteMediaItems(items: List<MediaItem>, skipTrash: Boolean) {
         viewModelScope.launch {
-            if (!skipTrash) {
+            if (!skipTrash && Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
                 trashRepository.trash(items.map { it.id })
                 clearSelection()
                 return@launch
             }
-            pendingPermanentDeleteIds = items.map { it.id }
-            when (val result = trashManager.requestDelete(items.map { it.uri }, skipTrash = true)) {
+            pendingDeleteIds = items.map { it.id }
+            pendingDeleteIsSoft = !skipTrash
+            when (val result = trashManager.requestDelete(items.map { it.uri }, skipTrash = skipTrash)) {
                 is DeleteResult.ConsentRequired -> deleteConsentChannel.send(result.pendingIntent)
-                DeleteResult.Deleted -> {
-                    trashRepository.forget(pendingPermanentDeleteIds)
-                    refresh()
-                    clearSelection()
-                }
+                DeleteResult.Deleted -> onDeleteConfirmed(approved = true)
                 is DeleteResult.Error -> Unit
             }
         }
     }
 
-    /** Call after the user approves (or cancels) the system dialog launched from [deleteConsentRequests]. */
-    fun onDeleteConfirmed() {
+    /** Call after the system dialog launched from [deleteConsentRequests] resolves. [approved]
+     * is false if the user cancelled it -- MediaStore never touched the files in that case, so
+     * neither should MediaHub's own trash bookkeeping; the pending soft-trash or permanent
+     * delete just never happened. */
+    fun onDeleteConfirmed(approved: Boolean) {
         viewModelScope.launch {
-            trashRepository.forget(pendingPermanentDeleteIds)
-            pendingPermanentDeleteIds = emptyList()
-            refresh()
+            if (approved) {
+                if (pendingDeleteIsSoft) {
+                    trashRepository.trash(pendingDeleteIds)
+                } else {
+                    trashRepository.forget(pendingDeleteIds)
+                }
+                refresh()
+            }
+            pendingDeleteIds = emptyList()
             clearSelection()
         }
     }
