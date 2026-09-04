@@ -41,7 +41,10 @@ enum class AccentColor(val seed: Long) {
  * subfolders if it's empty). Either plain [Text] over a solid background color, or a specific
  * [Photo] the user picked from the folder's own items. */
 sealed class FolderCover {
-    data class Text(val text: String, val colorSeed: Long) : FolderCover()
+    /** [sizeScale] is the user's chosen starting size (1f = the tile's normal default size) --
+     * the text still shrinks further from there if it doesn't fit, it just starts bigger or
+     * smaller depending on preference. */
+    data class Text(val text: String, val colorSeed: Long, val sizeScale: Float = 1f) : FolderCover()
     data class Photo(val uri: String) : FolderCover()
 }
 
@@ -336,7 +339,11 @@ class GalleryPreferencesRepository(private val context: Context) {
                     // entries are all text covers, so that's the default when it's missing.
                     val cover = when (obj.optString("type", "text")) {
                         "photo" -> FolderCover.Photo(obj.getString("uri"))
-                        else -> FolderCover.Text(obj.getString("text"), obj.getLong("color"))
+                        else -> FolderCover.Text(
+                            obj.getString("text"),
+                            obj.getLong("color"),
+                            obj.optDouble("sizeScale", 1.0).toFloat(),
+                        )
                     }
                     put(obj.getString("path"), cover)
                 }
@@ -357,6 +364,7 @@ class GalleryPreferencesRepository(private val context: Context) {
                             put("type", "text")
                             put("text", cover.text)
                             put("color", cover.colorSeed)
+                            put("sizeScale", cover.sizeScale.toDouble())
                         }
                         is FolderCover.Photo -> {
                             put("type", "photo")

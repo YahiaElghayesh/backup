@@ -43,6 +43,12 @@ import com.elghayesh.gallerybackup.data.settings.FolderCover
 
 private enum class CoverMode { TEXT, PHOTO }
 
+private enum class CoverTextSize(val scale: Float, val label: String) {
+    SMALL(0.7f, "Small"),
+    MEDIUM(1f, "Medium"),
+    LARGE(1.5f, "Large"),
+}
+
 /** Lets the user give a folder a custom cover: plain text over a solid background color, or a
  * specific photo/video frame picked from the folder's own items (including subfolders). Without
  * either, the tile falls back to the folder's own first item, as it always has. */
@@ -57,6 +63,10 @@ fun FolderCoverDialog(
     var text by remember { mutableStateOf((current as? FolderCover.Text)?.text ?: folder.name) }
     var selectedColor by remember {
         mutableStateOf(AccentColor.entries.find { it.seed == (current as? FolderCover.Text)?.colorSeed } ?: AccentColor.BLUE)
+    }
+    var selectedSize by remember {
+        val currentScale = (current as? FolderCover.Text)?.sizeScale ?: 1f
+        mutableStateOf(CoverTextSize.entries.minBy { kotlin.math.abs(it.scale - currentScale) })
     }
     var selectedPhotoUri by remember { mutableStateOf((current as? FolderCover.Photo)?.uri) }
     val items = remember(folder) { folder.allItemsRecursive().sortedByDescending { it.dateModifiedSec } }
@@ -73,6 +83,18 @@ fun FolderCoverDialog(
                 Spacer(Modifier.height(12.dp))
                 if (mode == CoverMode.TEXT) {
                     OutlinedTextField(value = text, onValueChange = { text = it }, singleLine = true, label = { Text("Cover text") })
+                    Spacer(Modifier.height(12.dp))
+                    Text("Text size", style = MaterialTheme.typography.labelMedium)
+                    Spacer(Modifier.height(8.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        CoverTextSize.entries.forEach { size ->
+                            FilterChip(
+                                selected = size == selectedSize,
+                                onClick = { selectedSize = size },
+                                label = { Text(size.label) },
+                            )
+                        }
+                    }
                     Spacer(Modifier.height(12.dp))
                     Text("Background color", style = MaterialTheme.typography.labelMedium)
                     Spacer(Modifier.height(8.dp))
@@ -137,7 +159,7 @@ fun FolderCoverDialog(
                 enabled = mode == CoverMode.TEXT || selectedPhotoUri != null,
                 onClick = {
                     val cover = when (mode) {
-                        CoverMode.TEXT -> if (text.isBlank()) null else FolderCover.Text(text.trim(), selectedColor.seed)
+                        CoverMode.TEXT -> if (text.isBlank()) null else FolderCover.Text(text.trim(), selectedColor.seed, selectedSize.scale)
                         CoverMode.PHOTO -> selectedPhotoUri?.let { FolderCover.Photo(it) }
                     }
                     onConfirm(cover)

@@ -913,6 +913,7 @@ private fun FolderCoverContent(folder: FolderNode, cover: FolderCover?, included
                 text = cover.text,
                 baseStyle = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.fillMaxWidth().padding(8.dp),
+                userScale = cover.sizeScale,
             )
         }
         return
@@ -936,12 +937,13 @@ private fun FolderCoverContent(folder: FolderNode, cover: FolderCover?, included
     }
 }
 
-/** A text folder cover's label, shrinking its font size step by step until it fits within
- * [modifier]'s bounds (falling back to a 2-line ellipsis at the smallest size) so a long custom
- * cover name never spills past the thumbnail it's drawn on, however small the tile or row is. */
+/** A text folder cover's label, starting at [userScale] (the size the user picked in the cover
+ * dialog) and shrinking further step by step until it fits within [modifier]'s bounds (falling
+ * back to a 2-line ellipsis at the smallest size), so a long or large custom cover name never
+ * spills past the thumbnail it's drawn on, however small the tile or row is. */
 @Composable
-private fun CoverText(text: String, baseStyle: TextStyle, modifier: Modifier = Modifier) {
-    var fontScale by remember(text) { mutableFloatStateOf(1f) }
+private fun CoverText(text: String, baseStyle: TextStyle, modifier: Modifier = Modifier, userScale: Float = 1f) {
+    var fontScale by remember(text, userScale) { mutableFloatStateOf(userScale) }
     Text(
         text = text,
         color = Color.White,
@@ -951,7 +953,7 @@ private fun CoverText(text: String, baseStyle: TextStyle, modifier: Modifier = M
         overflow = TextOverflow.Ellipsis,
         modifier = modifier,
         onTextLayout = { result ->
-            if ((result.didOverflowWidth || result.didOverflowHeight) && fontScale > 0.5f) {
+            if ((result.didOverflowWidth || result.didOverflowHeight) && fontScale > 0.35f) {
                 fontScale *= 0.85f
             }
         },
@@ -1154,6 +1156,7 @@ private fun GalleryListItem(
                         text = cover.text,
                         baseStyle = MaterialTheme.typography.labelSmall,
                         modifier = Modifier.align(Alignment.Center).fillMaxWidth(0.9f).padding(2.dp),
+                        userScale = cover.sizeScale,
                     )
                     thumbnailModel != null -> AsyncImage(
                         model = thumbnailModel,
