@@ -40,6 +40,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOff
@@ -344,6 +345,16 @@ fun GalleryScreen(
                     navigationIcon = {
                         IconButton(onClick = { viewModel.clearSelection() }) {
                             Icon(Icons.Filled.Close, contentDescription = "Cancel selection")
+                        }
+                    },
+                    actions = {
+                        IconButton(
+                            onClick = {
+                                folders.forEach { viewModel.setFolderSelected(it.path, true) }
+                                media.forEach { viewModel.setMediaSelected(it.id, true) }
+                            },
+                        ) {
+                            Icon(Icons.Filled.SelectAll, contentDescription = "Select all")
                         }
                     },
                 )
@@ -939,7 +950,10 @@ private fun FolderCoverContent(folder: FolderNode, cover: FolderCover?, included
             CoverText(
                 text = cover.text,
                 baseStyle = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                // A 5%-of-the-tile margin on every side, however big a size the user picks -- the
+                // text is free to start as large as they want, but never allowed to render closer
+                // to the edge than this, since shrink-to-fit below clamps within these bounds.
+                modifier = Modifier.fillMaxSize(0.9f),
                 userScale = cover.sizeScale,
                 bold = cover.bold,
             )
@@ -970,7 +984,7 @@ private fun FolderCoverContent(folder: FolderNode, cover: FolderCover?, included
  * back to a 2-line ellipsis at the smallest size), so a long or large custom cover name never
  * spills past the thumbnail it's drawn on, however small the tile or row is. */
 @Composable
-private fun CoverText(
+internal fun CoverText(
     text: String,
     baseStyle: TextStyle,
     modifier: Modifier = Modifier,
@@ -1199,7 +1213,7 @@ private fun GalleryListItem(
                     cover is FolderCover.Text -> CoverText(
                         text = cover.text,
                         baseStyle = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.align(Alignment.Center).fillMaxWidth(0.9f).padding(2.dp),
+                        modifier = Modifier.align(Alignment.Center).fillMaxSize(0.9f),
                         userScale = cover.sizeScale,
                         bold = cover.bold,
                     )

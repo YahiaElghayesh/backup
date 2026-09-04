@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -27,13 +28,16 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -44,15 +48,13 @@ import com.elghayesh.gallerybackup.data.media.FolderNode
 import com.elghayesh.gallerybackup.data.media.allItemsRecursive
 import com.elghayesh.gallerybackup.data.settings.AccentColor
 import com.elghayesh.gallerybackup.data.settings.FolderCover
+import com.elghayesh.gallerybackup.ui.gallery.CoverText
+import kotlin.math.roundToInt
 
 private enum class CoverMode { TEXT, PHOTO }
 
-private enum class CoverTextSize(val scale: Float, val label: String) {
-    SMALL(0.7f, "Small"),
-    MEDIUM(1f, "Medium"),
-    LARGE(1.5f, "Large"),
-    EXTRA_LARGE(2f, "Extra large"),
-}
+private const val MIN_TEXT_SCALE = 0.4f
+private const val MAX_TEXT_SCALE = 3.5f
 
 /** Lets the user give one or more folders a custom cover: plain text over a solid background
  * color, or (single-folder only) a specific photo/video frame picked from the folder's own items.
@@ -78,10 +80,7 @@ fun FolderCoverDialog(
     }
     var alternateColors by remember { mutableStateOf(false) }
     var selectedAlternateColors by remember { mutableStateOf(setOf<AccentColor>()) }
-    var selectedSize by remember {
-        val currentScale = (current as? FolderCover.Text)?.sizeScale ?: 1f
-        mutableStateOf(CoverTextSize.entries.minBy { kotlin.math.abs(it.scale - currentScale) })
-    }
+    var sizeScale by remember { mutableFloatStateOf((current as? FolderCover.Text)?.sizeScale ?: 1f) }
     var bold by remember { mutableStateOf((current as? FolderCover.Text)?.bold ?: false) }
     var selectedPhotoUri by remember { mutableStateOf((current as? FolderCover.Photo)?.uri) }
     val items = remember(folders) {
@@ -92,7 +91,7 @@ fun FolderCoverDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (isMulti) "Folder covers (${folders.size})" else "Folder cover") },
         text = {
-            Column(Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState())) {
+            Column(Modifier.heightIn(max = 560.dp).verticalScroll(rememberScrollState())) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(selected = mode == CoverMode.TEXT, onClick = { mode = CoverMode.TEXT }, label = { Text("Text") })
                     if (!isMulti) {
@@ -100,6 +99,15 @@ fun FolderCoverDialog(
                     }
                 }
                 Spacer(Modifier.height(12.dp))
+                CoverPreview(
+                    mode = mode,
+                    text = if (useFolderNames) (folders.firstOrNull()?.name ?: "") else text,
+                    colorSeed = selectedColor.seed,
+                    sizeScale = sizeScale,
+                    bold = bold,
+                    photoUri = selectedPhotoUri,
+                )
+                Spacer(Modifier.height(16.dp))
                 if (mode == CoverMode.TEXT) {
                     if (isMulti) {
                         CheckboxRow(
@@ -113,18 +121,22 @@ fun FolderCoverDialog(
                         OutlinedTextField(value = text, onValueChange = { text = it }, singleLine = true, label = { Text("Cover text") })
                         Spacer(Modifier.height(12.dp))
                     }
-                    Text("Text size", style = MaterialTheme.typography.labelMedium)
+                    Text(
+                        "Text size -- ${((sizeScale / MAX_TEXT_SCALE) * 100).roundToInt()}%",
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                    Text(
+                        "Size as big as you like -- it's always kept at least 5% clear of the cover's edges.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Slider(
+                        value = sizeScale,
+                        onValueChange = { sizeScale = it },
+                        valueRange = MIN_TEXT_SCALE..MAX_TEXT_SCALE,
+                    )
                     Spacer(Modifier.height(8.dp))
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        CoverTextSize.entries.forEach { size ->
-                            FilterChip(
-                                selected = size == selectedSize,
-                                onClick = { selectedSize = size },
-                                label = { Text(size.label) },
-                            )
-                        }
-                    }
-                    Spacer(Modifier.height(12.dp))
                     CheckboxRow(checked = bold, onCheckedChange = { bold = it }, label = "Bold")
                     Spacer(Modifier.height(12.dp))
                     if (isMulti) {
@@ -140,35 +152,36 @@ fun FolderCoverDialog(
                         style = MaterialTheme.typography.labelMedium,
                     )
                     Spacer(Modifier.height(8.dp))
-                    AccentColor.entries.chunked(8).forEach { rowColors ->
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            rowColors.forEach { color ->
-                                val isSelected = if (alternateColors) color in selectedAlternateColors else color == selectedColor
-                                Row(
-                                    Modifier
-                                        .size(32.dp)
-                                        .clip(CircleShape)
-                                        .background(Color(color.seed))
-                                        .border(
-                                            width = if (isSelected) 3.dp else 0.dp,
-                                            color = MaterialTheme.colorScheme.onSurface,
-                                            shape = CircleShape,
-                                        )
-                                        .clickable {
-                                            if (alternateColors) {
-                                                selectedAlternateColors = if (color in selectedAlternateColors) {
-                                                    selectedAlternateColors - color
-                                                } else {
-                                                    selectedAlternateColors + color
-                                                }
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        AccentColor.entries.forEach { color ->
+                            val isSelected = if (alternateColors) color in selectedAlternateColors else color == selectedColor
+                            Box(
+                                Modifier
+                                    .size(32.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(color.seed))
+                                    .border(
+                                        width = if (isSelected) 3.dp else 0.dp,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        shape = CircleShape,
+                                    )
+                                    .clickable {
+                                        if (alternateColors) {
+                                            selectedAlternateColors = if (color in selectedAlternateColors) {
+                                                selectedAlternateColors - color
                                             } else {
-                                                selectedColor = color
+                                                selectedAlternateColors + color
                                             }
-                                        },
-                                ) {}
-                            }
+                                        } else {
+                                            selectedColor = color
+                                        }
+                                    },
+                            )
                         }
-                        Spacer(Modifier.height(6.dp))
                     }
                 } else if (items.isEmpty()) {
                     Text(
@@ -235,7 +248,7 @@ fun FolderCoverDialog(
                                 folder.path to if (folderText.isBlank()) {
                                     null
                                 } else {
-                                    FolderCover.Text(folderText.trim(), color.seed, selectedSize.scale, bold)
+                                    FolderCover.Text(folderText.trim(), color.seed, sizeScale, bold)
                                 }
                             }
                         }
@@ -255,11 +268,60 @@ fun FolderCoverDialog(
     )
 }
 
+/** Shows exactly how the cover will actually render -- same background, same shrink-to-fit
+ * [CoverText] logic and the same 5%-edge boundary the real tile/row use -- so the size slider
+ * and color/bold choices have something concrete to react to instead of being picked blind. */
+@Composable
+private fun CoverPreview(
+    mode: CoverMode,
+    text: String,
+    colorSeed: Long,
+    sizeScale: Float,
+    bold: Boolean,
+    photoUri: String?,
+) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(120.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (mode == CoverMode.TEXT) Color(colorSeed) else MaterialTheme.colorScheme.surfaceVariant),
+        contentAlignment = Alignment.Center,
+    ) {
+        when {
+            mode == CoverMode.TEXT -> {
+                CoverText(
+                    text = text.ifBlank { "Preview" },
+                    baseStyle = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.fillMaxSize(0.9f),
+                    userScale = sizeScale,
+                    bold = bold,
+                )
+            }
+            photoUri != null -> {
+                AsyncImage(
+                    model = android.net.Uri.parse(photoUri),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(12.dp)),
+                )
+            }
+            else -> {
+                Text(
+                    "Pick a photo below",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun CheckboxRow(checked: Boolean, onCheckedChange: (Boolean) -> Unit, label: String) {
     Row(
         Modifier.fillMaxWidth().clickable { onCheckedChange(!checked) },
-        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         Checkbox(checked = checked, onCheckedChange = onCheckedChange)
         Text(label)
