@@ -45,6 +45,8 @@ enum class AccentColor(val seed: Long) {
     NAVY(0xFF34495E),
     PLUM(0xFF6B4C6E),
     GRAY(0xFF5A5F66),
+    WHITE(0xFFF2F1EF),
+    BLACK(0xFF1C1C1C),
 }
 
 /** A custom folder tile, overriding the default (the folder's own first photo, recursing into

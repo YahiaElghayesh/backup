@@ -50,6 +50,7 @@ import com.elghayesh.gallerybackup.data.media.allItemsRecursive
 import com.elghayesh.gallerybackup.data.settings.AccentColor
 import com.elghayesh.gallerybackup.data.settings.FolderCover
 import com.elghayesh.gallerybackup.ui.gallery.CoverText
+import com.elghayesh.gallerybackup.ui.gallery.contrastingTextColor
 import kotlin.math.roundToInt
 
 private enum class CoverMode { TEXT, PHOTO }
@@ -308,11 +309,11 @@ private fun CoverPreview(
                 Box(Modifier.fillMaxSize(0.9f), contentAlignment = Alignment.Center) {
                     CoverText(
                         text = text.ifBlank { "Preview" },
-                        baseStyle = MaterialTheme.typography.titleMedium,
                         modifier = Modifier.fillMaxWidth(),
                         userScale = sizeScale,
                         bold = bold,
                         wrap = wrap,
+                        textColor = contrastingTextColor(colorSeed),
                     )
                 }
             }

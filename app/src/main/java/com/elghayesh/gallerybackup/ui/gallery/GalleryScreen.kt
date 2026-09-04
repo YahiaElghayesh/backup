@@ -12,6 +12,7 @@ import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -91,6 +92,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.elghayesh.gallerybackup.data.media.FolderNode
 import com.elghayesh.gallerybackup.data.media.MediaItem
@@ -560,7 +562,17 @@ fun GalleryScreen(
                                 // different number of, so the two can have independent apparent column counts
                                 // (GRID_SPAN_UNITS is divisible by every column count 2..6) within one grid.
                                 columns = GridCells.Fixed(GRID_SPAN_UNITS),
-                                contentPadding = PaddingValues(4.dp),
+                                // Extra bottom clearance for the Trash FAB, which floats over this content
+                                // rather than reserving space for itself -- without it, the FAB sits directly
+                                // on top of the last row instead of floating above a scroll-revealable one.
+                                // top/bottom always refer to the actual visual edges regardless of
+                                // reverseLayout, so this stays correct whether or not content is pinned.
+                                contentPadding = PaddingValues(
+                                    start = 4.dp,
+                                    top = 4.dp,
+                                    end = 4.dp,
+                                    bottom = if (isSelectionMode) 4.dp else 88.dp,
+                                ),
                                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                                 verticalArrangement = Arrangement.spacedBy(4.dp),
                                 userScrollEnabled = !isDragSelecting,
@@ -743,6 +755,8 @@ fun GalleryScreen(
                             state = listState,
                             modifier = Modifier.fillMaxSize(),
                             reverseLayout = listPinToBottom(),
+                            // Same Trash-FAB clearance as the full-grid branch above.
+                            contentPadding = PaddingValues(bottom = if (isSelectionMode) 0.dp else 88.dp),
                         ) {
                             if (listPinToBottom()) {
                                 mediaSection()
@@ -991,11 +1005,11 @@ private fun FolderCoverContent(folder: FolderNode, cover: FolderCover?, included
             Box(Modifier.fillMaxSize(0.9f), contentAlignment = Alignment.Center) {
                 CoverText(
                     text = cover.text,
-                    baseStyle = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.fillMaxWidth(),
                     userScale = cover.sizeScale,
                     bold = cover.bold,
                     wrap = cover.wrapText,
+                    textColor = contrastingTextColor(cover.colorSeed),
                 )
             }
         }
@@ -1020,6 +1034,13 @@ private fun FolderCoverContent(folder: FolderNode, cover: FolderCover?, included
     }
 }
 
+/** Font size at [userScale] 1f, as a fraction of [CoverText]'s own measured container width. Using
+ * a size relative to the container (rather than a fixed sp value from Material typography) is
+ * what makes the exact same [userScale] look the same relative size everywhere CoverText is used
+ * -- a big cover-dialog preview and a small grid tile included -- instead of comfortably fitting
+ * in one and being forced tiny (or wrapping badly) in the other. */
+private const val COVER_FONT_WIDTH_FRACTION = 0.18f
+
 /** A text folder cover's label, starting at [userScale] (the size the user picked in the cover
  * dialog) and shrinking further step by step until it fits within [modifier]'s bounds (falling
  * back to a 2-line ellipsis at the smallest size), so a long or large custom cover name never
@@ -1027,39 +1048,51 @@ private fun FolderCoverContent(folder: FolderNode, cover: FolderCover?, included
 @Composable
 internal fun CoverText(
     text: String,
-    baseStyle: TextStyle,
     modifier: Modifier = Modifier,
     userScale: Float = 1f,
     bold: Boolean = false,
     wrap: Boolean = false,
+    textColor: Color = Color.White,
 ) {
-    var fontScale by remember(text, userScale) { mutableFloatStateOf(userScale) }
-    Text(
-        text = text,
-        color = Color.White,
-        style = baseStyle.copy(
-            fontSize = baseStyle.fontSize * fontScale,
-            lineHeight = baseStyle.lineHeight * fontScale,
-            fontWeight = if (bold) FontWeight.Bold else baseStyle.fontWeight,
-        ),
-        textAlign = TextAlign.Center,
-        maxLines = 2,
-        overflow = TextOverflow.Ellipsis,
-        modifier = modifier,
-        onTextLayout = { result ->
-            // With wrap off (the default), shrink not just on outright overflow but also whenever
-            // the text had to wrap at all -- a wrap can still "fit" within maxLines=2 (no overflow
-            // reported) but land as an ugly, arbitrary mid-word break (e.g. a single orphaned
-            // letter stranded on line 2). Preferring a smaller single line over that, all the way
-            // down to the size floor, is what actually avoids it. With wrap on, a normal 2-line
-            // wrap at the chosen size is exactly what the user asked for, so only real overflow
-            // (text that doesn't fit even wrapped) triggers a shrink.
-            val needsShrink = result.didOverflowWidth || result.didOverflowHeight || (!wrap && result.lineCount > 1)
-            if (needsShrink && fontScale > 0.35f) {
-                fontScale *= 0.85f
-            }
-        },
-    )
+    BoxWithConstraints(modifier, contentAlignment = Alignment.Center) {
+        val baseFontSizeSp = maxWidth.value * COVER_FONT_WIDTH_FRACTION * userScale
+        var fontScale by remember(text, userScale) { mutableFloatStateOf(1f) }
+        Text(
+            text = text,
+            color = textColor,
+            style = TextStyle(
+                fontSize = (baseFontSizeSp * fontScale).sp,
+                fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal,
+            ),
+            textAlign = TextAlign.Center,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth(),
+            onTextLayout = { result ->
+                // With wrap off (the default), shrink not just on outright overflow but also whenever
+                // the text had to wrap at all -- a wrap can still "fit" within maxLines=2 (no overflow
+                // reported) but land as an ugly, arbitrary mid-word break (e.g. a single orphaned
+                // letter stranded on line 2). Preferring a smaller single line over that, all the way
+                // down to the size floor, is what actually avoids it. With wrap on, a normal 2-line
+                // wrap at the chosen size is exactly what the user asked for, so only real overflow
+                // (text that doesn't fit even wrapped) triggers a shrink.
+                val needsShrink = result.didOverflowWidth || result.didOverflowHeight || (!wrap && result.lineCount > 1)
+                if (needsShrink && fontScale > 0.35f) {
+                    fontScale *= 0.85f
+                }
+            },
+        )
+    }
+}
+
+/** White or black, whichever reads more clearly over a solid [seed] background -- so a cover text
+ * color that's fixed to white doesn't go invisible the moment someone picks a light/white
+ * background color. Uses perceived (not just averaged) luminance, weighting green highest since
+ * the eye is most sensitive to it. */
+internal fun contrastingTextColor(seed: Long): Color {
+    val color = Color(seed)
+    val luminance = 0.299f * color.red + 0.587f * color.green + 0.114f * color.blue
+    return if (luminance > 0.6f) Color.Black else Color.White
 }
 
 /** A bottom-up fade used behind labels/badges drawn over a photo, so white text and icons stay
@@ -1260,11 +1293,11 @@ private fun GalleryListItem(
                     ) {
                         CoverText(
                             text = cover.text,
-                            baseStyle = MaterialTheme.typography.labelSmall,
                             modifier = Modifier.fillMaxWidth(),
                             userScale = cover.sizeScale,
                             bold = cover.bold,
                             wrap = cover.wrapText,
+                            textColor = contrastingTextColor(cover.colorSeed),
                         )
                     }
                     thumbnailModel != null -> AsyncImage(
