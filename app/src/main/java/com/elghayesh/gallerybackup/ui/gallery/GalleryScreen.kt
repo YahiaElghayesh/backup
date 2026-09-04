@@ -71,6 +71,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -193,6 +194,12 @@ fun GalleryScreen(
         realFolders
     }
     val media = if (hasSelfTile) emptyList() else node?.items?.sortedByDescending { it.dateModifiedSec } ?: emptyList()
+    // Read fresh inside the drag-select pointerInput below without needing folders/media in its
+    // key -- keying on them directly would restart that gesture's coroutine (and lose an
+    // in-progress drag) the instant a selection change recomposes this screen and produces new
+    // (even if content-equal) folders/media list instances.
+    val currentFolders = rememberUpdatedState(folders)
+    val currentMedia = rememberUpdatedState(media)
     val selectedItems = media.filter { it.id in selectedMediaIds }
     val selectedFolderNodes = folders.filter { it.path in selectedFolderPaths }
     val isSelectionMode = selectedMediaIds.isNotEmpty() || selectedFolderPaths.isNotEmpty()
@@ -217,14 +224,24 @@ fun GalleryScreen(
     // little enough of it that the viewport isn't full -- pushing it down as far as it'll go
     // without changing order, the same trick a chat screen uses for a short conversation. Once
     // there's enough content to fill (or overflow) the screen, this must be a complete no-op:
-    // normal top-anchored layout, normal scrolling, unchanged order. canScrollForward/Backward
-    // both false means every item already fits without scrolling, regardless of layout direction,
-    // so it's a safe, order-independent signal for "would this even need pinning". These are
-    // plain functions (not vals) so every call site reads the live scroll state fresh, the same
-    // way reading pinContentToBottom itself always does -- including from inside the drag-select
+    // normal top-anchored layout, normal scrolling, unchanged order. Checking that every item is
+    // simultaneously present in visibleItemsInfo is a direct, order-independent "does this even
+    // need pinning" signal -- deliberately not canScrollForward/canScrollBackward, which turned
+    // out unreliable for this grid's multi-section custom-span layout (media and folders declared
+    // as two separate gridItems() blocks sharing one column-span scheme). These are plain
+    // functions (not vals) so every call site reads the live layout state fresh, the same way
+    // reading pinContentToBottom itself always does -- including from inside the drag-select
     // gesture callback below, which must never work off a value captured when that gesture began.
-    fun gridPinToBottom() = pinContentToBottom && !gridState.canScrollForward && !gridState.canScrollBackward
-    fun listPinToBottom() = pinContentToBottom && !listState.canScrollForward && !listState.canScrollBackward
+    fun gridPinToBottom(): Boolean {
+        if (!pinContentToBottom) return false
+        val info = gridState.layoutInfo
+        return info.totalItemsCount == 0 || info.visibleItemsInfo.size >= info.totalItemsCount
+    }
+    fun listPinToBottom(): Boolean {
+        if (!pinContentToBottom) return false
+        val info = listState.layoutInfo
+        return info.totalItemsCount == 0 || info.visibleItemsInfo.size >= info.totalItemsCount
+    }
 
     if (showSortDialog) {
         SortDialog(
@@ -458,7 +475,14 @@ fun GalleryScreen(
                         Box(
                             Modifier
                                 .fillMaxSize()
-                                .pointerInput(folders, media, pinContentToBottom) {
+                                // Keyed only on path (effectively constant for this screen's whole
+                                // lifetime) rather than on folders/media/pinContentToBottom -- those
+                                // are read live via currentFolders/currentMedia/gridPinToBottom()
+                                // instead, specifically so a selection change mid-drag (which
+                                // recomposes this screen and produces new folders/media list
+                                // instances) can never restart this gesture's coroutine and drop an
+                                // in-progress drag-select.
+                                .pointerInput(path) {
                                     // A single, unified gesture owns the whole down-to-up lifecycle for every
                                     // tile: a plain tap opens the item (or toggles it, once already selecting);
                                     // a long press selects the item under the finger and enters selection mode;
@@ -473,7 +497,9 @@ fun GalleryScreen(
                                         val longPress = awaitLongPressOrCancellation(down.id)
                                         if (longPress != null) {
                                             isDragSelecting = true
-                                            downIndex?.let { selectAt(it, folders, media, viewModel, gridPinToBottom()) }
+                                            downIndex?.let {
+                                                selectAt(it, currentFolders.value, currentMedia.value, viewModel, gridPinToBottom())
+                                            }
                                             var pointerId = down.id
                                             try {
                                                 while (true) {
@@ -491,7 +517,15 @@ fun GalleryScreen(
                                                         break
                                                     }
                                                     itemIndexAt(gridState, change.position)
-                                                        ?.let { selectAt(it, folders, media, viewModel, gridPinToBottom()) }
+                                                        ?.let {
+                                                            selectAt(
+                                                                it,
+                                                                currentFolders.value,
+                                                                currentMedia.value,
+                                                                viewModel,
+                                                                gridPinToBottom(),
+                                                            )
+                                                        }
                                                     change.consume()
                                                     pointerId = change.id
                                                 }
@@ -507,8 +541,8 @@ fun GalleryScreen(
                                             if (!stillDown && !moved) {
                                                 openOrToggle(
                                                     downIndex,
-                                                    folders,
-                                                    media,
+                                                    currentFolders.value,
+                                                    currentMedia.value,
                                                     viewModel,
                                                     path,
                                                     gridPinToBottom(),
@@ -947,16 +981,23 @@ private fun SortScopeOption(label: String, onClick: () -> Unit) {
 private fun FolderCoverContent(folder: FolderNode, cover: FolderCover?, includedFolders: Set<String>) {
     if (cover is FolderCover.Text) {
         Box(Modifier.fillMaxSize().background(Color(cover.colorSeed)), contentAlignment = Alignment.Center) {
-            CoverText(
-                text = cover.text,
-                baseStyle = MaterialTheme.typography.titleMedium,
-                // A 5%-of-the-tile margin on every side, however big a size the user picks -- the
-                // text is free to start as large as they want, but never allowed to render closer
-                // to the edge than this, since shrink-to-fit below clamps within these bounds.
-                modifier = Modifier.fillMaxSize(0.9f),
-                userScale = cover.sizeScale,
-                bold = cover.bold,
-            )
+            // A 5%-of-the-tile margin on every side, however big a size the user picks -- the text
+            // is free to start as large as they want, but never allowed to render closer to the
+            // edge than this, since shrink-to-fit below clamps within these bounds. This inner box
+            // (rather than sizing CoverText's own Text node to 90%x90% directly) is what actually
+            // centers the text vertically too: a Text node forced to fill a tall box draws its
+            // glyphs from the top of that box, not the middle, so the text needs its OWN wrap-sized
+            // bounds centered by a parent -- this box is that parent, at the 90%x90% boundary.
+            Box(Modifier.fillMaxSize(0.9f), contentAlignment = Alignment.Center) {
+                CoverText(
+                    text = cover.text,
+                    baseStyle = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.fillMaxWidth(),
+                    userScale = cover.sizeScale,
+                    bold = cover.bold,
+                    wrap = cover.wrapText,
+                )
+            }
         }
         return
     }
@@ -990,6 +1031,7 @@ internal fun CoverText(
     modifier: Modifier = Modifier,
     userScale: Float = 1f,
     bold: Boolean = false,
+    wrap: Boolean = false,
 ) {
     var fontScale by remember(text, userScale) { mutableFloatStateOf(userScale) }
     Text(
@@ -1005,12 +1047,14 @@ internal fun CoverText(
         overflow = TextOverflow.Ellipsis,
         modifier = modifier,
         onTextLayout = { result ->
-            // Shrink not just on outright overflow but also whenever the text had to wrap at all --
-            // a wrap can still "fit" within maxLines=2 (no overflow reported) but land as an ugly,
-            // arbitrary mid-word break (e.g. a single orphaned letter stranded on line 2). Preferring
-            // a smaller single line over that kind of wrap, all the way down to the size floor, is
-            // what actually avoids it; only once the floor is hit does a real 2-line wrap stand.
-            val needsShrink = result.didOverflowWidth || result.didOverflowHeight || result.lineCount > 1
+            // With wrap off (the default), shrink not just on outright overflow but also whenever
+            // the text had to wrap at all -- a wrap can still "fit" within maxLines=2 (no overflow
+            // reported) but land as an ugly, arbitrary mid-word break (e.g. a single orphaned
+            // letter stranded on line 2). Preferring a smaller single line over that, all the way
+            // down to the size floor, is what actually avoids it. With wrap on, a normal 2-line
+            // wrap at the chosen size is exactly what the user asked for, so only real overflow
+            // (text that doesn't fit even wrapped) triggers a shrink.
+            val needsShrink = result.didOverflowWidth || result.didOverflowHeight || (!wrap && result.lineCount > 1)
             if (needsShrink && fontScale > 0.35f) {
                 fontScale *= 0.85f
             }
@@ -1210,13 +1254,19 @@ private fun GalleryListItem(
                     ),
             ) {
                 when {
-                    cover is FolderCover.Text -> CoverText(
-                        text = cover.text,
-                        baseStyle = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.align(Alignment.Center).fillMaxSize(0.9f),
-                        userScale = cover.sizeScale,
-                        bold = cover.bold,
-                    )
+                    cover is FolderCover.Text -> Box(
+                        Modifier.align(Alignment.Center).fillMaxSize(0.9f),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        CoverText(
+                            text = cover.text,
+                            baseStyle = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.fillMaxWidth(),
+                            userScale = cover.sizeScale,
+                            bold = cover.bold,
+                            wrap = cover.wrapText,
+                        )
+                    }
                     thumbnailModel != null -> AsyncImage(
                         model = thumbnailModel,
                         contentDescription = title,

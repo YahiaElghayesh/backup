@@ -84,6 +84,7 @@ fun FolderCoverDialog(
     var selectedAlternateColors by remember { mutableStateOf(setOf<AccentColor>()) }
     var sizeScale by remember { mutableFloatStateOf((current as? FolderCover.Text)?.sizeScale ?: 1f) }
     var bold by remember { mutableStateOf((current as? FolderCover.Text)?.bold ?: false) }
+    var wrapText by remember { mutableStateOf((current as? FolderCover.Text)?.wrapText ?: false) }
     var selectedPhotoUri by remember { mutableStateOf((current as? FolderCover.Photo)?.uri) }
     val items = remember(folders) {
         if (isMulti) emptyList() else folders.firstOrNull()?.allItemsRecursive()?.sortedByDescending { it.dateModifiedSec } ?: emptyList()
@@ -107,6 +108,7 @@ fun FolderCoverDialog(
                     colorSeed = selectedColor.seed,
                     sizeScale = sizeScale,
                     bold = bold,
+                    wrap = wrapText,
                     photoUri = selectedPhotoUri,
                 )
                 Spacer(Modifier.height(16.dp))
@@ -140,6 +142,12 @@ fun FolderCoverDialog(
                     )
                     Spacer(Modifier.height(8.dp))
                     CheckboxRow(checked = bold, onCheckedChange = { bold = it }, label = "Bold")
+                    Spacer(Modifier.height(4.dp))
+                    CheckboxRow(
+                        checked = wrapText,
+                        onCheckedChange = { wrapText = it },
+                        label = "Wrap to a second line instead of shrinking to fit one",
+                    )
                     Spacer(Modifier.height(12.dp))
                     if (isMulti) {
                         CheckboxRow(
@@ -250,7 +258,7 @@ fun FolderCoverDialog(
                                 folder.path to if (folderText.isBlank()) {
                                     null
                                 } else {
-                                    FolderCover.Text(folderText.trim(), color.seed, sizeScale, bold)
+                                    FolderCover.Text(folderText.trim(), color.seed, sizeScale, bold, wrapText)
                                 }
                             }
                         }
@@ -280,25 +288,33 @@ private fun CoverPreview(
     colorSeed: Long,
     sizeScale: Float,
     bold: Boolean,
+    wrap: Boolean,
     photoUri: String?,
 ) {
+    // Square, same as the real folder tile it's previewing -- a wide rectangle here would make
+    // the preview lie about the cover's actual proportions.
     Box(
         Modifier
             .fillMaxWidth()
-            .height(120.dp)
+            .aspectRatio(1f)
             .clip(RoundedCornerShape(12.dp))
             .background(if (mode == CoverMode.TEXT) Color(colorSeed) else MaterialTheme.colorScheme.surfaceVariant),
         contentAlignment = Alignment.Center,
     ) {
         when {
             mode == CoverMode.TEXT -> {
-                CoverText(
-                    text = text.ifBlank { "Preview" },
-                    baseStyle = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.fillMaxSize(0.9f),
-                    userScale = sizeScale,
-                    bold = bold,
-                )
+                // See FolderCoverContent's own comment on why centering needs this inner box
+                // rather than sizing CoverText's Text node to 90%x90% directly.
+                Box(Modifier.fillMaxSize(0.9f), contentAlignment = Alignment.Center) {
+                    CoverText(
+                        text = text.ifBlank { "Preview" },
+                        baseStyle = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.fillMaxWidth(),
+                        userScale = sizeScale,
+                        bold = bold,
+                        wrap = wrap,
+                    )
+                }
             }
             photoUri != null -> {
                 AsyncImage(

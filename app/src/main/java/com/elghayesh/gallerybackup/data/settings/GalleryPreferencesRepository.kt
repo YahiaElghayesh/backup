@@ -53,12 +53,15 @@ enum class AccentColor(val seed: Long) {
 sealed class FolderCover {
     /** [sizeScale] is the user's chosen starting size (1f = the tile's normal default size) --
      * the text still shrinks further from there if it doesn't fit, it just starts bigger or
-     * smaller depending on preference. */
+     * smaller depending on preference. [wrapText] false (the default) prefers shrinking the font
+     * to fit on one line over wrapping to a second one; true allows a normal wrap onto a second
+     * line at the chosen size instead of shrinking for it. */
     data class Text(
         val text: String,
         val colorSeed: Long,
         val sizeScale: Float = 1f,
         val bold: Boolean = false,
+        val wrapText: Boolean = false,
     ) : FolderCover()
     data class Photo(val uri: String) : FolderCover()
 }
@@ -359,6 +362,7 @@ class GalleryPreferencesRepository(private val context: Context) {
                             obj.getLong("color"),
                             obj.optDouble("sizeScale", 1.0).toFloat(),
                             obj.optBoolean("bold", false),
+                            obj.optBoolean("wrapText", false),
                         )
                     }
                     put(obj.getString("path"), cover)
@@ -382,6 +386,7 @@ class GalleryPreferencesRepository(private val context: Context) {
                             put("color", cover.colorSeed)
                             put("sizeScale", cover.sizeScale.toDouble())
                             put("bold", cover.bold)
+                            put("wrapText", cover.wrapText)
                         }
                         is FolderCover.Photo -> {
                             put("type", "photo")
