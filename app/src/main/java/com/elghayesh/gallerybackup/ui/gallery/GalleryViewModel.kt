@@ -130,6 +130,8 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         trashRepository.trashedEntries.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
     val favoriteMediaIds: StateFlow<Set<Long>> =
         prefs.favoriteMediaIds.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
+    val pinContentToBottom: StateFlow<Boolean> =
+        prefs.pinContentToBottom.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     /** [root] with hidden/trashed content removed, plus any still-empty user-created folders added in. */
     val visibleRoot: StateFlow<FolderNode?> = combine(
@@ -215,6 +217,7 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     fun setFolderCover(path: String, cover: FolderCover?) = viewModelScope.launch { prefs.setFolderCover(path, cover) }
 
     fun setMediaFavorite(id: Long, favorite: Boolean) = viewModelScope.launch { prefs.setMediaFavorite(id, favorite) }
+    fun setPinContentToBottom(value: Boolean) = viewModelScope.launch { prefs.setPinContentToBottom(value) }
 
     /** Favorites every id in [ids] if any of them isn't already a favorite, otherwise un-favorites them all. */
     fun toggleFavorites(ids: List<Long>) {

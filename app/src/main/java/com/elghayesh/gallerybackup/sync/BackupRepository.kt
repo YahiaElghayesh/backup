@@ -37,10 +37,10 @@ class BackupRepository(private val context: Context) {
     private val oneDriveSettings = OneDriveSettingsRepository(context)
 
     /**
-     * Every folder is an independent on/off flag -- selecting "DCIM" does *not* pull in
-     * "DCIM/Screenshots" for free, and picking a subfolder doesn't require its parent to
-     * be selected too. This matches [com.elghayesh.gallerybackup.data.settings.GalleryPreferencesRepository]'s
-     * exclude/hide folders, which use the same "flat set of paths at any depth" model.
+     * Selecting a folder backs up its own items plus everything in every folder beneath it --
+     * picking "DCIM" pulls in "DCIM/Screenshots" too, without needing it individually selected.
+     * A subfolder can still be selected on its own without its parent being selected, for a
+     * narrower backup than the whole parent.
      */
     suspend fun sync(onProgress: suspend (String) -> Unit = {}): SyncOutcome {
         val driveToken = (driveAuthManager.authorize() as? DriveAuthResult.Granted)?.accessToken
@@ -71,11 +71,13 @@ class BackupRepository(private val context: Context) {
         node: FolderNode,
         selectedFolders: Set<String>,
         onProgress: suspend (String) -> Unit,
+        inheritedSelected: Boolean = false,
     ): Pair<Int, Int> {
         var uploaded = 0
         var failed = 0
 
-        if (node.path.isNotEmpty() && node.path in selectedFolders) {
+        val included = inheritedSelected || (node.path.isNotEmpty() && node.path in selectedFolders)
+        if (included) {
             val driveFolderId = ensureDriveFolderId(accessToken, node.path)
             for (item in node.items) {
                 try {
@@ -89,7 +91,7 @@ class BackupRepository(private val context: Context) {
             }
         }
         for (child in node.children.values) {
-            val (u, f) = syncTreeToDrive(accessToken, child, selectedFolders, onProgress)
+            val (u, f) = syncTreeToDrive(accessToken, child, selectedFolders, onProgress, inheritedSelected = included)
             uploaded += u
             failed += f
         }
@@ -101,11 +103,13 @@ class BackupRepository(private val context: Context) {
         node: FolderNode,
         selectedFolders: Set<String>,
         onProgress: suspend (String) -> Unit,
+        inheritedSelected: Boolean = false,
     ): Pair<Int, Int> {
         var uploaded = 0
         var failed = 0
 
-        if (node.path.isNotEmpty() && node.path in selectedFolders) {
+        val included = inheritedSelected || (node.path.isNotEmpty() && node.path in selectedFolders)
+        if (included) {
             val remoteFolderPath = "$ROOT_FOLDER_NAME/${node.path}"
             try {
                 oneDriveApi.ensureFolderPath(accessToken, remoteFolderPath)
@@ -124,7 +128,7 @@ class BackupRepository(private val context: Context) {
             }
         }
         for (child in node.children.values) {
-            val (u, f) = syncTreeToOneDrive(accessToken, child, selectedFolders, onProgress)
+            val (u, f) = syncTreeToOneDrive(accessToken, child, selectedFolders, onProgress, inheritedSelected = included)
             uploaded += u
             failed += f
         }

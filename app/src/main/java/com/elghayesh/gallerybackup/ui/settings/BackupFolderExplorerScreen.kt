@@ -43,10 +43,10 @@ import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
 
 /**
  * A file-explorer-style browser for choosing which folders to back up -- the same navigable
- * pattern as [com.elghayesh.gallerybackup.ui.gallery.FolderVisibilityExplorerScreen], but each
- * folder's checkbox is independent: checking a folder backs up just that folder's own items, it
- * does not automatically pull in its subfolders (matching [BackupViewModel.toggleFolder]'s
- * existing no-cascade behavior).
+ * pattern as [com.elghayesh.gallerybackup.ui.gallery.FolderVisibilityExplorerScreen]. Checking a
+ * folder backs up its own items plus everything in every subfolder beneath it (see
+ * [com.elghayesh.gallerybackup.sync.BackupRepository]'s sync pass); a subfolder can still be
+ * checked on its own, for a narrower backup than its whole parent.
  *
  * Unlike the plain gallery, this browses the real tree *plus* any virtual (not-yet-populated)
  * folders -- see [withVirtualFolders] -- and lets you create one right here. That's the point:
@@ -130,11 +130,11 @@ fun BackupFolderExplorerScreen(
                 AllFilesAccessPrompt(onGranted = { galleryViewModel.refreshAllDeviceFolders() })
                 if (currentPath.isEmpty()) {
                     Text(
-                        "Check a folder to back it up. Each folder is independent -- checking one " +
-                            "does not automatically include its subfolders, so open it and check " +
-                            "those separately if you want them too. Use the folder+ icon to add an " +
-                            "empty folder (e.g. one an app clears out and refills later) so it's " +
-                            "already selected once it has something to back up.",
+                        "Check a folder to back it up -- everything inside it, including its " +
+                            "subfolders, comes along. Check a subfolder on its own for a narrower " +
+                            "backup than the whole parent. Use the folder+ icon to add an empty " +
+                            "folder (e.g. one an app clears out and refills later) so it's already " +
+                            "selected once it has something to back up.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(16.dp),

@@ -85,6 +85,7 @@ class GalleryPreferencesRepository(private val context: Context) {
         val VIRTUAL_FOLDERS = stringSetPreferencesKey("virtual_folders")
         val FOLDER_COVERS_JSON = stringPreferencesKey("folder_covers_json")
         val FAVORITE_MEDIA_IDS = stringSetPreferencesKey("favorite_media_ids")
+        val PIN_CONTENT_TO_BOTTOM = booleanPreferencesKey("pin_content_to_bottom")
     }
 
     private fun legacyViewType(prefs: androidx.datastore.preferences.core.Preferences): ViewType? =
@@ -182,6 +183,16 @@ class GalleryPreferencesRepository(private val context: Context) {
         context.galleryPrefsStore.data.map { prefs ->
             (prefs[Keys.FAVORITE_MEDIA_IDS] ?: emptySet()).mapNotNull { it.toLongOrNull() }.toSet()
         }
+
+    /** When a folder/media listing doesn't fill the screen, anchor it to the bottom of the
+     * viewport instead of the top -- doesn't change sort order, just where a short list sits, so
+     * items land closer to a thumb on a tall screen. */
+    val pinContentToBottom: Flow<Boolean> =
+        context.galleryPrefsStore.data.map { it[Keys.PIN_CONTENT_TO_BOTTOM] ?: false }
+
+    suspend fun setPinContentToBottom(value: Boolean) {
+        context.galleryPrefsStore.edit { it[Keys.PIN_CONTENT_TO_BOTTOM] = value }
+    }
 
     suspend fun setFolderViewType(type: ViewType) {
         context.galleryPrefsStore.edit { it[Keys.FOLDER_VIEW_TYPE] = type.name }

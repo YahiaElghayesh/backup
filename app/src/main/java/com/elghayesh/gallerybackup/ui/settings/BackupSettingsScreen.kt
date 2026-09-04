@@ -177,8 +177,8 @@ fun BackupSettingsScreen(
                             if (selectedFolders.isEmpty()) {
                                 "No folders selected yet -- tap to browse, file-explorer style."
                             } else {
-                                "${selectedFolders.size} folder(s) selected. Each is independent -- " +
-                                    "checking one doesn't pull in its subfolders."
+                                "${selectedFolders.size} folder(s) selected. Checking a folder backs up " +
+                                    "everything inside it, including its subfolders."
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,

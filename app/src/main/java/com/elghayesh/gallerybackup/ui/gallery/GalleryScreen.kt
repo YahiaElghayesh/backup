@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
@@ -32,7 +33,6 @@ import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -66,6 +66,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -81,6 +82,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -93,6 +95,7 @@ import com.elghayesh.gallerybackup.data.media.latestModifiedSec
 import com.elghayesh.gallerybackup.data.media.promotedChildren
 import com.elghayesh.gallerybackup.data.media.promotionAwareCoverUri
 import com.elghayesh.gallerybackup.data.media.promotionAwareItemCount
+import com.elghayesh.gallerybackup.data.settings.AccentColor
 import com.elghayesh.gallerybackup.data.settings.FolderCover
 import com.elghayesh.gallerybackup.data.settings.FolderSortOrder
 import com.elghayesh.gallerybackup.data.settings.FolderSortOverride
@@ -151,6 +154,7 @@ fun GalleryScreen(
     val selectedFolderPaths by viewModel.selectedFolderPaths.collectAsState()
     val folderCovers by viewModel.folderCovers.collectAsState()
     val favoriteMediaIds by viewModel.favoriteMediaIds.collectAsState()
+    val pinContentToBottom by viewModel.pinContentToBottom.collectAsState()
     val node = visibleRoot?.findNode(path)
 
     // A pinned folder is promoted out of its real parent's listing wherever that parent is shown
@@ -367,6 +371,15 @@ fun GalleryScreen(
                             }
                             if (selectedFolderNodes.size == 1 && selectedItems.isEmpty()) {
                                 add("Set cover" to { coverDialogFor = selectedFolderNodes.first() })
+                            } else if (selectedFolderNodes.size > 1 && selectedItems.isEmpty()) {
+                                add(
+                                    "Set covers to folder names" to {
+                                        selectedFolderNodes.forEach { folder ->
+                                            viewModel.setFolderCover(folder.path, FolderCover.Text(folder.name, AccentColor.BLUE.seed))
+                                        }
+                                        viewModel.clearSelection()
+                                    },
+                                )
                             }
                             add("Properties" to { showProperties = true })
                         },
@@ -420,7 +433,7 @@ fun GalleryScreen(
                         Box(
                             Modifier
                                 .fillMaxSize()
-                                .pointerInput(folders, media) {
+                                .pointerInput(folders, media, pinContentToBottom) {
                                     // A single, unified gesture owns the whole down-to-up lifecycle for every
                                     // tile: a plain tap opens the item (or toggles it, once already selecting);
                                     // a long press selects the item under the finger and enters selection mode;
@@ -435,7 +448,7 @@ fun GalleryScreen(
                                         val longPress = awaitLongPressOrCancellation(down.id)
                                         if (longPress != null) {
                                             isDragSelecting = true
-                                            downIndex?.let { selectAt(it, folders, media, viewModel) }
+                                            downIndex?.let { selectAt(it, folders, media, viewModel, pinContentToBottom) }
                                             var pointerId = down.id
                                             try {
                                                 while (true) {
@@ -446,7 +459,7 @@ fun GalleryScreen(
                                                         break
                                                     }
                                                     itemIndexAt(gridState, change.position)
-                                                        ?.let { selectAt(it, folders, media, viewModel) }
+                                                        ?.let { selectAt(it, folders, media, viewModel, pinContentToBottom) }
                                                     change.consume()
                                                     pointerId = change.id
                                                 }
@@ -460,7 +473,16 @@ fun GalleryScreen(
                                                     (change.position - down.position).getDistance() > tapSlopPx
                                             }
                                             if (!stillDown && !moved) {
-                                                openOrToggle(downIndex, folders, media, viewModel, path, onOpenFolder, onOpenMedia)
+                                                openOrToggle(
+                                                    downIndex,
+                                                    folders,
+                                                    media,
+                                                    viewModel,
+                                                    path,
+                                                    pinContentToBottom,
+                                                    onOpenFolder,
+                                                    onOpenMedia,
+                                                )
                                             }
                                         }
                                     }
@@ -476,31 +498,64 @@ fun GalleryScreen(
                                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                                 verticalArrangement = Arrangement.spacedBy(4.dp),
                                 userScrollEnabled = !isDragSelecting,
+                                // Declaration order flips together with reverseLayout (media block
+                                // first, each block internally reversed too) so the *visual* result
+                                // is still folders-then-media in their normal order, just anchored to
+                                // the bottom of the viewport instead of the top when it's not full --
+                                // see selectAt/openOrToggle for the matching index math.
+                                reverseLayout = pinContentToBottom,
                                 modifier = Modifier.fillMaxSize(),
                             ) {
-                                gridItems(
-                                    folders,
-                                    key = { "folder:${it.path}" },
-                                    span = { GridItemSpan(GRID_SPAN_UNITS / folderGridColumns) },
-                                ) { folder ->
-                                    FolderGridTile(
-                                        folder = folder,
-                                        isHidden = folder.path in hiddenFolders,
-                                        isSelected = folder.path in selectedFolderPaths,
-                                        cover = folderCovers[folder.path],
-                                        includedFolders = includedFolders,
-                                    )
-                                }
-                                gridItemsIndexed(
-                                    media,
-                                    key = { _, item -> "media:${item.id}" },
-                                    span = { _, _ -> GridItemSpan(GRID_SPAN_UNITS / mediaGridColumns) },
-                                ) { _, item ->
-                                    MediaGridTile(
-                                        item = item,
-                                        isHidden = item.id in hiddenMediaIds,
-                                        isSelected = item.id in selectedMediaIds,
-                                    )
+                                if (pinContentToBottom) {
+                                    gridItems(
+                                        media.asReversed(),
+                                        key = { "media:${it.id}" },
+                                        span = { GridItemSpan(GRID_SPAN_UNITS / mediaGridColumns) },
+                                    ) { item ->
+                                        MediaGridTile(
+                                            item = item,
+                                            isHidden = item.id in hiddenMediaIds,
+                                            isSelected = item.id in selectedMediaIds,
+                                        )
+                                    }
+                                    gridItems(
+                                        folders.asReversed(),
+                                        key = { "folder:${it.path}" },
+                                        span = { GridItemSpan(GRID_SPAN_UNITS / folderGridColumns) },
+                                    ) { folder ->
+                                        FolderGridTile(
+                                            folder = folder,
+                                            isHidden = folder.path in hiddenFolders,
+                                            isSelected = folder.path in selectedFolderPaths,
+                                            cover = folderCovers[folder.path],
+                                            includedFolders = includedFolders,
+                                        )
+                                    }
+                                } else {
+                                    gridItems(
+                                        folders,
+                                        key = { "folder:${it.path}" },
+                                        span = { GridItemSpan(GRID_SPAN_UNITS / folderGridColumns) },
+                                    ) { folder ->
+                                        FolderGridTile(
+                                            folder = folder,
+                                            isHidden = folder.path in hiddenFolders,
+                                            isSelected = folder.path in selectedFolderPaths,
+                                            cover = folderCovers[folder.path],
+                                            includedFolders = includedFolders,
+                                        )
+                                    }
+                                    gridItemsIndexed(
+                                        media,
+                                        key = { _, item -> "media:${item.id}" },
+                                        span = { _, _ -> GridItemSpan(GRID_SPAN_UNITS / mediaGridColumns) },
+                                    ) { _, item ->
+                                        MediaGridTile(
+                                            item = item,
+                                            isHidden = item.id in hiddenMediaIds,
+                                            isSelected = item.id in selectedMediaIds,
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -508,12 +563,17 @@ fun GalleryScreen(
                         // At least one of folders/media is in list view -- no unified drag-select
                         // grid gesture here (that only applies when both are grids); each row/tile
                         // gets its own tap/long-press instead, same as the all-list layout always has.
-                        LazyColumn(modifier = Modifier.fillMaxSize()) {
+                        //
+                        // Pinning to the bottom uses reverseLayout with the section order and each
+                        // section's own row order flipped (items *within* a row stay left-to-right,
+                        // normal) so the visual result is unchanged -- folders above media, both in
+                        // their usual order -- just anchored to the bottom when there's not enough
+                        // content to fill the screen, the same trick a chat screen uses to pin the
+                        // newest message to the bottom while scrolling normally.
+                        val folderSection: LazyListScope.() -> Unit = {
                             if (folderViewType == ViewType.GRID) {
-                                items(
-                                    folders.chunked(folderGridColumns),
-                                    key = { row -> "folderRow:" + row.joinToString("|") { it.path } },
-                                ) { row ->
+                                val rows = folders.chunked(folderGridColumns).let { if (pinContentToBottom) it.asReversed() else it }
+                                items(rows, key = { row -> "folderRow:" + row.joinToString("|") { it.path } }) { row ->
                                     Row(
                                         Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
                                         horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -541,7 +601,8 @@ fun GalleryScreen(
                                     }
                                 }
                             } else {
-                                items(folders, key = { "folder:${it.path}" }) { folder ->
+                                val ordered = if (pinContentToBottom) folders.asReversed() else folders
+                                items(ordered, key = { "folder:${it.path}" }) { folder ->
                                     FolderListRow(
                                         folder = folder,
                                         isHidden = folder.path in hiddenFolders,
@@ -560,11 +621,12 @@ fun GalleryScreen(
                                     )
                                 }
                             }
+                        }
+                        val mediaSection: LazyListScope.() -> Unit = {
                             if (mediaViewType == ViewType.GRID) {
-                                items(
-                                    media.withIndex().toList().chunked(mediaGridColumns),
-                                    key = { row -> "mediaRow:" + row.joinToString("|") { it.value.id.toString() } },
-                                ) { row ->
+                                val rows = media.withIndex().toList().chunked(mediaGridColumns)
+                                    .let { if (pinContentToBottom) it.asReversed() else it }
+                                items(rows, key = { row -> "mediaRow:" + row.joinToString("|") { it.value.id.toString() } }) { row ->
                                     Row(
                                         Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
                                         horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -590,7 +652,8 @@ fun GalleryScreen(
                                     }
                                 }
                             } else {
-                                itemsIndexed(media, key = { _, item -> "media:${item.id}" }) { index, item ->
+                                val ordered = media.withIndex().toList().let { if (pinContentToBottom) it.asReversed() else it }
+                                items(ordered, key = { (_, item) -> "media:${item.id}" }) { (index, item) ->
                                     MediaListRow(
                                         item = item,
                                         isHidden = item.id in hiddenMediaIds,
@@ -606,6 +669,15 @@ fun GalleryScreen(
                                         onLongClick = { viewModel.setMediaSelected(item.id, true) },
                                     )
                                 }
+                            }
+                        }
+                        LazyColumn(modifier = Modifier.fillMaxSize(), reverseLayout = pinContentToBottom) {
+                            if (pinContentToBottom) {
+                                mediaSection()
+                                folderSection()
+                            } else {
+                                folderSection()
+                                mediaSection()
                             }
                         }
                     }
@@ -627,13 +699,43 @@ private fun itemIndexAt(gridState: LazyGridState, position: Offset): Int? {
     return null
 }
 
-/** Folders are declared first in the grid, then media -- this mirrors that ordering to resolve a flat index. */
-private fun selectAt(flatIndex: Int, folders: List<FolderNode>, media: List<MediaItem>, viewModel: GalleryViewModel) {
-    if (flatIndex < folders.size) {
-        viewModel.setFolderSelected(folders[flatIndex].path, true)
-    } else {
-        media.getOrNull(flatIndex - folders.size)?.let { viewModel.setMediaSelected(it.id, true) }
+/**
+ * Maps a grid's flat Compose index back to the folder/media item it belongs to. Folders are
+ * declared first then media normally; when [pinToBottom] the grid is reverseLayout'd with media
+ * declared first (each block individually reversed too, see the grid's own declaration), so the
+ * index math flips to match -- see the LazyVerticalGrid call site for why.
+ */
+private fun folderOrMediaAt(
+    flatIndex: Int,
+    folders: List<FolderNode>,
+    media: List<MediaItem>,
+    pinToBottom: Boolean,
+): Pair<FolderNode?, MediaItem?> {
+    if (pinToBottom) {
+        return if (flatIndex < media.size) {
+            null to media[media.size - 1 - flatIndex]
+        } else {
+            val folderIndex = flatIndex - media.size
+            if (folderIndex < folders.size) folders[folders.size - 1 - folderIndex] to null else null to null
+        }
     }
+    return if (flatIndex < folders.size) {
+        folders[flatIndex] to null
+    } else {
+        null to media.getOrNull(flatIndex - folders.size)
+    }
+}
+
+private fun selectAt(
+    flatIndex: Int,
+    folders: List<FolderNode>,
+    media: List<MediaItem>,
+    viewModel: GalleryViewModel,
+    pinToBottom: Boolean,
+) {
+    val (folder, item) = folderOrMediaAt(flatIndex, folders, media, pinToBottom)
+    folder?.let { viewModel.setFolderSelected(it.path, true) }
+    item?.let { viewModel.setMediaSelected(it.id, true) }
 }
 
 /**
@@ -647,24 +749,25 @@ private fun openOrToggle(
     media: List<MediaItem>,
     viewModel: GalleryViewModel,
     path: String,
+    pinToBottom: Boolean,
     onOpenFolder: (String) -> Unit,
     onOpenMedia: (path: String, index: Int) -> Unit,
 ) {
     val isSelectionMode = viewModel.selectedMediaIds.value.isNotEmpty() || viewModel.selectedFolderPaths.value.isNotEmpty()
-    if (flatIndex < folders.size) {
-        val folder = folders[flatIndex]
+    val (folder, item) = folderOrMediaAt(flatIndex, folders, media, pinToBottom)
+    if (folder != null) {
         if (isSelectionMode) viewModel.toggleFolderSelection(folder.path) else onOpenFolder(folder.path)
-    } else {
-        val mediaIndex = flatIndex - folders.size
-        media.getOrNull(mediaIndex)?.let { item ->
-            if (isSelectionMode) viewModel.toggleMediaSelection(item.id) else onOpenMedia(path, mediaIndex)
-        }
+    } else if (item != null) {
+        val mediaIndex = media.indexOf(item)
+        if (isSelectionMode) viewModel.toggleMediaSelection(item.id) else onOpenMedia(path, mediaIndex)
     }
 }
 
 /** The sort order that actually applies at [path]: its own override if it has one, else the
- * nearest ancestor's override that was scoped to include subfolders, else the global default. */
-private fun effectiveFolderSort(
+ * nearest ancestor's override that was scoped to include subfolders, else the global default.
+ * Internal (not private) so the Move/Copy destination picker can sort its own folder list the
+ * exact same way the gallery itself would at that same path. */
+internal fun effectiveFolderSort(
     path: String,
     globalDefault: FolderSortOrder,
     overrides: Map<String, FolderSortOverride>,
@@ -679,7 +782,7 @@ private fun effectiveFolderSort(
     return globalDefault
 }
 
-private fun sortedFolders(folders: List<FolderNode>, order: FolderSortOrder, includedFolders: Set<String>): List<FolderNode> =
+internal fun sortedFolders(folders: List<FolderNode>, order: FolderSortOrder, includedFolders: Set<String>): List<FolderNode> =
     when (order) {
         FolderSortOrder.NAME_ASC -> folders.sortedBy { it.name.lowercase() }
         FolderSortOrder.NAME_DESC -> folders.sortedByDescending { it.name.lowercase() }
@@ -806,12 +909,10 @@ private fun SortScopeOption(label: String, onClick: () -> Unit) {
 private fun FolderCoverContent(folder: FolderNode, cover: FolderCover?, includedFolders: Set<String>) {
     if (cover is FolderCover.Text) {
         Box(Modifier.fillMaxSize().background(Color(cover.colorSeed)), contentAlignment = Alignment.Center) {
-            Text(
+            CoverText(
                 text = cover.text,
-                color = Color.White,
-                style = MaterialTheme.typography.titleMedium,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(8.dp),
+                baseStyle = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.fillMaxWidth().padding(8.dp),
             )
         }
         return
@@ -833,6 +934,28 @@ private fun FolderCoverContent(folder: FolderNode, cover: FolderCover?, included
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
+}
+
+/** A text folder cover's label, shrinking its font size step by step until it fits within
+ * [modifier]'s bounds (falling back to a 2-line ellipsis at the smallest size) so a long custom
+ * cover name never spills past the thumbnail it's drawn on, however small the tile or row is. */
+@Composable
+private fun CoverText(text: String, baseStyle: TextStyle, modifier: Modifier = Modifier) {
+    var fontScale by remember(text) { mutableFloatStateOf(1f) }
+    Text(
+        text = text,
+        color = Color.White,
+        style = baseStyle.copy(fontSize = baseStyle.fontSize * fontScale, lineHeight = baseStyle.lineHeight * fontScale),
+        textAlign = TextAlign.Center,
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier,
+        onTextLayout = { result ->
+            if ((result.didOverflowWidth || result.didOverflowHeight) && fontScale > 0.5f) {
+                fontScale *= 0.85f
+            }
+        },
+    )
 }
 
 /** A bottom-up fade used behind labels/badges drawn over a photo, so white text and icons stay
@@ -1027,12 +1150,10 @@ private fun GalleryListItem(
                     ),
             ) {
                 when {
-                    cover is FolderCover.Text -> Text(
-                        cover.text,
-                        color = Color.White,
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.align(Alignment.Center).padding(2.dp),
-                        textAlign = TextAlign.Center,
+                    cover is FolderCover.Text -> CoverText(
+                        text = cover.text,
+                        baseStyle = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.align(Alignment.Center).fillMaxWidth(0.9f).padding(2.dp),
                     )
                     thumbnailModel != null -> AsyncImage(
                         model = thumbnailModel,

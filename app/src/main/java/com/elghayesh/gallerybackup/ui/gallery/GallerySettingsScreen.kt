@@ -26,6 +26,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -57,6 +58,7 @@ fun GallerySettingsScreen(
     val mediaGridColumns by viewModel.mediaGridColumns.collectAsState()
     val folderRowSize by viewModel.folderRowSize.collectAsState()
     val mediaRowSize by viewModel.mediaRowSize.collectAsState()
+    val pinContentToBottom by viewModel.pinContentToBottom.collectAsState()
     val isCheckingForUpdate by UpdateCheckCoordinator.isChecking.collectAsState()
     val lastCheckFoundUpdate by UpdateCheckCoordinator.lastCheckFoundUpdate.collectAsState()
 
@@ -140,6 +142,26 @@ fun GallerySettingsScreen(
                         rowSize = mediaRowSize,
                         onRowSizeChange = { viewModel.setMediaRowSize(it) },
                     )
+                }
+                HorizontalDivider()
+            }
+
+            item {
+                Row(
+                    Modifier.fillMaxWidth().padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Pin content to the bottom", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "When a folder or list of photos doesn't fill the screen, anchor it to " +
+                                "the bottom instead of the top -- doesn't change sort order, just makes " +
+                                "short lists easier to reach with your thumb.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = pinContentToBottom, onCheckedChange = { viewModel.setPinContentToBottom(it) })
                 }
                 HorizontalDivider()
             }

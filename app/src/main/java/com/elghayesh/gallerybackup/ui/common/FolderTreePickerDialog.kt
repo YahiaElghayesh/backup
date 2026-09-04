@@ -39,10 +39,13 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.elghayesh.gallerybackup.data.media.FolderNode
 import com.elghayesh.gallerybackup.data.media.findNode
+import com.elghayesh.gallerybackup.data.media.promotedChildren
 import com.elghayesh.gallerybackup.data.settings.ViewType
 import com.elghayesh.gallerybackup.ui.gallery.FolderGridTile
 import com.elghayesh.gallerybackup.ui.gallery.FolderListRow
 import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
+import com.elghayesh.gallerybackup.ui.gallery.effectiveFolderSort
+import com.elghayesh.gallerybackup.ui.gallery.sortedFolders
 
 /**
  * A full-screen, navigable browser of the real folder tree for picking a Move to/Copy to
@@ -63,13 +66,22 @@ fun FolderTreePickerDialog(
     var currentPath by remember { mutableStateOf("") }
     var showCreateFolderDialog by remember { mutableStateOf(false) }
     val node = root?.findNode(currentPath)
-    val children = node?.children?.values?.sortedBy { it.name.lowercase() } ?: emptyList()
 
     val folderViewType by viewModel.folderViewType.collectAsState()
     val folderGridColumns by viewModel.folderGridColumns.collectAsState()
     val folderRowSize by viewModel.folderRowSize.collectAsState()
     val folderCovers by viewModel.folderCovers.collectAsState()
     val includedFolders by viewModel.includedFolders.collectAsState()
+    val folderSort by viewModel.folderSort.collectAsState()
+    val folderSortOverrides by viewModel.folderSortOverrides.collectAsState()
+
+    // Same promotion (a pinned folder is hidden from its real parent's own listing) and sort
+    // order the gallery itself would use browsing this same path, so a destination looks exactly
+    // like the folder it really is instead of a differently-ordered file-explorer view.
+    val children = remember(node, includedFolders, folderSort, folderSortOverrides, currentPath) {
+        val ownChildren = node?.promotedChildren(includedFolders) ?: emptyList()
+        sortedFolders(ownChildren, effectiveFolderSort(currentPath, folderSort, folderSortOverrides), includedFolders)
+    }
 
     if (showCreateFolderDialog) {
         CreateFolderDialog(
