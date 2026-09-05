@@ -96,6 +96,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
@@ -1269,6 +1270,21 @@ private val CoverTextShadow = Shadow(
     blurRadius = 6f,
 )
 
+/** True if wrapping [text] at [result]'s current font size split a word across two lines (e.g.
+ * "Telecom" rendering as "Teleco" / "m") rather than breaking at a space -- Compose's default line
+ * breaking still does this for a word wider than the container, and it doesn't count as
+ * [TextLayoutResult.didOverflowWidth]/[TextLayoutResult.didOverflowHeight] since each line
+ * technically fits. Treating it as its own "needs shrink" signal is what makes the font keep
+ * shrinking until the whole word fits on one line instead of settling for an ugly mid-word split. */
+private fun hasMidWordBreak(result: TextLayoutResult, text: String): Boolean {
+    for (line in 0 until result.lineCount - 1) {
+        val end = result.getLineEnd(line, visibleEnd = true)
+        if (end <= 0 || end >= text.length) continue
+        if (!text[end - 1].isWhitespace() && !text[end].isWhitespace()) return true
+    }
+    return false
+}
+
 /** A text folder cover's label, starting at [userScale] (the size the user picked in the cover
  * dialog) and shrinking further step by step until it fits within its own measured bounds -- both
  * width AND height -- so a long or large custom cover name never spills past the thumbnail it's
@@ -1319,7 +1335,9 @@ internal fun CoverText(
                     constraints = constraints,
                     maxLines = maxLines,
                 )
-                val needsShrink = result.didOverflowWidth || result.didOverflowHeight
+                val needsShrink = result.didOverflowWidth ||
+                    result.didOverflowHeight ||
+                    (wrap && hasMidWordBreak(result, text))
                 if (!needsShrink || fontSizeSp <= COVER_FONT_MIN_SIZE_SP) break
                 fontSizeSp = (fontSizeSp * COVER_FONT_SHRINK_STEP).coerceAtLeast(COVER_FONT_MIN_SIZE_SP)
             }
