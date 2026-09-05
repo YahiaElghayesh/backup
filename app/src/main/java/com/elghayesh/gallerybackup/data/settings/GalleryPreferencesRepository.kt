@@ -109,6 +109,7 @@ class GalleryPreferencesRepository(private val context: Context) {
         val FOLDER_COVERS_JSON = stringPreferencesKey("folder_covers_json")
         val FAVORITE_MEDIA_IDS = stringSetPreferencesKey("favorite_media_ids")
         val PIN_CONTENT_TO_BOTTOM = booleanPreferencesKey("pin_content_to_bottom")
+        val DATE_DIVIDER_FOLDERS = stringSetPreferencesKey("date_divider_folders")
     }
 
     private fun legacyViewType(prefs: androidx.datastore.preferences.core.Preferences): ViewType? =
@@ -215,6 +216,19 @@ class GalleryPreferencesRepository(private val context: Context) {
 
     suspend fun setPinContentToBottom(value: Boolean) {
         context.galleryPrefsStore.edit { it[Keys.PIN_CONTENT_TO_BOTTOM] = value }
+    }
+
+    /** Folders whose media listing groups by month/year, with a small divider label between each
+     * group -- opt-in per folder rather than global, since it only makes sense for folders with
+     * enough of a date spread to matter. */
+    val dateDividerFolders: Flow<Set<String>> =
+        context.galleryPrefsStore.data.map { it[Keys.DATE_DIVIDER_FOLDERS] ?: emptySet() }
+
+    suspend fun setFolderDateDividers(path: String, enabled: Boolean) {
+        context.galleryPrefsStore.edit { prefs ->
+            val current = prefs[Keys.DATE_DIVIDER_FOLDERS] ?: emptySet()
+            prefs[Keys.DATE_DIVIDER_FOLDERS] = if (enabled) current + path else current - path
+        }
     }
 
     suspend fun setFolderViewType(type: ViewType) {

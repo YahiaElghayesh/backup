@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -76,8 +77,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 import androidx.compose.ui.Alignment
@@ -177,6 +176,8 @@ fun GalleryScreen(
     val folderCovers by viewModel.folderCovers.collectAsState()
     val favoriteMediaIds by viewModel.favoriteMediaIds.collectAsState()
     val pinContentToBottom by viewModel.pinContentToBottom.collectAsState()
+    val dateDividerFolders by viewModel.dateDividerFolders.collectAsState()
+    val dateDividersEnabled = path in dateDividerFolders
     val node = visibleRoot?.findNode(path)
 
     // A pinned folder is promoted out of its real parent's listing wherever that parent is shown
@@ -247,27 +248,19 @@ fun GalleryScreen(
     // overflowing folder must always land at its actual top, never at the bottom needing to
     // scroll up.
     //
-    // This can only be decided once, right after the FIRST layout at the natural (non-reversed,
-    // scrolled-to-top) resting position, and then LOCKED until the folder/media content itself
-    // changes -- never re-derived from live scroll state on every recomposition. An earlier
-    // version re-checked visibleItemsInfo.size >= totalItemsCount continuously, which is only a
-    // valid "does this fit" signal AT that first rest position; re-evaluated mid-scroll on a
-    // genuinely overflowing list, it can briefly go true near either scroll extreme (e.g. the
-    // last screenful of a long list can itself "fit" the viewport), incorrectly flipping
-    // reverseLayout on and snapping the scroll position -- exactly the "keeps returning to the
-    // start while scrolling" bug that caused.
-    var gridFits by remember(folders, media) { mutableStateOf<Boolean?>(null) }
-    var listFits by remember(folders, media) { mutableStateOf<Boolean?>(null) }
-    LaunchedEffect(folders, media) {
-        val info = snapshotFlow { gridState.layoutInfo }.first { it.totalItemsCount > 0 }
-        gridFits = info.visibleItemsInfo.size >= info.totalItemsCount
-    }
-    LaunchedEffect(folders, media) {
-        val info = snapshotFlow { listState.layoutInfo }.first { it.totalItemsCount > 0 }
-        listFits = info.visibleItemsInfo.size >= info.totalItemsCount
-    }
-    fun gridPinToBottom(): Boolean = pinContentToBottom && gridFits == true
-    fun listPinToBottom(): Boolean = pinContentToBottom && listFits == true
+    // Implemented via alignment + a max-height bound instead of reverseLayout: the grid/list is
+    // given Modifier.heightIn(max = <viewport height>) and aligned to the bottom of its own
+    // BoxWithConstraints. A LazyColumn/LazyVerticalGrid measured with a loose (not exact) max
+    // height reports its OWN size as just enough for its content, up to that max -- so it
+    // naturally shrink-wraps (and the bottom alignment then pins it low) when content doesn't
+    // fill the viewport, and naturally clamps to the full max height (making the alignment a
+    // no-op, since it already fills the box) when content overflows. That means there's no
+    // separate "does it fit" check to get right, and nothing that needs to settle in after the
+    // first layout pass -- unlike the previous reverseLayout-based approach, which needed an
+    // async LaunchedEffect to measure fit (a likely source of the brief visual glitch on opening
+    // a folder) and needed every item index remapped to undo the reversal (a likely source of
+    // drag-select picking the neighbor on the wrong side while pinned). Content is now always
+    // declared in plain, unreversed order in both modes.
 
     if (showSortDialog) {
         SortDialog(
@@ -368,6 +361,13 @@ fun GalleryScreen(
                                 DropdownMenuItem(
                                     text = { Text("New folder here") },
                                     onClick = { overflowExpanded = false; showCreateFolderDialog = true },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(if (dateDividersEnabled) "Hide month/year dividers" else "Group by month/year") },
+                                    onClick = {
+                                        viewModel.setFolderDateDividers(path, !dateDividersEnabled)
+                                        overflowExpanded = false
+                                    },
                                 )
                                 DropdownMenuItem(
                                     text = { Text("Rescan device") },
@@ -494,7 +494,7 @@ fun GalleryScreen(
                 }
                 else -> {
                     if (folderViewType == ViewType.GRID && mediaViewType == ViewType.GRID) {
-                        Box(
+                        BoxWithConstraints(
                             Modifier
                                 .fillMaxSize()
                                 // Each tile owns its own tap/long-press via combinedClickable
@@ -514,16 +514,26 @@ fun GalleryScreen(
                                 // next, same as before.
                                 //
                                 // Keyed only on path (effectively constant for this screen's whole
-                                // lifetime) rather than on folders/media/pinContentToBottom -- those
-                                // are read live via currentFolders/currentMedia/gridPinToBottom()
-                                // instead, specifically so a selection change mid-drag (which
-                                // recomposes this screen and produces new folders/media list
-                                // instances) can never restart this gesture's coroutine and drop an
-                                // in-progress drag-select.
+                                // lifetime) rather than on folders/media -- those are read live via
+                                // currentFolders/currentMedia instead, specifically so a selection
+                                // change mid-drag (which recomposes this screen and produces new
+                                // folders/media list instances) can never restart this gesture's
+                                // coroutine and drop an in-progress drag-select.
                                 .pointerInput(path) {
                                     awaitEachGesture {
                                         val down = awaitFirstDown(requireUnconsumed = false)
                                         var pointerId = down.id
+                                        // Path of items visited by this drag so far, oldest first -- see
+                                        // applyDragHover's own doc comment for how it turns "hover back
+                                        // onto an earlier item" into "un-select everything since then".
+                                        // Seeded (along with the pre-existing-selection snapshot) the
+                                        // first time isDragSelecting is observed true, i.e. right after
+                                        // the long-press that started this drag already selected the
+                                        // anchor tile.
+                                        var dragStarted = false
+                                        val dragPath = mutableListOf<DragItemKey>()
+                                        var preExistingFolders = emptySet<String>()
+                                        var preExistingMedia = emptySet<Long>()
                                         while (true) {
                                             // Read (without consuming, unless already drag-selecting) on the
                                             // Initial pass -- parent-to-child, i.e. before each tile's own
@@ -539,8 +549,23 @@ fun GalleryScreen(
                                                 break
                                             }
                                             if (isDragSelecting) {
-                                                itemIndexAt(gridState, change.position)?.let {
-                                                    selectAt(it, currentFolders.value, currentMedia.value, viewModel, gridPinToBottom())
+                                                if (!dragStarted) {
+                                                    dragStarted = true
+                                                    preExistingFolders = viewModel.selectedFolderPaths.value
+                                                    preExistingMedia = viewModel.selectedMediaIds.value
+                                                    itemIndexAt(gridState, change.position)?.let { flatIndex ->
+                                                        dragItemKeyOf(folderOrMediaAt(flatIndex, currentFolders.value, currentMedia.value))
+                                                            ?.let { dragPath.add(it) }
+                                                    }
+                                                }
+                                                itemIndexAt(gridState, change.position)?.let { flatIndex ->
+                                                    applyDragHover(
+                                                        folderOrMediaAt(flatIndex, currentFolders.value, currentMedia.value),
+                                                        dragPath,
+                                                        preExistingFolders,
+                                                        preExistingMedia,
+                                                        viewModel,
+                                                    )
                                                 }
                                                 change.consume()
                                             }
@@ -566,88 +591,66 @@ fun GalleryScreen(
                                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                                 verticalArrangement = Arrangement.spacedBy(4.dp),
                                 userScrollEnabled = !isDragSelecting,
-                                // Declaration order flips together with reverseLayout (media block
-                                // first, each block internally reversed too) so the *visual* result
-                                // is still folders-then-media in their normal order, just anchored to
-                                // the bottom of the viewport instead of the top when it's not full --
-                                // see selectAt/openOrToggle for the matching index math. Only actually
-                                // kicks in once gridPinToBottom() confirms the content doesn't already
-                                // fill the viewport -- see its own doc comment above.
-                                reverseLayout = gridPinToBottom(),
-                                modifier = Modifier.fillMaxSize(),
+                                modifier = Modifier
+                                    .align(if (pinContentToBottom) Alignment.BottomStart else Alignment.TopStart)
+                                    .fillMaxWidth()
+                                    .then(
+                                        if (pinContentToBottom) Modifier.heightIn(max = maxHeight) else Modifier.fillMaxHeight(),
+                                    ),
                             ) {
-                                if (gridPinToBottom()) {
-                                    gridItems(
-                                        media.asReversed(),
-                                        key = { "media:${it.id}" },
-                                        span = { GridItemSpan(GRID_SPAN_UNITS / mediaGridColumns) },
-                                    ) { item ->
-                                        MediaGridTile(
-                                            item = item,
-                                            isHidden = item.id in hiddenMediaIds,
-                                            isSelected = item.id in selectedMediaIds,
-                                            onClick = {
-                                                if (isSelectionMode) {
-                                                    viewModel.toggleMediaSelection(item.id)
-                                                } else {
-                                                    onOpenMedia(path, media.indexOf(item))
-                                                }
-                                            },
-                                            onLongClick = {
-                                                isDragSelecting = true
-                                                viewModel.setMediaSelected(item.id, true)
-                                            },
-                                        )
-                                    }
-                                    gridItems(
-                                        folders.asReversed(),
-                                        key = { "folder:${it.path}" },
-                                        span = { GridItemSpan(GRID_SPAN_UNITS / folderGridColumns) },
-                                    ) { folder ->
-                                        FolderGridTile(
-                                            folder = folder,
-                                            isHidden = folder.path in hiddenFolders,
-                                            isSelected = folder.path in selectedFolderPaths,
-                                            cover = folderCovers[folder.path],
-                                            includedFolders = includedFolders,
-                                            onClick = {
-                                                if (isSelectionMode) {
-                                                    viewModel.toggleFolderSelection(folder.path)
-                                                } else {
-                                                    onOpenFolder(folder.path)
-                                                }
-                                            },
-                                            onLongClick = {
-                                                isDragSelecting = true
-                                                viewModel.setFolderSelected(folder.path, true)
-                                            },
-                                        )
+                                gridItems(
+                                    folders,
+                                    key = { "folder:${it.path}" },
+                                    span = { GridItemSpan(GRID_SPAN_UNITS / folderGridColumns) },
+                                ) { folder ->
+                                    FolderGridTile(
+                                        folder = folder,
+                                        isHidden = folder.path in hiddenFolders,
+                                        isSelected = folder.path in selectedFolderPaths,
+                                        cover = folderCovers[folder.path],
+                                        includedFolders = includedFolders,
+                                        onClick = {
+                                            if (isSelectionMode) {
+                                                viewModel.toggleFolderSelection(folder.path)
+                                            } else {
+                                                onOpenFolder(folder.path)
+                                            }
+                                        },
+                                        onLongClick = {
+                                            isDragSelecting = true
+                                            viewModel.setFolderSelected(folder.path, true)
+                                        },
+                                    )
+                                }
+                                if (dateDividersEnabled) {
+                                    groupMediaByMonth(media).forEach { (label, group) ->
+                                        item(key = "divider:$label", span = { GridItemSpan(GRID_SPAN_UNITS) }) {
+                                            DateDividerLabel(label)
+                                        }
+                                        gridItemsIndexed(
+                                            group,
+                                            key = { _, item -> "media:${item.id}" },
+                                            span = { _, _ -> GridItemSpan(GRID_SPAN_UNITS / mediaGridColumns) },
+                                        ) { _, item ->
+                                            MediaGridTile(
+                                                item = item,
+                                                isHidden = item.id in hiddenMediaIds,
+                                                isSelected = item.id in selectedMediaIds,
+                                                onClick = {
+                                                    if (isSelectionMode) {
+                                                        viewModel.toggleMediaSelection(item.id)
+                                                    } else {
+                                                        onOpenMedia(path, media.indexOf(item))
+                                                    }
+                                                },
+                                                onLongClick = {
+                                                    isDragSelecting = true
+                                                    viewModel.setMediaSelected(item.id, true)
+                                                },
+                                            )
+                                        }
                                     }
                                 } else {
-                                    gridItems(
-                                        folders,
-                                        key = { "folder:${it.path}" },
-                                        span = { GridItemSpan(GRID_SPAN_UNITS / folderGridColumns) },
-                                    ) { folder ->
-                                        FolderGridTile(
-                                            folder = folder,
-                                            isHidden = folder.path in hiddenFolders,
-                                            isSelected = folder.path in selectedFolderPaths,
-                                            cover = folderCovers[folder.path],
-                                            includedFolders = includedFolders,
-                                            onClick = {
-                                                if (isSelectionMode) {
-                                                    viewModel.toggleFolderSelection(folder.path)
-                                                } else {
-                                                    onOpenFolder(folder.path)
-                                                }
-                                            },
-                                            onLongClick = {
-                                                isDragSelecting = true
-                                                viewModel.setFolderSelected(folder.path, true)
-                                            },
-                                        )
-                                    }
                                     gridItemsIndexed(
                                         media,
                                         key = { _, item -> "media:${item.id}" },
@@ -683,15 +686,12 @@ fun GalleryScreen(
                         // combinedClickable, and the wrapping Box's pointerInput below only takes
                         // over to extend the selection once a long-press has already fired.
                         //
-                        // Pinning to the bottom uses reverseLayout with the section order and each
-                        // section's own row order flipped (items *within* a row stay left-to-right,
-                        // normal) so the visual result is unchanged -- folders above media, both in
-                        // their usual order -- just anchored to the bottom when there's not enough
-                        // content to fill the screen, the same trick a chat screen uses to pin the
-                        // newest message to the bottom while scrolling normally.
+                        // Pin-to-bottom sizing (heightIn(max) + bottom alignment) is applied to the
+                        // LazyColumn itself below -- content here is always declared in plain,
+                        // unreversed order (folders above media, both in their usual order).
                         val folderSection: LazyListScope.() -> Unit = {
                             if (folderViewType == ViewType.GRID) {
-                                val rows = folders.chunked(folderGridColumns).let { if (listPinToBottom()) it.asReversed() else it }
+                                val rows = folders.chunked(folderGridColumns)
                                 items(rows, key = { row -> "folderRow:" + row.joinToString("|") { it.path } }) { row ->
                                     Row(
                                         Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
@@ -723,8 +723,7 @@ fun GalleryScreen(
                                     }
                                 }
                             } else {
-                                val ordered = if (listPinToBottom()) folders.asReversed() else folders
-                                items(ordered, key = { "folder:${it.path}" }) { folder ->
+                                items(folders, key = { "folder:${it.path}" }) { folder ->
                                     FolderListRow(
                                         folder = folder,
                                         isHidden = folder.path in hiddenFolders,
@@ -749,39 +748,77 @@ fun GalleryScreen(
                         }
                         val mediaSection: LazyListScope.() -> Unit = {
                             if (mediaViewType == ViewType.GRID) {
-                                val rows = media.withIndex().toList().chunked(mediaGridColumns)
-                                    .let { if (listPinToBottom()) it.asReversed() else it }
-                                items(rows, key = { row -> "mediaRow:" + row.joinToString("|") { it.value.id.toString() } }) { row ->
-                                    Row(
-                                        Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                    ) {
-                                        row.forEach { (index, item) ->
-                                            Box(Modifier.weight(1f)) {
-                                                MediaGridTile(
-                                                    item = item,
-                                                    isHidden = item.id in hiddenMediaIds,
-                                                    isSelected = item.id in selectedMediaIds,
-                                                    onClick = {
-                                                        if (isSelectionMode) {
-                                                            viewModel.toggleMediaSelection(item.id)
-                                                        } else {
-                                                            onOpenMedia(path, index)
-                                                        }
-                                                    },
-                                                    onLongClick = {
-                                                        isDragSelecting = true
-                                                        viewModel.setMediaSelected(item.id, true)
-                                                    },
-                                                )
-                                            }
+                                // Each date group is chunked into rows independently (rather than
+                                // chunking the whole flat list and only then looking for where a
+                                // month boundary falls) so a row never straddles two different
+                                // months -- the last, possibly-partial row of a group already
+                                // pads out with spacers the same way the final row of the whole
+                                // list normally does.
+                                val groupedRows: List<Pair<String?, List<IndexedValue<MediaItem>>>> =
+                                    if (dateDividersEnabled) {
+                                        groupMediaByMonth(media).flatMap { (label, group) ->
+                                            val indexed = group.map { IndexedValue(media.indexOf(it), it) }
+                                            listOf(label to emptyList<IndexedValue<MediaItem>>()) +
+                                                indexed.chunked(mediaGridColumns).map { null to it }
                                         }
-                                        repeat(mediaGridColumns - row.size) { Spacer(Modifier.weight(1f)) }
+                                    } else {
+                                        media.withIndex().toList().chunked(mediaGridColumns).map { null to it }
+                                    }
+                                items(
+                                    groupedRows,
+                                    key = { (label, row) ->
+                                        if (label != null) "divider:$label" else "mediaRow:" + row.joinToString("|") { it.value.id.toString() }
+                                    },
+                                ) { (label, row) ->
+                                    if (label != null) {
+                                        DateDividerLabel(label)
+                                    } else {
+                                        Row(
+                                            Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        ) {
+                                            row.forEach { (index, item) ->
+                                                Box(Modifier.weight(1f)) {
+                                                    MediaGridTile(
+                                                        item = item,
+                                                        isHidden = item.id in hiddenMediaIds,
+                                                        isSelected = item.id in selectedMediaIds,
+                                                        onClick = {
+                                                            if (isSelectionMode) {
+                                                                viewModel.toggleMediaSelection(item.id)
+                                                            } else {
+                                                                onOpenMedia(path, index)
+                                                            }
+                                                        },
+                                                        onLongClick = {
+                                                            isDragSelecting = true
+                                                            viewModel.setMediaSelected(item.id, true)
+                                                        },
+                                                    )
+                                                }
+                                            }
+                                            repeat(mediaGridColumns - row.size) { Spacer(Modifier.weight(1f)) }
+                                        }
                                     }
                                 }
                             } else {
-                                val ordered = media.withIndex().toList().let { if (listPinToBottom()) it.asReversed() else it }
-                                items(ordered, key = { (_, item) -> "media:${item.id}" }) { (index, item) ->
+                                val groupedItems: List<Pair<String?, IndexedValue<MediaItem>?>> =
+                                    if (dateDividersEnabled) {
+                                        groupMediaByMonth(media).flatMap { (label, group) ->
+                                            listOf(label to null) + group.map { null to IndexedValue(media.indexOf(it), it) }
+                                        }
+                                    } else {
+                                        media.withIndex().toList().map { null to it }
+                                    }
+                                items(
+                                    groupedItems,
+                                    key = { (label, entry) -> if (label != null) "divider:$label" else "media:${entry!!.value.id}" },
+                                ) { (label, entry) ->
+                                    if (label != null) {
+                                        DateDividerLabel(label)
+                                        return@items
+                                    }
+                                    val (index, item) = entry!!
                                     MediaListRow(
                                         item = item,
                                         isHidden = item.id in hiddenMediaIds,
@@ -802,7 +839,7 @@ fun GalleryScreen(
                                 }
                             }
                         }
-                        Box(
+                        BoxWithConstraints(
                             Modifier
                                 .fillMaxSize()
                                 // Keyed only on path, same reasoning as the grid+grid branch's own
@@ -814,6 +851,12 @@ fun GalleryScreen(
                                     awaitEachGesture {
                                         val down = awaitFirstDown(requireUnconsumed = false)
                                         var pointerId = down.id
+                                        // See the grid+grid branch's own pointerInput above for what
+                                        // this tracks and why.
+                                        var dragStarted = false
+                                        val dragPath = mutableListOf<DragItemKey>()
+                                        var preExistingFolders = emptySet<String>()
+                                        var preExistingMedia = emptySet<Long>()
                                         while (true) {
                                             val event = awaitPointerEvent(PointerEventPass.Initial)
                                             val change = event.changes.firstOrNull { it.id == pointerId } ?: break
@@ -823,11 +866,27 @@ fun GalleryScreen(
                                                 break
                                             }
                                             if (isDragSelecting) {
-                                                val pair = folderOrMediaAtListPosition(
-                                                    listState, change.position, size.width.toFloat(), clearancePx,
-                                                    currentFolders.value, currentMedia.value,
+                                                if (!dragStarted) {
+                                                    dragStarted = true
+                                                    preExistingFolders = viewModel.selectedFolderPaths.value
+                                                    preExistingMedia = viewModel.selectedMediaIds.value
+                                                    dragItemKeyOf(
+                                                        folderOrMediaAtListPosition(
+                                                            listState, change.position, size.width.toFloat(), clearancePx,
+                                                            currentFolders.value, currentMedia.value,
+                                                        ),
+                                                    )?.let { dragPath.add(it) }
+                                                }
+                                                applyDragHover(
+                                                    folderOrMediaAtListPosition(
+                                                        listState, change.position, size.width.toFloat(), clearancePx,
+                                                        currentFolders.value, currentMedia.value,
+                                                    ),
+                                                    dragPath,
+                                                    preExistingFolders,
+                                                    preExistingMedia,
+                                                    viewModel,
                                                 )
-                                                selectPair(pair, viewModel)
                                                 change.consume()
                                             }
                                             pointerId = change.id
@@ -837,20 +896,19 @@ fun GalleryScreen(
                         ) {
                             LazyColumn(
                                 state = listState,
-                                modifier = Modifier.fillMaxSize(),
-                                reverseLayout = listPinToBottom(),
                                 userScrollEnabled = !isDragSelecting,
                                 // End clearance so no row renders behind the fast-scrollbar overlaid
                                 // on top of this Box -- see FastScrollbar below.
                                 contentPadding = PaddingValues(end = FAST_SCROLLBAR_CLEARANCE),
+                                modifier = Modifier
+                                    .align(if (pinContentToBottom) Alignment.BottomStart else Alignment.TopStart)
+                                    .fillMaxWidth()
+                                    .then(
+                                        if (pinContentToBottom) Modifier.heightIn(max = maxHeight) else Modifier.fillMaxHeight(),
+                                    ),
                             ) {
-                                if (listPinToBottom()) {
-                                    mediaSection()
-                                    folderSection()
-                                } else {
-                                    folderSection()
-                                    mediaSection()
-                                }
+                                folderSection()
+                                mediaSection()
                             }
                             FastScrollbar(
                                 listState = listState,
@@ -887,8 +945,15 @@ private fun FastScrollbar(gridState: LazyGridState, modifier: Modifier = Modifie
         onDragToFraction = { fraction ->
             val total = gridState.layoutInfo.totalItemsCount
             if (total > 0) {
-                val target = (fraction * total).roundToInt().coerceIn(0, total - 1)
-                scope.launch { gridState.scrollToItem(target) }
+                // A continuous (fractional) target, split into a whole item index plus a
+                // sub-item pixel offset within it, rather than rounding to the nearest whole
+                // item -- rounding is what made the old version visibly jump in discrete
+                // per-item steps instead of tracking the thumb's exact drag position.
+                val continuousIndex = (fraction * total).coerceIn(0f, (total - 1).toFloat())
+                val targetIndex = continuousIndex.toInt()
+                val itemSizePx = gridState.layoutInfo.visibleItemsInfo.firstOrNull()?.size?.height?.takeIf { it > 0 } ?: 1
+                val withinItemOffsetPx = ((continuousIndex - targetIndex) * itemSizePx).roundToInt()
+                scope.launch { gridState.scrollToItem(targetIndex, withinItemOffsetPx) }
             }
         },
         modifier = modifier,
@@ -907,8 +972,11 @@ private fun FastScrollbar(listState: LazyListState, modifier: Modifier = Modifie
         onDragToFraction = { fraction ->
             val total = listState.layoutInfo.totalItemsCount
             if (total > 0) {
-                val target = (fraction * total).roundToInt().coerceIn(0, total - 1)
-                scope.launch { listState.scrollToItem(target) }
+                val continuousIndex = (fraction * total).coerceIn(0f, (total - 1).toFloat())
+                val targetIndex = continuousIndex.toInt()
+                val itemSizePx = listState.layoutInfo.visibleItemsInfo.firstOrNull()?.size?.takeIf { it > 0 } ?: 1
+                val withinItemOffsetPx = ((continuousIndex - targetIndex) * itemSizePx).roundToInt()
+                scope.launch { listState.scrollToItem(targetIndex, withinItemOffsetPx) }
             }
         },
         modifier = modifier,
@@ -972,26 +1040,13 @@ private fun itemIndexAt(gridState: LazyGridState, position: Offset): Int? {
     return null
 }
 
-/**
- * Maps a grid's flat Compose index back to the folder/media item it belongs to. Folders are
- * declared first then media normally; when [pinToBottom] the grid is reverseLayout'd with media
- * declared first (each block individually reversed too, see the grid's own declaration), so the
- * index math flips to match -- see the LazyVerticalGrid call site for why.
- */
+/** Maps a grid's flat Compose index back to the folder/media item it belongs to (folders declared
+ * first, then media). */
 private fun folderOrMediaAt(
     flatIndex: Int,
     folders: List<FolderNode>,
     media: List<MediaItem>,
-    pinToBottom: Boolean,
 ): Pair<FolderNode?, MediaItem?> {
-    if (pinToBottom) {
-        return if (flatIndex < media.size) {
-            null to media[media.size - 1 - flatIndex]
-        } else {
-            val folderIndex = flatIndex - media.size
-            if (folderIndex < folders.size) folders[folders.size - 1 - folderIndex] to null else null to null
-        }
-    }
     return if (flatIndex < folders.size) {
         folders[flatIndex] to null
     } else {
@@ -999,16 +1054,58 @@ private fun folderOrMediaAt(
     }
 }
 
-private fun selectAt(
-    flatIndex: Int,
-    folders: List<FolderNode>,
-    media: List<MediaItem>,
+/** A folder or media item's identity for drag-select's own hover-path tracking (see
+ * [applyDragHover]) -- independent of any index math, so it stays valid across both the flat-grid
+ * and key-based list resolvers. */
+private sealed class DragItemKey {
+    data class Folder(val path: String) : DragItemKey()
+    data class Media(val id: Long) : DragItemKey()
+}
+
+private fun DragItemKey.setSelected(viewModel: GalleryViewModel, selected: Boolean) {
+    when (this) {
+        is DragItemKey.Folder -> viewModel.setFolderSelected(path, selected)
+        is DragItemKey.Media -> viewModel.setMediaSelected(id, selected)
+    }
+}
+
+private fun dragItemKeyOf(pair: Pair<FolderNode?, MediaItem?>?): DragItemKey? = when {
+    pair?.first != null -> DragItemKey.Folder(pair.first!!.path)
+    pair?.second != null -> DragItemKey.Media(pair.second!!.id)
+    else -> null
+}
+
+/**
+ * Applies one drag-select hover position as a step in an undo-style path: hovering onto an item
+ * not yet visited this drag selects it and appends it to [path]; hovering back onto an item
+ * already earlier in [path] deselects everything visited after it and truncates back to that
+ * point. That's what makes dragging out over a run of items and then dragging back the way you
+ * came un-select them again, instead of every item the finger ever passed over staying selected
+ * regardless of direction. Never deselects anything in [preExistingFolders]/[preExistingMedia] --
+ * selected before this drag gesture even began -- even if the drag happens to pass back over it.
+ */
+private fun applyDragHover(
+    pair: Pair<FolderNode?, MediaItem?>?,
+    path: MutableList<DragItemKey>,
+    preExistingFolders: Set<String>,
+    preExistingMedia: Set<Long>,
     viewModel: GalleryViewModel,
-    pinToBottom: Boolean,
 ) {
-    val (folder, item) = folderOrMediaAt(flatIndex, folders, media, pinToBottom)
-    folder?.let { viewModel.setFolderSelected(it.path, true) }
-    item?.let { viewModel.setMediaSelected(it.id, true) }
+    val key = dragItemKeyOf(pair) ?: return
+    val existingIndex = path.indexOf(key)
+    if (existingIndex != -1) {
+        while (path.size > existingIndex + 1) {
+            val popped = path.removeAt(path.size - 1)
+            val stillPreExisting = when (popped) {
+                is DragItemKey.Folder -> popped.path in preExistingFolders
+                is DragItemKey.Media -> popped.id in preExistingMedia
+            }
+            if (!stillPreExisting) popped.setSelected(viewModel, false)
+        }
+    } else {
+        path.add(key)
+        key.setSelected(viewModel, true)
+    }
 }
 
 /**
@@ -1017,9 +1114,7 @@ private fun selectAt(
  * rather than a flat index -- a row is either a single [FolderListRow]/[MediaListRow] (key
  * "folder:<path>"/"media:<id>") or a chunk of grid tiles packed into one Row (key
  * "folderRow:<path>|<path>..."/"mediaRow:<id>|<id>..."), so the horizontal position within the row
- * picks out which folder/media that chunk's touch actually landed on. Resolving via the key
- * (which already reflects [listPinToBottom]'s reversed order) means no separate pinToBottom
- * parameter is needed here, unlike the pure-grid version.
+ * picks out which folder/media that chunk's touch actually landed on.
  */
 private fun folderOrMediaAtListPosition(
     listState: LazyListState,
@@ -1052,11 +1147,6 @@ private fun folderOrMediaAtListPosition(
     }
 }
 
-private fun selectPair(pair: Pair<FolderNode?, MediaItem?>?, viewModel: GalleryViewModel) {
-    pair?.first?.let { viewModel.setFolderSelected(it.path, true) }
-    pair?.second?.let { viewModel.setMediaSelected(it.id, true) }
-}
-
 /** The sort order that actually applies at [path]: its own override if it has one, else the
  * nearest ancestor's override that was scoped to include subfolders, else the global default.
  * Internal (not private) so the Move/Copy destination picker can sort its own folder list the
@@ -1085,6 +1175,45 @@ internal fun sortedFolders(folders: List<FolderNode>, order: FolderSortOrder, in
         FolderSortOrder.COUNT_DESC -> folders.sortedByDescending { it.promotionAwareItemCount(includedFolders) }
         FolderSortOrder.COUNT_ASC -> folders.sortedBy { it.promotionAwareItemCount(includedFolders) }
     }
+
+/** Groups already-ordered [media] into consecutive runs sharing the same calendar month and year
+ * (e.g. "September 2026"), for the optional per-folder "group by month/year" display -- a run
+ * breaks the moment the label changes, so this only makes sense applied to a list already sorted
+ * by date (ascending or descending both work, just with the groups appearing in that same order). */
+private fun groupMediaByMonth(media: List<MediaItem>): List<Pair<String, List<MediaItem>>> {
+    if (media.isEmpty()) return emptyList()
+    val formatter = java.text.SimpleDateFormat("MMMM yyyy", java.util.Locale.getDefault())
+    val groups = mutableListOf<Pair<String, MutableList<MediaItem>>>()
+    for (item in media) {
+        val label = formatter.format(java.util.Date(item.dateModifiedSec * 1000))
+        val lastGroup = groups.lastOrNull()
+        if (lastGroup != null && lastGroup.first == label) {
+            lastGroup.second.add(item)
+        } else {
+            groups.add(label to mutableListOf(item))
+        }
+    }
+    return groups
+}
+
+/** The small "September 2026"-style label + line the "group by month/year" folder option draws
+ * between each date group. */
+@Composable
+private fun DateDividerLabel(text: String, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(text, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.width(8.dp))
+        Box(
+            Modifier
+                .weight(1f)
+                .height(1.dp)
+                .background(MaterialTheme.colorScheme.outlineVariant),
+        )
+    }
+}
 
 private fun breadcrumbTitle(path: String): String {
     val realPath = path.removeSuffix("/.")
