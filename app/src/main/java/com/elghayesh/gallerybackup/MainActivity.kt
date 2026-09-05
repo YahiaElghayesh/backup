@@ -40,6 +40,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.navigation.NavController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -192,6 +194,34 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/**
+ * Every screen transition in this app's NavHost animates (the default Navigation Compose
+ * crossfade/slide), which takes a moment to actually settle -- during that window the
+ * destination that triggered it is in the STARTED lifecycle state, not yet RESUMED. A second
+ * navigate() call landing in that window (a genuine double-tap, or a single tap somehow producing
+ * two click events -- gesture ambiguity across a tap and a long-press timer racing each other can
+ * do this) doesn't get rejected by NavController on its own: it's simply pushed as a second
+ * transition on top of the first, before the first one ever finished. That's what was actually
+ * behind three seemingly unrelated glitches all being reported for the same action of opening a
+ * folder: the second navigate() interrupting the first's still-playing transition is why the
+ * animation was inconsistent (sometimes visibly cut short, sometimes not triggered at all if it
+ * landed early enough); and since a folder's own screen is often already composed and laid out
+ * behind that still-finishing transition, a second click can land on ITS content instead of the
+ * tile that was actually tapped -- opening a media item that happens to be at that same screen
+ * position instead of the folder, or a different folder tile than the one under the finger. None
+ * of this was a hit-testing bug in the gallery grid itself (already rewritten twice this session);
+ * it's specifically about a second, redundant navigation call being allowed to fire while the
+ * first hadn't settled yet. Routing every forward navigation through this guard -- which only
+ * calls through once the current back stack entry has actually reached RESUMED, i.e. its own
+ * transition is done -- makes a second call while one is still in flight a no-op instead of a
+ * second, conflicting destination change.
+ */
+private fun NavController.navigateSafely(route: String) {
+    if (currentBackStackEntry?.lifecycle?.currentState == Lifecycle.State.RESUMED) {
+        navigate(route)
+    }
+}
+
 @Composable
 private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: BackupViewModel) {
     val navController = rememberNavController()
@@ -205,19 +235,19 @@ private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: Back
                 path = path,
                 viewModel = galleryViewModel,
                 onOpenFolder = { newPath ->
-                    navController.navigate("gallery/${URLEncoder.encode(newPath, "UTF-8")}")
+                    navController.navigateSafely("gallery/${URLEncoder.encode(newPath, "UTF-8")}")
                 },
                 onOpenMedia = { folderPath, index ->
-                    navController.navigate("viewer/${URLEncoder.encode(folderPath, "UTF-8")}/$index")
+                    navController.navigateSafely("viewer/${URLEncoder.encode(folderPath, "UTF-8")}/$index")
                 },
-                onOpenGallerySettings = { navController.navigate("gallerySettings") },
-                onOpenBackupSettings = { navController.navigate("backupSettings") },
-                onOpenTrash = { navController.navigate("trash") },
+                onOpenGallerySettings = { navController.navigateSafely("gallerySettings") },
+                onOpenBackupSettings = { navController.navigateSafely("backupSettings") },
+                onOpenTrash = { navController.navigateSafely("trash") },
                 onEditPhoto = { folderPath, index ->
-                    navController.navigate("editPhoto/${URLEncoder.encode(folderPath, "UTF-8")}/$index")
+                    navController.navigateSafely("editPhoto/${URLEncoder.encode(folderPath, "UTF-8")}/$index")
                 },
                 onEditVideo = { folderPath, index ->
-                    navController.navigate("trimVideo/${URLEncoder.encode(folderPath, "UTF-8")}/$index")
+                    navController.navigateSafely("trimVideo/${URLEncoder.encode(folderPath, "UTF-8")}/$index")
                 },
                 onNavigateUp = { navController.popBackStack() },
             )
@@ -236,10 +266,10 @@ private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: Back
                 startIndex = index,
                 viewModel = galleryViewModel,
                 onEditPhoto = { folderPath, itemIndex ->
-                    navController.navigate("editPhoto/${URLEncoder.encode(folderPath, "UTF-8")}/$itemIndex")
+                    navController.navigateSafely("editPhoto/${URLEncoder.encode(folderPath, "UTF-8")}/$itemIndex")
                 },
                 onEditVideo = { folderPath, itemIndex ->
-                    navController.navigate("trimVideo/${URLEncoder.encode(folderPath, "UTF-8")}/$itemIndex")
+                    navController.navigateSafely("trimVideo/${URLEncoder.encode(folderPath, "UTF-8")}/$itemIndex")
                 },
                 onBack = { navController.popBackStack() },
             )
@@ -247,7 +277,7 @@ private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: Back
         composable("backupSettings") {
             BackupSettingsScreen(
                 backupViewModel = backupViewModel,
-                onOpenFolderExplorer = { navController.navigate("backupFolderExplorer") },
+                onOpenFolderExplorer = { navController.navigateSafely("backupFolderExplorer") },
                 onBack = { navController.popBackStack() },
             )
         }
@@ -261,7 +291,7 @@ private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: Back
         composable("gallerySettings") {
             GallerySettingsScreen(
                 viewModel = galleryViewModel,
-                onOpenFolderExplorer = { navController.navigate("folderExplorer") },
+                onOpenFolderExplorer = { navController.navigateSafely("folderExplorer") },
                 onBack = { navController.popBackStack() },
             )
         }
