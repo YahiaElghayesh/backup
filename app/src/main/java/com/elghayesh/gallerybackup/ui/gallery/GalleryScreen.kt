@@ -96,7 +96,11 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
@@ -106,6 +110,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.elghayesh.gallerybackup.R
 import com.elghayesh.gallerybackup.data.media.FolderNode
 import com.elghayesh.gallerybackup.data.media.MediaItem
 import com.elghayesh.gallerybackup.data.media.allItemsRecursive
@@ -668,9 +673,11 @@ fun GalleryScreen(
                             )
                         }
                     } else {
-                        // At least one of folders/media is in list view -- no unified drag-select
-                        // grid gesture here (that only applies when both are grids); each row/tile
-                        // gets its own tap/long-press instead, same as the all-list layout always has.
+                        // At least one of folders/media is in list view. Same unified down/long-
+                        // press/drag gesture as the grid+grid branch above (see its own comment for
+                        // why one detector has to own the whole down-to-up lifecycle) -- rows/tiles
+                        // here get no onClick/onLongClick of their own, relying entirely on the
+                        // wrapping Box's pointerInput below.
                         //
                         // Pinning to the bottom uses reverseLayout with the section order and each
                         // section's own row order flipped (items *within* a row stay left-to-right,
@@ -694,14 +701,6 @@ fun GalleryScreen(
                                                     isSelected = folder.path in selectedFolderPaths,
                                                     cover = folderCovers[folder.path],
                                                     includedFolders = includedFolders,
-                                                    onClick = {
-                                                        if (isSelectionMode) {
-                                                            viewModel.toggleFolderSelection(folder.path)
-                                                        } else {
-                                                            onOpenFolder(folder.path)
-                                                        }
-                                                    },
-                                                    onLongClick = { viewModel.setFolderSelected(folder.path, true) },
                                                 )
                                             }
                                         }
@@ -718,14 +717,6 @@ fun GalleryScreen(
                                         cover = folderCovers[folder.path],
                                         includedFolders = includedFolders,
                                         thumbnailSizeDp = folderRowSize,
-                                        onClick = {
-                                            if (isSelectionMode) {
-                                                viewModel.toggleFolderSelection(folder.path)
-                                            } else {
-                                                onOpenFolder(folder.path)
-                                            }
-                                        },
-                                        onLongClick = { viewModel.setFolderSelected(folder.path, true) },
                                     )
                                 }
                             }
@@ -739,20 +730,12 @@ fun GalleryScreen(
                                         Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
                                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                                     ) {
-                                        row.forEach { (index, item) ->
+                                        row.forEach { (_, item) ->
                                             Box(Modifier.weight(1f)) {
                                                 MediaGridTile(
                                                     item = item,
                                                     isHidden = item.id in hiddenMediaIds,
                                                     isSelected = item.id in selectedMediaIds,
-                                                    onClick = {
-                                                        if (isSelectionMode) {
-                                                            viewModel.toggleMediaSelection(item.id)
-                                                        } else {
-                                                            onOpenMedia(path, index)
-                                                        }
-                                                    },
-                                                    onLongClick = { viewModel.setMediaSelected(item.id, true) },
                                                 )
                                             }
                                         }
@@ -761,29 +744,76 @@ fun GalleryScreen(
                                 }
                             } else {
                                 val ordered = media.withIndex().toList().let { if (listPinToBottom()) it.asReversed() else it }
-                                items(ordered, key = { (_, item) -> "media:${item.id}" }) { (index, item) ->
+                                items(ordered, key = { (_, item) -> "media:${item.id}" }) { (_, item) ->
                                     MediaListRow(
                                         item = item,
                                         isHidden = item.id in hiddenMediaIds,
                                         isSelected = item.id in selectedMediaIds,
                                         thumbnailSizeDp = mediaRowSize,
-                                        onClick = {
-                                            if (isSelectionMode) {
-                                                viewModel.toggleMediaSelection(item.id)
-                                            } else {
-                                                onOpenMedia(path, index)
-                                            }
-                                        },
-                                        onLongClick = { viewModel.setMediaSelected(item.id, true) },
                                     )
                                 }
                             }
                         }
-                        Box(Modifier.fillMaxSize()) {
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                // Keyed only on path, same reasoning as the grid+grid branch's own
+                                // pointerInput(path) above -- see its comment.
+                                .pointerInput(path) {
+                                    val tapSlopPx = 18.dp.toPx()
+                                    val clearancePx = FAST_SCROLLBAR_CLEARANCE.toPx()
+                                    awaitEachGesture {
+                                        val down = awaitFirstDown(requireUnconsumed = false)
+                                        val downPair = folderOrMediaAtListPosition(
+                                            listState, down.position, size.width.toFloat(), clearancePx,
+                                            currentFolders.value, currentMedia.value,
+                                        )
+                                        val longPress = awaitLongPressOrCancellation(down.id)
+                                        if (longPress != null) {
+                                            isDragSelecting = true
+                                            // See the grid+grid branch's own comment above for why
+                                            // this is launched separately and forced regardless of
+                                            // userScrollEnabled.
+                                            coroutineScope.launch { listState.stopScroll() }
+                                            selectPair(downPair, viewModel)
+                                            var pointerId = down.id
+                                            try {
+                                                while (true) {
+                                                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                                                    val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+                                                    if (!change.pressed) {
+                                                        change.consume()
+                                                        break
+                                                    }
+                                                    val pair = folderOrMediaAtListPosition(
+                                                        listState, change.position, size.width.toFloat(), clearancePx,
+                                                        currentFolders.value, currentMedia.value,
+                                                    )
+                                                    selectPair(pair, viewModel)
+                                                    change.consume()
+                                                    pointerId = change.id
+                                                }
+                                            } finally {
+                                                isDragSelecting = false
+                                            }
+                                        } else if (downPair != null) {
+                                            val stillDown = currentEvent.changes.any { it.id == down.id && it.pressed }
+                                            val moved = currentEvent.changes.any { change ->
+                                                change.id == down.id &&
+                                                    (change.position - down.position).getDistance() > tapSlopPx
+                                            }
+                                            if (!stillDown && !moved) {
+                                                openOrTogglePair(downPair, viewModel, path, currentMedia.value, onOpenFolder, onOpenMedia)
+                                            }
+                                        }
+                                    }
+                                },
+                        ) {
                             LazyColumn(
                                 state = listState,
                                 modifier = Modifier.fillMaxSize(),
                                 reverseLayout = listPinToBottom(),
+                                userScrollEnabled = !isDragSelecting,
                                 // End clearance so no row renders behind the fast-scrollbar overlaid
                                 // on top of this Box -- see FastScrollbar below.
                                 contentPadding = PaddingValues(end = FAST_SCROLLBAR_CLEARANCE),
@@ -972,6 +1002,72 @@ private fun openOrToggle(
 ) {
     val isSelectionMode = viewModel.selectedMediaIds.value.isNotEmpty() || viewModel.selectedFolderPaths.value.isNotEmpty()
     val (folder, item) = folderOrMediaAt(flatIndex, folders, media, pinToBottom)
+    if (folder != null) {
+        if (isSelectionMode) viewModel.toggleFolderSelection(folder.path) else onOpenFolder(folder.path)
+    } else if (item != null) {
+        val mediaIndex = media.indexOf(item)
+        if (isSelectionMode) viewModel.toggleMediaSelection(item.id) else onOpenMedia(path, mediaIndex)
+    }
+}
+
+/**
+ * The mixed grid/list branch's equivalent of [itemIndexAt] + [folderOrMediaAt]: maps a drag/long-
+ * press position to the folder/media item under it, working from each visible row's own key
+ * rather than a flat index -- a row is either a single [FolderListRow]/[MediaListRow] (key
+ * "folder:<path>"/"media:<id>") or a chunk of grid tiles packed into one Row (key
+ * "folderRow:<path>|<path>..."/"mediaRow:<id>|<id>..."), so the horizontal position within the row
+ * picks out which folder/media that chunk's touch actually landed on. Resolving via the key
+ * (which already reflects [listPinToBottom]'s reversed order) means no separate pinToBottom
+ * parameter is needed here, unlike the pure-grid version.
+ */
+private fun folderOrMediaAtListPosition(
+    listState: LazyListState,
+    position: Offset,
+    boxWidthPx: Float,
+    clearancePx: Float,
+    folders: List<FolderNode>,
+    media: List<MediaItem>,
+): Pair<FolderNode?, MediaItem?>? {
+    val info = listState.layoutInfo.visibleItemsInfo.firstOrNull {
+        position.y >= it.offset && position.y <= it.offset + it.size
+    } ?: return null
+    val key = info.key as? String ?: return null
+    val contentWidthPx = (boxWidthPx - clearancePx).coerceAtLeast(1f)
+    val fraction = (position.x / contentWidthPx).coerceIn(0f, 0.999f)
+    return when {
+        key.startsWith("folderRow:") -> {
+            val paths = key.removePrefix("folderRow:").split("|")
+            val idx = (fraction * paths.size).toInt().coerceIn(0, paths.size - 1)
+            folders.firstOrNull { it.path == paths[idx] } to null
+        }
+        key.startsWith("folder:") -> folders.firstOrNull { it.path == key.removePrefix("folder:") } to null
+        key.startsWith("mediaRow:") -> {
+            val ids = key.removePrefix("mediaRow:").split("|").mapNotNull { it.toLongOrNull() }
+            val idx = (fraction * ids.size).toInt().coerceIn(0, ids.size - 1)
+            null to media.firstOrNull { it.id == ids.getOrNull(idx) }
+        }
+        key.startsWith("media:") -> null to media.firstOrNull { it.id == key.removePrefix("media:").toLongOrNull() }
+        else -> null
+    }
+}
+
+private fun selectPair(pair: Pair<FolderNode?, MediaItem?>?, viewModel: GalleryViewModel) {
+    pair?.first?.let { viewModel.setFolderSelected(it.path, true) }
+    pair?.second?.let { viewModel.setMediaSelected(it.id, true) }
+}
+
+/** [openOrToggle]'s equivalent for a resolved folder/media pair instead of a flat grid index. */
+private fun openOrTogglePair(
+    pair: Pair<FolderNode?, MediaItem?>?,
+    viewModel: GalleryViewModel,
+    path: String,
+    media: List<MediaItem>,
+    onOpenFolder: (String) -> Unit,
+    onOpenMedia: (path: String, index: Int) -> Unit,
+) {
+    val isSelectionMode = viewModel.selectedMediaIds.value.isNotEmpty() || viewModel.selectedFolderPaths.value.isNotEmpty()
+    val folder = pair?.first
+    val item = pair?.second
     if (folder != null) {
         if (isSelectionMode) viewModel.toggleFolderSelection(folder.path) else onOpenFolder(folder.path)
     } else if (item != null) {
@@ -1171,13 +1267,35 @@ private fun FolderCoverContent(folder: FolderNode, cover: FolderCover?, included
  * -- a big cover-dialog preview and a small grid tile included -- instead of comfortably fitting
  * in one and being forced tiny (or wrapping badly) in the other. */
 private const val COVER_FONT_WIDTH_FRACTION = 0.18f
-private const val COVER_FONT_MIN_SCALE = 0.35f
-private const val COVER_FONT_SHRINK_STEP = 0.85f
+
+/** Absolute floor purely to stop the shrink loop from ever reaching zero/negative size -- not a
+ * "give up and truncate" threshold. Real folder names fit comfortably in [COVER_MAX_LINES] lines
+ * well above this size; it only matters for pathologically long text, and even then the text
+ * keeps wrapping to more lines (see [COVER_MAX_LINES]) rather than being cut off. */
+private const val COVER_FONT_MIN_SIZE_SP = 5f
+private const val COVER_FONT_SHRINK_STEP = 0.92f
+
+/** How many lines a wrapped cover label is allowed to grow to before the (very rare) absolute
+ * size floor takes over -- generous enough that ordinary folder names never need to truncate. */
+private const val COVER_MAX_LINES_WRAP = 6
+
+/** Verdana itself can't be bundled (proprietary, not redistributable); DejaVu Sans is the
+ * long-standing free substitute for it (same look/metrics family), bundled as a font resource. */
+private val CoverFontFamily = FontFamily(Font(R.font.cover_text_font))
+
+private val CoverTextShadow = Shadow(
+    color = Color.Black.copy(alpha = 0.6f),
+    offset = Offset(2f, 3f),
+    blurRadius = 6f,
+)
 
 /** A text folder cover's label, starting at [userScale] (the size the user picked in the cover
- * dialog) and shrinking further step by step until it fits within its own measured bounds
- * (falling back to a 2-line ellipsis at the smallest size), so a long or large custom cover name
- * never spills past the thumbnail it's drawn on, however small the tile or row is.
+ * dialog) and shrinking further step by step until it fits within its own measured bounds -- both
+ * width AND height -- so a long or large custom cover name never spills past the thumbnail it's
+ * drawn on, however small the tile or row is. When [wrap] is on, a name too long to fit even at
+ * the smallest readable size is allowed to grow past 2 lines (up to [COVER_MAX_LINES_WRAP])
+ * instead of being cut off; only [wrap] off (single line by design) still ellipsizes if a name
+ * can't be shrunk to fit on one line.
  *
  * The right size is computed in one deterministic pass with [TextMeasurer] before anything is
  * drawn, rather than the previous approach of rendering at a guess and reactively shrinking one
@@ -1185,7 +1303,9 @@ private const val COVER_FONT_SHRINK_STEP = 0.85f
  * visibly settle on a still-wrapping size (e.g. "Devonics Task" breaking mid-word into "Devoni" /
  * "cs Task") if the multi-frame convergence it depended on didn't fully play out. Measuring every
  * candidate size up front and picking the best BEFORE the first frame renders can't get stuck
- * partway like that. */
+ * partway like that. [clipToBounds] is still kept on the rendered text as a last-resort safety
+ * net -- so even if a measurement is ever slightly off, the result is a hard clip within the
+ * cover's own bounds, never text spilling out over whatever is drawn next to it. */
 @Composable
 internal fun CoverText(
     text: String,
@@ -1198,32 +1318,46 @@ internal fun CoverText(
     val textMeasurer = rememberTextMeasurer()
     BoxWithConstraints(modifier, contentAlignment = Alignment.Center) {
         val fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal
-        val constraints = Constraints(maxWidth = with(LocalDensity.current) { maxWidth.roundToPx() })
-        val resolvedFontSizeSp = remember(text, userScale, bold, wrap, maxWidth) {
+        val maxLines = if (wrap) COVER_MAX_LINES_WRAP else 1
+        val density = LocalDensity.current
+        val constraints = Constraints(
+            maxWidth = with(density) { maxWidth.roundToPx() },
+            maxHeight = with(density) { maxHeight.roundToPx() },
+        )
+        val resolvedFontSizeSp = remember(text, userScale, bold, wrap, maxWidth, maxHeight) {
             val baseFontSizeSp = maxWidth.value * COVER_FONT_WIDTH_FRACTION * userScale
-            var scale = 1f
             var fontSizeSp = baseFontSizeSp
             while (true) {
-                fontSizeSp = baseFontSizeSp * scale
                 val result = textMeasurer.measure(
                     text = text,
-                    style = TextStyle(fontSize = fontSizeSp.sp, fontWeight = fontWeight, textAlign = TextAlign.Center),
+                    style = TextStyle(
+                        fontSize = fontSizeSp.sp,
+                        fontWeight = fontWeight,
+                        fontFamily = CoverFontFamily,
+                        textAlign = TextAlign.Center,
+                    ),
                     constraints = constraints,
-                    maxLines = 2,
+                    maxLines = maxLines,
                 )
-                val needsShrink = result.didOverflowWidth || result.didOverflowHeight || (!wrap && result.lineCount > 1)
-                if (!needsShrink || scale <= COVER_FONT_MIN_SCALE) break
-                scale = (scale * COVER_FONT_SHRINK_STEP).coerceAtLeast(COVER_FONT_MIN_SCALE)
+                val needsShrink = result.didOverflowWidth || result.didOverflowHeight
+                if (!needsShrink || fontSizeSp <= COVER_FONT_MIN_SIZE_SP) break
+                fontSizeSp = (fontSizeSp * COVER_FONT_SHRINK_STEP).coerceAtLeast(COVER_FONT_MIN_SIZE_SP)
             }
             fontSizeSp
         }
         Text(
             text = text,
             color = textColor,
-            style = TextStyle(fontSize = resolvedFontSizeSp.sp, fontWeight = fontWeight, textAlign = TextAlign.Center),
-            maxLines = 2,
+            style = TextStyle(
+                fontSize = resolvedFontSizeSp.sp,
+                fontWeight = fontWeight,
+                fontFamily = CoverFontFamily,
+                textAlign = TextAlign.Center,
+                shadow = CoverTextShadow,
+            ),
+            maxLines = maxLines,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().clipToBounds(),
         )
     }
 }
@@ -1405,8 +1539,8 @@ private fun GalleryListItem(
     isHidden: Boolean,
     isSelected: Boolean,
     thumbnailSizeDp: Int,
-    onClick: () -> Unit,
-    onLongClick: () -> Unit,
+    onClick: (() -> Unit)? = null,
+    onLongClick: (() -> Unit)? = null,
 ) {
     Box(
         Modifier.background(
@@ -1416,7 +1550,9 @@ private fun GalleryListItem(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                .then(
+                    if (onClick != null) Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick) else Modifier,
+                )
                 .alpha(if (isHidden) 0.5f else 1f)
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -1474,8 +1610,8 @@ internal fun FolderListRow(
     cover: FolderCover?,
     includedFolders: Set<String>,
     thumbnailSizeDp: Int,
-    onClick: () -> Unit,
-    onLongClick: () -> Unit,
+    onClick: (() -> Unit)? = null,
+    onLongClick: (() -> Unit)? = null,
 ) {
     GalleryListItem(
         thumbnailModel = if (cover is FolderCover.Photo) {
@@ -1501,8 +1637,8 @@ private fun MediaListRow(
     isHidden: Boolean,
     isSelected: Boolean,
     thumbnailSizeDp: Int,
-    onClick: () -> Unit,
-    onLongClick: () -> Unit,
+    onClick: (() -> Unit)? = null,
+    onLongClick: (() -> Unit)? = null,
 ) {
     GalleryListItem(
         thumbnailModel = item.uri,
