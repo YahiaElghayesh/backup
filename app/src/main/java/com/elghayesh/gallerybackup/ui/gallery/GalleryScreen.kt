@@ -89,6 +89,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -258,9 +259,24 @@ fun GalleryScreen(
     // separate "does it fit" check to get right, and nothing that needs to settle in after the
     // first layout pass -- unlike the previous reverseLayout-based approach, which needed an
     // async LaunchedEffect to measure fit (a likely source of the brief visual glitch on opening
-    // a folder) and needed every item index remapped to undo the reversal (a likely source of
-    // drag-select picking the neighbor on the wrong side while pinned). Content is now always
+    // a folder) and needed every item index remapped to undo the reversal. Content is always
     // declared in plain, unreversed order in both modes.
+    //
+    // Drag-select's own hit-testing (see dragSelectGesture below) reads each visible tile/row's
+    // position from LazyGridState/LazyListState.layoutInfo, which reports every item's offset
+    // relative to the grid/list's OWN top-left corner -- not relative to whatever ancestor
+    // happens to contain it. The moment a short, bottom-aligned grid/list no longer starts at the
+    // same point as the BoxWithConstraints around it (exactly what pin-to-bottom does for a
+    // folder with few enough items to shrink-wrap), a gesture detector attached to that outer Box
+    // instead of the grid/list itself is reading touch positions in the wrong frame: shifted
+    // downward by however far the bottom alignment pushed the content, relative to what
+    // layoutInfo is using. That mismatch is what made hovering land on the wrong tile -- or no
+    // tile at all -- specifically for a pinned folder short enough to not fill the screen. The fix
+    // is structural, not a coordinate correction: dragSelectGesture's pointerInput is attached
+    // directly to the LazyVerticalGrid/LazyColumn's own modifier chain (see its call sites below),
+    // so the positions it reads are always already in the exact same frame its hit-test reads
+    // layoutInfo from, regardless of how -- or whether -- pin-to-bottom repositions that grid/list
+    // within its parent.
 
     if (showSortDialog) {
         SortDialog(
@@ -495,84 +511,7 @@ fun GalleryScreen(
                 else -> {
                     if (folderViewType == ViewType.GRID && mediaViewType == ViewType.GRID) {
                         BoxWithConstraints(
-                            Modifier
-                                .fillMaxSize()
-                                // Each tile owns its own tap/long-press via combinedClickable
-                                // (onClick/onLongClick below) -- Compose's built-in click/scroll
-                                // disambiguation already coexists correctly with the grid's own
-                                // scrolling, which a hand-rolled parent-level awaitFirstDown +
-                                // awaitLongPressOrCancellation reimplementation (the previous
-                                // approach here) does NOT: running as the grid's *parent*, it raced
-                                // the grid's own scrollable for every single tap and could lose that
-                                // race to an ordinary finger tremor, either eating the tap entirely
-                                // (nothing happens) or -- if the grid's scrollable nudged the list a
-                                // few pixels first -- ending up over a different tile than the one
-                                // actually touched (wrong folder opens). This detector no longer
-                                // participates in tap-to-open at all; it only takes over once a
-                                // tile's own onLongClick has already fired (isDragSelecting flips
-                                // true), extending the selection to whatever the finger drags over
-                                // next, same as before.
-                                //
-                                // Keyed only on path (effectively constant for this screen's whole
-                                // lifetime) rather than on folders/media -- those are read live via
-                                // currentFolders/currentMedia instead, specifically so a selection
-                                // change mid-drag (which recomposes this screen and produces new
-                                // folders/media list instances) can never restart this gesture's
-                                // coroutine and drop an in-progress drag-select.
-                                .pointerInput(path) {
-                                    awaitEachGesture {
-                                        val down = awaitFirstDown(requireUnconsumed = false)
-                                        var pointerId = down.id
-                                        // Path of items visited by this drag so far, oldest first -- see
-                                        // applyDragHover's own doc comment for how it turns "hover back
-                                        // onto an earlier item" into "un-select everything since then".
-                                        // Seeded (along with the pre-existing-selection snapshot) the
-                                        // first time isDragSelecting is observed true, i.e. right after
-                                        // the long-press that started this drag already selected the
-                                        // anchor tile.
-                                        var dragStarted = false
-                                        val dragPath = mutableListOf<DragItemKey>()
-                                        var preExistingFolders = emptySet<String>()
-                                        var preExistingMedia = emptySet<Long>()
-                                        while (true) {
-                                            // Read (without consuming, unless already drag-selecting) on the
-                                            // Initial pass -- parent-to-child, i.e. before each tile's own
-                                            // combinedClickable (a descendant) sees this event on its default
-                                            // Main pass. That ordering is what lets us extend the selection by
-                                            // consuming move events once a long-press has already won, without
-                                            // ever needing to fight the grid's scrollable for the tap itself.
-                                            val event = awaitPointerEvent(PointerEventPass.Initial)
-                                            val change = event.changes.firstOrNull { it.id == pointerId } ?: break
-                                            if (!change.pressed) {
-                                                if (isDragSelecting) change.consume()
-                                                isDragSelecting = false
-                                                break
-                                            }
-                                            if (isDragSelecting) {
-                                                if (!dragStarted) {
-                                                    dragStarted = true
-                                                    preExistingFolders = viewModel.selectedFolderPaths.value
-                                                    preExistingMedia = viewModel.selectedMediaIds.value
-                                                    itemIndexAt(gridState, change.position)?.let { flatIndex ->
-                                                        dragItemKeyOf(folderOrMediaAt(flatIndex, currentFolders.value, currentMedia.value))
-                                                            ?.let { dragPath.add(it) }
-                                                    }
-                                                }
-                                                itemIndexAt(gridState, change.position)?.let { flatIndex ->
-                                                    applyDragHover(
-                                                        folderOrMediaAt(flatIndex, currentFolders.value, currentMedia.value),
-                                                        dragPath,
-                                                        preExistingFolders,
-                                                        preExistingMedia,
-                                                        viewModel,
-                                                    )
-                                                }
-                                                change.consume()
-                                            }
-                                            pointerId = change.id
-                                        }
-                                    }
-                                },
+                            Modifier.fillMaxSize(),
                         ) {
                             LazyVerticalGrid(
                                 state = gridState,
@@ -596,7 +535,33 @@ fun GalleryScreen(
                                     .fillMaxWidth()
                                     .then(
                                         if (pinContentToBottom) Modifier.heightIn(max = maxHeight) else Modifier.fillMaxHeight(),
-                                    ),
+                                    )
+                                    // Each tile owns its own tap/long-press via combinedClickable
+                                    // (onClick/onLongClick below); this pointerInput never
+                                    // participates in tap-to-open, only in extending the selection
+                                    // once a tile's own onLongClick has already fired (isDragSelecting
+                                    // flips true) -- same reasoning as before. It's attached directly
+                                    // to the grid itself, not a wrapping ancestor, specifically so its
+                                    // hit-testing always agrees with pin-to-bottom -- see
+                                    // dragSelectGesture's own doc comment and the pin-to-bottom
+                                    // comment above for why that coupling matters.
+                                    //
+                                    // Keyed only on path (effectively constant for this screen's whole
+                                    // lifetime) rather than on folders/media -- those are read live via
+                                    // currentFolders/currentMedia instead, specifically so a selection
+                                    // change mid-drag (which recomposes this screen and produces new
+                                    // folders/media list instances) can never restart this gesture's
+                                    // coroutine and drop an in-progress drag-select.
+                                    .pointerInput(path) {
+                                        dragSelectGesture(
+                                            isDragSelecting = { isDragSelecting },
+                                            setDragSelecting = { isDragSelecting = it },
+                                            viewModel = viewModel,
+                                        ) { position ->
+                                            itemIndexAt(gridState, position)
+                                                ?.let { folderOrMediaAt(it, currentFolders.value, currentMedia.value) }
+                                        }
+                                    },
                             ) {
                                 gridItems(
                                     folders,
@@ -840,59 +805,7 @@ fun GalleryScreen(
                             }
                         }
                         BoxWithConstraints(
-                            Modifier
-                                .fillMaxSize()
-                                // Keyed only on path, same reasoning as the grid+grid branch's own
-                                // pointerInput(path) above -- see its comment there for why this no
-                                // longer participates in tap-to-open, only in extending an
-                                // already-started drag-select.
-                                .pointerInput(path) {
-                                    val clearancePx = FAST_SCROLLBAR_CLEARANCE.toPx()
-                                    awaitEachGesture {
-                                        val down = awaitFirstDown(requireUnconsumed = false)
-                                        var pointerId = down.id
-                                        // See the grid+grid branch's own pointerInput above for what
-                                        // this tracks and why.
-                                        var dragStarted = false
-                                        val dragPath = mutableListOf<DragItemKey>()
-                                        var preExistingFolders = emptySet<String>()
-                                        var preExistingMedia = emptySet<Long>()
-                                        while (true) {
-                                            val event = awaitPointerEvent(PointerEventPass.Initial)
-                                            val change = event.changes.firstOrNull { it.id == pointerId } ?: break
-                                            if (!change.pressed) {
-                                                if (isDragSelecting) change.consume()
-                                                isDragSelecting = false
-                                                break
-                                            }
-                                            if (isDragSelecting) {
-                                                if (!dragStarted) {
-                                                    dragStarted = true
-                                                    preExistingFolders = viewModel.selectedFolderPaths.value
-                                                    preExistingMedia = viewModel.selectedMediaIds.value
-                                                    dragItemKeyOf(
-                                                        folderOrMediaAtListPosition(
-                                                            listState, change.position, size.width.toFloat(), clearancePx,
-                                                            currentFolders.value, currentMedia.value,
-                                                        ),
-                                                    )?.let { dragPath.add(it) }
-                                                }
-                                                applyDragHover(
-                                                    folderOrMediaAtListPosition(
-                                                        listState, change.position, size.width.toFloat(), clearancePx,
-                                                        currentFolders.value, currentMedia.value,
-                                                    ),
-                                                    dragPath,
-                                                    preExistingFolders,
-                                                    preExistingMedia,
-                                                    viewModel,
-                                                )
-                                                change.consume()
-                                            }
-                                            pointerId = change.id
-                                        }
-                                    }
-                                },
+                            Modifier.fillMaxSize(),
                         ) {
                             LazyColumn(
                                 state = listState,
@@ -905,7 +818,23 @@ fun GalleryScreen(
                                     .fillMaxWidth()
                                     .then(
                                         if (pinContentToBottom) Modifier.heightIn(max = maxHeight) else Modifier.fillMaxHeight(),
-                                    ),
+                                    )
+                                    // See the grid+grid branch's own pointerInput above for why
+                                    // this lives directly on the list itself rather than a
+                                    // wrapping ancestor.
+                                    .pointerInput(path) {
+                                        val clearancePx = FAST_SCROLLBAR_CLEARANCE.toPx()
+                                        dragSelectGesture(
+                                            isDragSelecting = { isDragSelecting },
+                                            setDragSelecting = { isDragSelecting = it },
+                                            viewModel = viewModel,
+                                        ) { position ->
+                                            folderOrMediaAtListPosition(
+                                                listState, position, size.width.toFloat(), clearancePx,
+                                                currentFolders.value, currentMedia.value,
+                                            )
+                                        }
+                                    },
                             ) {
                                 folderSection()
                                 mediaSection()
@@ -922,18 +851,24 @@ fun GalleryScreen(
     }
 }
 
-private val FAST_SCROLLBAR_WIDTH = 20.dp
-private val FAST_SCROLLBAR_GUTTER = 8.dp
+/** The thumb's own visible width -- a slim pill like a native system scrollbar, not a thick bar
+ * that draws the eye away from the actual photos. */
+private val FAST_SCROLLBAR_THUMB_WIDTH = 4.dp
+
+/** The drag target is wider than the visible thumb (invisibly) so it stays easy to grab with a
+ * finger despite the thumb itself being slim -- the thumb is centered within this width. */
+private val FAST_SCROLLBAR_TOUCH_WIDTH = 24.dp
+private val FAST_SCROLLBAR_GUTTER = 6.dp
 
 /** How much end space the grid/list needs to reserve (as contentPadding) so no tile or row ever
- * renders behind [FastScrollbar] -- the bar's own width plus a small tinted gutter of clear space
- * between it and the content. */
-private val FAST_SCROLLBAR_CLEARANCE = FAST_SCROLLBAR_WIDTH + FAST_SCROLLBAR_GUTTER
+ * renders behind [FastScrollbar] -- the invisible drag target's width plus a small gutter of clear
+ * space between it and the content. */
+private val FAST_SCROLLBAR_CLEARANCE = FAST_SCROLLBAR_TOUCH_WIDTH + FAST_SCROLLBAR_GUTTER
 
-/** A thick, far-right, drag-to-jump scrollbar for quickly moving through a long folder/media
- * listing -- ordinary drag-to-scroll only covers a screenful at a time. Sized and positioned to
- * never overlap real content: [FAST_SCROLLBAR_CLEARANCE] is reserved as the grid/list's own end
- * contentPadding, so this whole bar (plus its gutter) sits in space no tile is ever drawn into. */
+/** A far-right, drag-to-jump scrollbar for quickly moving through a long folder/media listing --
+ * ordinary drag-to-scroll only covers a screenful at a time. Sized and positioned to never overlap
+ * real content: [FAST_SCROLLBAR_CLEARANCE] is reserved as the grid/list's own end contentPadding,
+ * so this whole bar (plus its gutter) sits in space no tile is ever drawn into. */
 @Composable
 private fun FastScrollbar(gridState: LazyGridState, modifier: Modifier = Modifier) {
     val scope = rememberCoroutineScope()
@@ -994,7 +929,7 @@ private fun FastScrollbarTrack(
     // Nothing to jump to if everything's already on screen -- no bar needed (and no risk of a
     // near-invisible sliver thumb spanning the whole track).
     if (totalCount == 0 || visibleCount >= totalCount) return
-    BoxWithConstraints(modifier.width(FAST_SCROLLBAR_WIDTH)) {
+    BoxWithConstraints(modifier.width(FAST_SCROLLBAR_TOUCH_WIDTH)) {
         val density = LocalDensity.current
         val trackHeightPx = with(density) { maxHeight.toPx() }
         val thumbHeightPx = trackHeightPx * (visibleCount.toFloat() / totalCount.toFloat()).coerceIn(0.08f, 1f)
@@ -1007,6 +942,8 @@ private fun FastScrollbarTrack(
             onDragToFraction(((yPx - thumbHeightPx / 2f) / usableTrack).coerceIn(0f, 1f))
         }
 
+        // The full (wider, invisible) touch target handles the drag, so a finger doesn't need to
+        // land precisely on the slim visible thumb to grab it.
         Box(
             Modifier
                 .fillMaxSize()
@@ -1019,11 +956,12 @@ private fun FastScrollbarTrack(
         )
         Box(
             Modifier
+                .align(Alignment.TopCenter)
                 .offset { IntOffset(0, thumbOffsetPx.roundToInt()) }
-                .width(FAST_SCROLLBAR_WIDTH)
+                .width(FAST_SCROLLBAR_THUMB_WIDTH)
                 .height(with(density) { thumbHeightPx.toDp() })
-                .clip(RoundedCornerShape(FAST_SCROLLBAR_WIDTH / 2))
-                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)),
+                .clip(RoundedCornerShape(FAST_SCROLLBAR_THUMB_WIDTH / 2))
+                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)),
         )
     }
 }
@@ -1105,6 +1043,69 @@ private fun applyDragHover(
     } else {
         path.add(key)
         key.setSelected(viewModel, true)
+    }
+}
+
+/**
+ * The drag-to-extend-selection gesture shared identically by both the grid+grid branch (over its
+ * LazyVerticalGrid) and the list/mixed branch (over its LazyColumn) -- see each call site for how
+ * [hitTest] resolves a touch position into a folder/media item there.
+ *
+ * This must be attached directly to that lazy layout's own modifier chain, never to some wrapping
+ * ancestor Box -- [hitTest] resolves a position using that layout's own LazyGridState/
+ * LazyListState.layoutInfo, whose item offsets are always relative to the layout's OWN top-left
+ * corner, not to whatever contains it. As long as this gesture is attached to that same node,
+ * [PointerInputScope.awaitPointerEvent]'s reported positions are guaranteed to be in that exact
+ * same frame no matter how the node ends up placed by its parent -- including "pin content to the
+ * bottom" bottom-aligning a short grid/list partway down a taller viewport, which used to shift
+ * the grid/list's own origin away from its parent Box's origin while a gesture attached to that
+ * Box kept reading positions relative to the Box. That mismatch (not anything about which
+ * direction is "up" or "down") is what made hovering resolve to the wrong tile, or no tile at all,
+ * specifically for a folder short enough to shrink-wrap while pinned to the bottom.
+ */
+private suspend fun PointerInputScope.dragSelectGesture(
+    isDragSelecting: () -> Boolean,
+    setDragSelecting: (Boolean) -> Unit,
+    viewModel: GalleryViewModel,
+    hitTest: (Offset) -> Pair<FolderNode?, MediaItem?>?,
+) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        var pointerId = down.id
+        // Path of items visited by this drag so far, oldest first -- see applyDragHover's own doc
+        // comment for how it turns "hover back onto an earlier item" into "un-select everything
+        // since then". Seeded (along with the pre-existing-selection snapshot) the first time
+        // isDragSelecting is observed true, i.e. right after the long-press that started this
+        // drag already selected the anchor tile.
+        var dragStarted = false
+        val dragPath = mutableListOf<DragItemKey>()
+        var preExistingFolders = emptySet<String>()
+        var preExistingMedia = emptySet<Long>()
+        while (true) {
+            // Read (without consuming, unless already drag-selecting) on the Initial pass --
+            // parent-to-child, i.e. before each tile's own combinedClickable (a descendant) sees
+            // this event on its default Main pass. That ordering is what lets us extend the
+            // selection by consuming move events once a long-press has already won, without ever
+            // needing to fight the grid/list's own scrollable for the tap itself.
+            val event = awaitPointerEvent(PointerEventPass.Initial)
+            val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+            if (!change.pressed) {
+                if (isDragSelecting()) change.consume()
+                setDragSelecting(false)
+                break
+            }
+            if (isDragSelecting()) {
+                if (!dragStarted) {
+                    dragStarted = true
+                    preExistingFolders = viewModel.selectedFolderPaths.value
+                    preExistingMedia = viewModel.selectedMediaIds.value
+                    dragItemKeyOf(hitTest(change.position))?.let { dragPath.add(it) }
+                }
+                applyDragHover(hitTest(change.position), dragPath, preExistingFolders, preExistingMedia, viewModel)
+                change.consume()
+            }
+            pointerId = change.id
+        }
     }
 }
 
