@@ -8,9 +8,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -236,7 +234,6 @@ fun GalleryScreen(
     var coverDialogFolders by remember { mutableStateOf<List<FolderNode>>(emptyList()) }
 
     val requestDelete = rememberDeleteRequester(viewModel)
-    val coroutineScope = rememberCoroutineScope()
     val gridState = rememberLazyGridState()
     val listState = rememberLazyListState()
     var isDragSelecting by remember { mutableStateOf(false) }
@@ -499,6 +496,22 @@ fun GalleryScreen(
                         Box(
                             Modifier
                                 .fillMaxSize()
+                                // Each tile owns its own tap/long-press via combinedClickable
+                                // (onClick/onLongClick below) -- Compose's built-in click/scroll
+                                // disambiguation already coexists correctly with the grid's own
+                                // scrolling, which a hand-rolled parent-level awaitFirstDown +
+                                // awaitLongPressOrCancellation reimplementation (the previous
+                                // approach here) does NOT: running as the grid's *parent*, it raced
+                                // the grid's own scrollable for every single tap and could lose that
+                                // race to an ordinary finger tremor, either eating the tap entirely
+                                // (nothing happens) or -- if the grid's scrollable nudged the list a
+                                // few pixels first -- ending up over a different tile than the one
+                                // actually touched (wrong folder opens). This detector no longer
+                                // participates in tap-to-open at all; it only takes over once a
+                                // tile's own onLongClick has already fired (isDragSelecting flips
+                                // true), extending the selection to whatever the finger drags over
+                                // next, same as before.
+                                //
                                 // Keyed only on path (effectively constant for this screen's whole
                                 // lifetime) rather than on folders/media/pinContentToBottom -- those
                                 // are read live via currentFolders/currentMedia/gridPinToBottom()
@@ -507,83 +520,30 @@ fun GalleryScreen(
                                 // instances) can never restart this gesture's coroutine and drop an
                                 // in-progress drag-select.
                                 .pointerInput(path) {
-                                    // A single, unified gesture owns the whole down-to-up lifecycle for every
-                                    // tile: a plain tap opens the item (or toggles it, once already selecting);
-                                    // a long press selects the item under the finger and enters selection mode;
-                                    // continuing to drag from that same long press extends the selection to
-                                    // whatever else the finger passes over. Handling all three in one detector
-                                    // (rather than a per-tile clickable racing a container drag detector) avoids
-                                    // the two independently reacting to the same up event.
-                                    val tapSlopPx = 18.dp.toPx()
                                     awaitEachGesture {
                                         val down = awaitFirstDown(requireUnconsumed = false)
-                                        val downIndex = itemIndexAt(gridState, down.position)
-                                        val longPress = awaitLongPressOrCancellation(down.id)
-                                        if (longPress != null) {
-                                            isDragSelecting = true
-                                            // Forcibly cancel any scroll the grid's own internal
-                                            // scrollable may have already started capturing during
-                                            // the long-press wait -- consuming events afterward
-                                            // (Initial pass, below) isn't enough to interrupt a
-                                            // drag gesture it already committed to before we knew
-                                            // this would become a long press. Launched separately
-                                            // since awaitEachGesture's block runs in a restricted
-                                            // suspend scope that can't call arbitrary suspend
-                                            // functions like stopScroll directly.
-                                            coroutineScope.launch { gridState.stopScroll() }
-                                            downIndex?.let {
-                                                selectAt(it, currentFolders.value, currentMedia.value, viewModel, gridPinToBottom())
-                                            }
-                                            var pointerId = down.id
-                                            try {
-                                                while (true) {
-                                                    // Read (and consume) on the Initial pass, which Compose
-                                                    // dispatches parent-to-child -- i.e. before the grid's own
-                                                    // internal scroll gesture detector (a descendant) gets to see
-                                                    // this event on its default Main pass. Consuming here first
-                                                    // is what actually stops the grid from treating an in-progress
-                                                    // drag-select as a scroll, regardless of whether the
-                                                    // userScrollEnabled recomposition has applied yet.
-                                                    val event = awaitPointerEvent(PointerEventPass.Initial)
-                                                    val change = event.changes.firstOrNull { it.id == pointerId } ?: break
-                                                    if (!change.pressed) {
-                                                        change.consume()
-                                                        break
-                                                    }
-                                                    itemIndexAt(gridState, change.position)
-                                                        ?.let {
-                                                            selectAt(
-                                                                it,
-                                                                currentFolders.value,
-                                                                currentMedia.value,
-                                                                viewModel,
-                                                                gridPinToBottom(),
-                                                            )
-                                                        }
-                                                    change.consume()
-                                                    pointerId = change.id
-                                                }
-                                            } finally {
+                                        var pointerId = down.id
+                                        while (true) {
+                                            // Read (without consuming, unless already drag-selecting) on the
+                                            // Initial pass -- parent-to-child, i.e. before each tile's own
+                                            // combinedClickable (a descendant) sees this event on its default
+                                            // Main pass. That ordering is what lets us extend the selection by
+                                            // consuming move events once a long-press has already won, without
+                                            // ever needing to fight the grid's scrollable for the tap itself.
+                                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                                            val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+                                            if (!change.pressed) {
+                                                if (isDragSelecting) change.consume()
                                                 isDragSelecting = false
+                                                break
                                             }
-                                        } else if (downIndex != null) {
-                                            val stillDown = currentEvent.changes.any { it.id == down.id && it.pressed }
-                                            val moved = currentEvent.changes.any { change ->
-                                                change.id == down.id &&
-                                                    (change.position - down.position).getDistance() > tapSlopPx
+                                            if (isDragSelecting) {
+                                                itemIndexAt(gridState, change.position)?.let {
+                                                    selectAt(it, currentFolders.value, currentMedia.value, viewModel, gridPinToBottom())
+                                                }
+                                                change.consume()
                                             }
-                                            if (!stillDown && !moved) {
-                                                openOrToggle(
-                                                    downIndex,
-                                                    currentFolders.value,
-                                                    currentMedia.value,
-                                                    viewModel,
-                                                    path,
-                                                    gridPinToBottom(),
-                                                    onOpenFolder,
-                                                    onOpenMedia,
-                                                )
-                                            }
+                                            pointerId = change.id
                                         }
                                     }
                                 },
@@ -625,6 +585,17 @@ fun GalleryScreen(
                                             item = item,
                                             isHidden = item.id in hiddenMediaIds,
                                             isSelected = item.id in selectedMediaIds,
+                                            onClick = {
+                                                if (isSelectionMode) {
+                                                    viewModel.toggleMediaSelection(item.id)
+                                                } else {
+                                                    onOpenMedia(path, media.indexOf(item))
+                                                }
+                                            },
+                                            onLongClick = {
+                                                isDragSelecting = true
+                                                viewModel.setMediaSelected(item.id, true)
+                                            },
                                         )
                                     }
                                     gridItems(
@@ -638,6 +609,17 @@ fun GalleryScreen(
                                             isSelected = folder.path in selectedFolderPaths,
                                             cover = folderCovers[folder.path],
                                             includedFolders = includedFolders,
+                                            onClick = {
+                                                if (isSelectionMode) {
+                                                    viewModel.toggleFolderSelection(folder.path)
+                                                } else {
+                                                    onOpenFolder(folder.path)
+                                                }
+                                            },
+                                            onLongClick = {
+                                                isDragSelecting = true
+                                                viewModel.setFolderSelected(folder.path, true)
+                                            },
                                         )
                                     }
                                 } else {
@@ -652,17 +634,39 @@ fun GalleryScreen(
                                             isSelected = folder.path in selectedFolderPaths,
                                             cover = folderCovers[folder.path],
                                             includedFolders = includedFolders,
+                                            onClick = {
+                                                if (isSelectionMode) {
+                                                    viewModel.toggleFolderSelection(folder.path)
+                                                } else {
+                                                    onOpenFolder(folder.path)
+                                                }
+                                            },
+                                            onLongClick = {
+                                                isDragSelecting = true
+                                                viewModel.setFolderSelected(folder.path, true)
+                                            },
                                         )
                                     }
                                     gridItemsIndexed(
                                         media,
                                         key = { _, item -> "media:${item.id}" },
                                         span = { _, _ -> GridItemSpan(GRID_SPAN_UNITS / mediaGridColumns) },
-                                    ) { _, item ->
+                                    ) { index, item ->
                                         MediaGridTile(
                                             item = item,
                                             isHidden = item.id in hiddenMediaIds,
                                             isSelected = item.id in selectedMediaIds,
+                                            onClick = {
+                                                if (isSelectionMode) {
+                                                    viewModel.toggleMediaSelection(item.id)
+                                                } else {
+                                                    onOpenMedia(path, index)
+                                                }
+                                            },
+                                            onLongClick = {
+                                                isDragSelecting = true
+                                                viewModel.setMediaSelected(item.id, true)
+                                            },
                                         )
                                     }
                                 }
@@ -673,11 +677,10 @@ fun GalleryScreen(
                             )
                         }
                     } else {
-                        // At least one of folders/media is in list view. Same unified down/long-
-                        // press/drag gesture as the grid+grid branch above (see its own comment for
-                        // why one detector has to own the whole down-to-up lifecycle) -- rows/tiles
-                        // here get no onClick/onLongClick of their own, relying entirely on the
-                        // wrapping Box's pointerInput below.
+                        // At least one of folders/media is in list view. Same as the grid+grid
+                        // branch above: each row/tile owns its own tap/long-press via
+                        // combinedClickable, and the wrapping Box's pointerInput below only takes
+                        // over to extend the selection once a long-press has already fired.
                         //
                         // Pinning to the bottom uses reverseLayout with the section order and each
                         // section's own row order flipped (items *within* a row stay left-to-right,
@@ -701,6 +704,17 @@ fun GalleryScreen(
                                                     isSelected = folder.path in selectedFolderPaths,
                                                     cover = folderCovers[folder.path],
                                                     includedFolders = includedFolders,
+                                                    onClick = {
+                                                        if (isSelectionMode) {
+                                                            viewModel.toggleFolderSelection(folder.path)
+                                                        } else {
+                                                            onOpenFolder(folder.path)
+                                                        }
+                                                    },
+                                                    onLongClick = {
+                                                        isDragSelecting = true
+                                                        viewModel.setFolderSelected(folder.path, true)
+                                                    },
                                                 )
                                             }
                                         }
@@ -717,6 +731,17 @@ fun GalleryScreen(
                                         cover = folderCovers[folder.path],
                                         includedFolders = includedFolders,
                                         thumbnailSizeDp = folderRowSize,
+                                        onClick = {
+                                            if (isSelectionMode) {
+                                                viewModel.toggleFolderSelection(folder.path)
+                                            } else {
+                                                onOpenFolder(folder.path)
+                                            }
+                                        },
+                                        onLongClick = {
+                                            isDragSelecting = true
+                                            viewModel.setFolderSelected(folder.path, true)
+                                        },
                                     )
                                 }
                             }
@@ -730,12 +755,23 @@ fun GalleryScreen(
                                         Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
                                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                                     ) {
-                                        row.forEach { (_, item) ->
+                                        row.forEach { (index, item) ->
                                             Box(Modifier.weight(1f)) {
                                                 MediaGridTile(
                                                     item = item,
                                                     isHidden = item.id in hiddenMediaIds,
                                                     isSelected = item.id in selectedMediaIds,
+                                                    onClick = {
+                                                        if (isSelectionMode) {
+                                                            viewModel.toggleMediaSelection(item.id)
+                                                        } else {
+                                                            onOpenMedia(path, index)
+                                                        }
+                                                    },
+                                                    onLongClick = {
+                                                        isDragSelecting = true
+                                                        viewModel.setMediaSelected(item.id, true)
+                                                    },
                                                 )
                                             }
                                         }
@@ -744,12 +780,23 @@ fun GalleryScreen(
                                 }
                             } else {
                                 val ordered = media.withIndex().toList().let { if (listPinToBottom()) it.asReversed() else it }
-                                items(ordered, key = { (_, item) -> "media:${item.id}" }) { (_, item) ->
+                                items(ordered, key = { (_, item) -> "media:${item.id}" }) { (index, item) ->
                                     MediaListRow(
                                         item = item,
                                         isHidden = item.id in hiddenMediaIds,
                                         isSelected = item.id in selectedMediaIds,
                                         thumbnailSizeDp = mediaRowSize,
+                                        onClick = {
+                                            if (isSelectionMode) {
+                                                viewModel.toggleMediaSelection(item.id)
+                                            } else {
+                                                onOpenMedia(path, index)
+                                            }
+                                        },
+                                        onLongClick = {
+                                            isDragSelecting = true
+                                            viewModel.setMediaSelected(item.id, true)
+                                        },
                                     )
                                 }
                             }
@@ -758,53 +805,31 @@ fun GalleryScreen(
                             Modifier
                                 .fillMaxSize()
                                 // Keyed only on path, same reasoning as the grid+grid branch's own
-                                // pointerInput(path) above -- see its comment.
+                                // pointerInput(path) above -- see its comment there for why this no
+                                // longer participates in tap-to-open, only in extending an
+                                // already-started drag-select.
                                 .pointerInput(path) {
-                                    val tapSlopPx = 18.dp.toPx()
                                     val clearancePx = FAST_SCROLLBAR_CLEARANCE.toPx()
                                     awaitEachGesture {
                                         val down = awaitFirstDown(requireUnconsumed = false)
-                                        val downPair = folderOrMediaAtListPosition(
-                                            listState, down.position, size.width.toFloat(), clearancePx,
-                                            currentFolders.value, currentMedia.value,
-                                        )
-                                        val longPress = awaitLongPressOrCancellation(down.id)
-                                        if (longPress != null) {
-                                            isDragSelecting = true
-                                            // See the grid+grid branch's own comment above for why
-                                            // this is launched separately and forced regardless of
-                                            // userScrollEnabled.
-                                            coroutineScope.launch { listState.stopScroll() }
-                                            selectPair(downPair, viewModel)
-                                            var pointerId = down.id
-                                            try {
-                                                while (true) {
-                                                    val event = awaitPointerEvent(PointerEventPass.Initial)
-                                                    val change = event.changes.firstOrNull { it.id == pointerId } ?: break
-                                                    if (!change.pressed) {
-                                                        change.consume()
-                                                        break
-                                                    }
-                                                    val pair = folderOrMediaAtListPosition(
-                                                        listState, change.position, size.width.toFloat(), clearancePx,
-                                                        currentFolders.value, currentMedia.value,
-                                                    )
-                                                    selectPair(pair, viewModel)
-                                                    change.consume()
-                                                    pointerId = change.id
-                                                }
-                                            } finally {
+                                        var pointerId = down.id
+                                        while (true) {
+                                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                                            val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+                                            if (!change.pressed) {
+                                                if (isDragSelecting) change.consume()
                                                 isDragSelecting = false
+                                                break
                                             }
-                                        } else if (downPair != null) {
-                                            val stillDown = currentEvent.changes.any { it.id == down.id && it.pressed }
-                                            val moved = currentEvent.changes.any { change ->
-                                                change.id == down.id &&
-                                                    (change.position - down.position).getDistance() > tapSlopPx
+                                            if (isDragSelecting) {
+                                                val pair = folderOrMediaAtListPosition(
+                                                    listState, change.position, size.width.toFloat(), clearancePx,
+                                                    currentFolders.value, currentMedia.value,
+                                                )
+                                                selectPair(pair, viewModel)
+                                                change.consume()
                                             }
-                                            if (!stillDown && !moved) {
-                                                openOrTogglePair(downPair, viewModel, path, currentMedia.value, onOpenFolder, onOpenMedia)
-                                            }
+                                            pointerId = change.id
                                         }
                                     }
                                 },
@@ -986,31 +1011,6 @@ private fun selectAt(
 }
 
 /**
- * A plain tap on a grid tile: opens the folder/media, or -- if already selecting (read live off
- * the ViewModel, never a stale composition snapshot, since this runs from inside a long-lived
- * gesture callback) -- toggles that item's selection instead.
- */
-private fun openOrToggle(
-    flatIndex: Int,
-    folders: List<FolderNode>,
-    media: List<MediaItem>,
-    viewModel: GalleryViewModel,
-    path: String,
-    pinToBottom: Boolean,
-    onOpenFolder: (String) -> Unit,
-    onOpenMedia: (path: String, index: Int) -> Unit,
-) {
-    val isSelectionMode = viewModel.selectedMediaIds.value.isNotEmpty() || viewModel.selectedFolderPaths.value.isNotEmpty()
-    val (folder, item) = folderOrMediaAt(flatIndex, folders, media, pinToBottom)
-    if (folder != null) {
-        if (isSelectionMode) viewModel.toggleFolderSelection(folder.path) else onOpenFolder(folder.path)
-    } else if (item != null) {
-        val mediaIndex = media.indexOf(item)
-        if (isSelectionMode) viewModel.toggleMediaSelection(item.id) else onOpenMedia(path, mediaIndex)
-    }
-}
-
-/**
  * The mixed grid/list branch's equivalent of [itemIndexAt] + [folderOrMediaAt]: maps a drag/long-
  * press position to the folder/media item under it, working from each visible row's own key
  * rather than a flat index -- a row is either a single [FolderListRow]/[MediaListRow] (key
@@ -1054,26 +1054,6 @@ private fun folderOrMediaAtListPosition(
 private fun selectPair(pair: Pair<FolderNode?, MediaItem?>?, viewModel: GalleryViewModel) {
     pair?.first?.let { viewModel.setFolderSelected(it.path, true) }
     pair?.second?.let { viewModel.setMediaSelected(it.id, true) }
-}
-
-/** [openOrToggle]'s equivalent for a resolved folder/media pair instead of a flat grid index. */
-private fun openOrTogglePair(
-    pair: Pair<FolderNode?, MediaItem?>?,
-    viewModel: GalleryViewModel,
-    path: String,
-    media: List<MediaItem>,
-    onOpenFolder: (String) -> Unit,
-    onOpenMedia: (path: String, index: Int) -> Unit,
-) {
-    val isSelectionMode = viewModel.selectedMediaIds.value.isNotEmpty() || viewModel.selectedFolderPaths.value.isNotEmpty()
-    val folder = pair?.first
-    val item = pair?.second
-    if (folder != null) {
-        if (isSelectionMode) viewModel.toggleFolderSelection(folder.path) else onOpenFolder(folder.path)
-    } else if (item != null) {
-        val mediaIndex = media.indexOf(item)
-        if (isSelectionMode) viewModel.toggleMediaSelection(item.id) else onOpenMedia(path, mediaIndex)
-    }
 }
 
 /** The sort order that actually applies at [path]: its own override if it has one, else the
