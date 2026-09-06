@@ -1323,14 +1323,25 @@ internal fun sortedMedia(media: List<MediaItem>, order: FolderSortOrder): List<M
  */
 internal fun groupMedia(media: List<MediaItem>, setting: FolderGroupSetting): List<Pair<String, List<MediaItem>>> {
     if (media.isEmpty() || setting.criterion == GroupCriterion.NONE) return emptyList()
+    // Each branch's lambda is assigned to a named local first, then returned as that plain
+    // identifier -- NOT returned directly as the block's last expression -- because a `{ ... }`
+    // lambda literal immediately following a call expression (SimpleDateFormat(...) here) on the
+    // very next line is parsed by Kotlin as a TRAILING LAMBDA ARGUMENT to that call, not as its
+    // own separate statement, however clear the intent looks with a line break in between. That
+    // silently turned "val formatter = SimpleDateFormat(...)" plus a following lambda literal
+    // into an attempt to call SimpleDateFormat's constructor WITH a trailing lambda parameter (a
+    // constructor overload that doesn't exist), which is what actually failed to compile.
+    // Referencing the lambda by name as the last statement sidesteps the ambiguity entirely.
     val labelOf: (MediaItem) -> String = when (setting.criterion) {
         GroupCriterion.LAST_MODIFIED_DAILY -> {
             val formatter = java.text.SimpleDateFormat("MMMM d, yyyy", java.util.Locale.getDefault())
-            { item -> formatter.format(java.util.Date(item.dateModifiedSec * 1000)) }
+            val label: (MediaItem) -> String = { item -> formatter.format(java.util.Date(item.dateModifiedSec * 1000)) }
+            label
         }
         GroupCriterion.LAST_MODIFIED_MONTHLY -> {
             val formatter = java.text.SimpleDateFormat("MMMM yyyy", java.util.Locale.getDefault())
-            { item -> formatter.format(java.util.Date(item.dateModifiedSec * 1000)) }
+            val label: (MediaItem) -> String = { item -> formatter.format(java.util.Date(item.dateModifiedSec * 1000)) }
+            label
         }
         GroupCriterion.FILE_TYPE -> { item -> if (item.isVideo) "Videos" else "Photos" }
         GroupCriterion.EXTENSION -> {
