@@ -225,7 +225,16 @@ fun MediaViewerScreen(
                 Box(Modifier.fillMaxSize()) {
                     ZoomableMediaBox(
                         onScaleChanged = { currentScale = it },
-                        onTap = { videoState.controlsVisible = !videoState.controlsVisible },
+                        // A tap on the video itself both reveals the controls AND toggles
+                        // play/pause in the same motion -- previously it only revealed the
+                        // controls, requiring a second, separate tap on the pause button to
+                        // actually pause, which read as sluggish/two-step for something every
+                        // other video player treats as a single tap.
+                        onTap = {
+                            videoState.controlsVisible = !videoState.controlsVisible
+                            val player = videoState.exoPlayer
+                            if (player.isPlaying) player.pause() else player.play()
+                        },
                         onSwipeNext = onSwipeNext,
                         onSwipePrevious = onSwipePrevious,
                     ) {

@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -642,6 +643,8 @@ fun GalleryScreen(
                             }
                             FastScrollbar(
                                 gridState = gridState,
+                                media = media,
+                                dateDividersEnabled = dateDividersEnabled,
                                 modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
                             )
                         }
@@ -841,6 +844,8 @@ fun GalleryScreen(
                             }
                             FastScrollbar(
                                 listState = listState,
+                                media = media,
+                                dateDividersEnabled = dateDividersEnabled,
                                 modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
                             )
                         }
@@ -860,6 +865,10 @@ private val FAST_SCROLLBAR_THUMB_WIDTH = 4.dp
 private val FAST_SCROLLBAR_TOUCH_WIDTH = 24.dp
 private val FAST_SCROLLBAR_GUTTER = 6.dp
 
+/** Gap between the invisible drag target's left edge and the current-date bubble shown while
+ * dragging in a date-divided folder -- so the bubble never overlaps the thumb/touch zone itself. */
+private val FAST_DATE_BUBBLE_GUTTER = 8.dp
+
 /** How much end space the grid/list needs to reserve (as contentPadding) so no tile or row ever
  * renders behind [FastScrollbar] -- the invisible drag target's width plus a small gutter of clear
  * space between it and the content. */
@@ -870,13 +879,23 @@ private val FAST_SCROLLBAR_CLEARANCE = FAST_SCROLLBAR_TOUCH_WIDTH + FAST_SCROLLB
  * real content: [FAST_SCROLLBAR_CLEARANCE] is reserved as the grid/list's own end contentPadding,
  * so this whole bar (plus its gutter) sits in space no tile is ever drawn into. */
 @Composable
-private fun FastScrollbar(gridState: LazyGridState, modifier: Modifier = Modifier) {
+private fun FastScrollbar(
+    gridState: LazyGridState,
+    media: List<MediaItem>,
+    dateDividersEnabled: Boolean,
+    modifier: Modifier = Modifier,
+) {
     val scope = rememberCoroutineScope()
     val info = gridState.layoutInfo
     FastScrollbarTrack(
         firstVisibleIndex = gridState.firstVisibleItemIndex,
         visibleCount = info.visibleItemsInfo.size,
         totalCount = info.totalItemsCount,
+        currentLabel = if (dateDividersEnabled) {
+            currentDateGroupLabel(info.visibleItemsInfo.firstOrNull()?.key, media)
+        } else {
+            null
+        },
         onDragToFraction = { fraction ->
             val total = gridState.layoutInfo.totalItemsCount
             if (total > 0) {
@@ -897,13 +916,23 @@ private fun FastScrollbar(gridState: LazyGridState, modifier: Modifier = Modifie
 
 /** See the [LazyGridState] overload -- same idea, for the mixed grid/list branch's [LazyColumn]. */
 @Composable
-private fun FastScrollbar(listState: LazyListState, modifier: Modifier = Modifier) {
+private fun FastScrollbar(
+    listState: LazyListState,
+    media: List<MediaItem>,
+    dateDividersEnabled: Boolean,
+    modifier: Modifier = Modifier,
+) {
     val scope = rememberCoroutineScope()
     val info = listState.layoutInfo
     FastScrollbarTrack(
         firstVisibleIndex = listState.firstVisibleItemIndex,
         visibleCount = info.visibleItemsInfo.size,
         totalCount = info.totalItemsCount,
+        currentLabel = if (dateDividersEnabled) {
+            currentDateGroupLabel(info.visibleItemsInfo.firstOrNull()?.key, media)
+        } else {
+            null
+        },
         onDragToFraction = { fraction ->
             val total = listState.layoutInfo.totalItemsCount
             if (total > 0) {
@@ -918,11 +947,40 @@ private fun FastScrollbar(listState: LazyListState, modifier: Modifier = Modifie
     )
 }
 
+/** The "<Month> <Year>" label (e.g. "September 2022") for whichever date group the topmost
+ * visible grid/list item belongs to, read directly off that item's own key -- every divider and
+ * media item's key already encodes exactly this (see the "divider:$label"/"media:$id"/
+ * "mediaRow:$id|$id..." keys used when declaring grid/list items above), so reading it back here
+ * can never drift out of sync with what's actually rendered the way re-deriving it from a flat
+ * index would. Null for a folder row/tile (folders aren't dated) or once there's nothing visible
+ * yet. */
+private fun currentDateGroupLabel(key: Any?, media: List<MediaItem>): String? {
+    val keyString = key as? String ?: return null
+    return when {
+        keyString.startsWith("divider:") -> keyString.removePrefix("divider:")
+        keyString.startsWith("media:") -> {
+            val id = keyString.removePrefix("media:").toLongOrNull()
+            monthYearLabel(media.firstOrNull { it.id == id })
+        }
+        keyString.startsWith("mediaRow:") -> {
+            val firstId = keyString.removePrefix("mediaRow:").substringBefore("|").toLongOrNull()
+            monthYearLabel(media.firstOrNull { it.id == firstId })
+        }
+        else -> null
+    }
+}
+
+private fun monthYearLabel(item: MediaItem?): String? {
+    item ?: return null
+    return java.text.SimpleDateFormat("MMMM yyyy", java.util.Locale.getDefault()).format(java.util.Date(item.dateModifiedSec * 1000))
+}
+
 @Composable
 private fun FastScrollbarTrack(
     firstVisibleIndex: Int,
     visibleCount: Int,
     totalCount: Int,
+    currentLabel: String?,
     onDragToFraction: (Float) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -936,21 +994,42 @@ private fun FastScrollbarTrack(
         val scrollRange = (totalCount - visibleCount).coerceAtLeast(1)
         val positionFraction = (firstVisibleIndex.toFloat() / scrollRange).coerceIn(0f, 1f)
         val thumbOffsetPx = (trackHeightPx - thumbHeightPx) * positionFraction
+        // Only shown while actively dragging the thumb -- like the reference file manager's date
+        // bubble, it's a "where am I" readout for the fast-scroll gesture itself, not a permanent
+        // fixture, so it shouldn't linger once the finger lifts or clutter ordinary scrolling.
+        var isDragging by remember { mutableStateOf(false) }
 
-        fun onDragTo(yPx: Float) {
+        // Read through this (never the raw thumbHeightPx/trackHeightPx captured above) from
+        // inside the gesture below -- see that pointerInput's own comment for why.
+        val onDragTo = rememberUpdatedState { yPx: Float ->
             val usableTrack = (trackHeightPx - thumbHeightPx).coerceAtLeast(1f)
             onDragToFraction(((yPx - thumbHeightPx / 2f) / usableTrack).coerceIn(0f, 1f))
         }
 
         // The full (wider, invisible) touch target handles the drag, so a finger doesn't need to
         // land precisely on the slim visible thumb to grab it.
+        //
+        // Keyed on Unit (never totalCount/visibleCount) -- those change continuously while
+        // scrolling, since visibleCount fluctuates as items scroll past the viewport edge even
+        // mid-drag. Keying pointerInput on either one used to cancel and restart this exact
+        // gesture's coroutine the instant either changed, which -- because a restarted
+        // pointerInput has no down event to resume from -- killed detectDragGestures right in the
+        // middle of a drag: the thumb would stop responding after tracking the finger for a
+        // single step, as if released, even though the finger was still down. rememberUpdatedState
+        // is what lets the gesture stay keyed on Unit (never restarting) while still always
+        // calling through to this composition's latest onDragTo, so the drag conversion math
+        // never goes stale either.
         Box(
             Modifier
                 .fillMaxSize()
-                .pointerInput(totalCount, visibleCount) {
-                    detectDragGestures(onDragStart = { offset -> onDragTo(offset.y) }) { change, _ ->
+                .pointerInput(Unit) {
+                    detectDragGestures(
+                        onDragStart = { offset -> isDragging = true; onDragTo.value(offset.y) },
+                        onDragEnd = { isDragging = false },
+                        onDragCancel = { isDragging = false },
+                    ) { change, _ ->
                         change.consume()
-                        onDragTo(change.position.y)
+                        onDragTo.value(change.position.y)
                     }
                 },
         )
@@ -963,6 +1042,31 @@ private fun FastScrollbarTrack(
                 .clip(RoundedCornerShape(FAST_SCROLLBAR_THUMB_WIDTH / 2))
                 .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)),
         )
+        if (isDragging && currentLabel != null) {
+            Box(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .offset { IntOffset(0, thumbOffsetPx.roundToInt()) }
+                    .height(with(density) { thumbHeightPx.toDp() })
+                    // unbounded=true so the pill (usually taller than a thin thumb, especially
+                    // for a long folder where the thumb itself is tiny) isn't squashed down to
+                    // the thumb's own height -- it's still centered on the thumb's vertical
+                    // midpoint, just free to be its own natural size.
+                    .wrapContentHeight(Alignment.CenterVertically, unbounded = true)
+                    .offset(x = -(FAST_SCROLLBAR_TOUCH_WIDTH + FAST_DATE_BUBBLE_GUTTER)),
+            ) {
+                Text(
+                    text = currentLabel,
+                    color = MaterialTheme.colorScheme.onPrimary,
+                    style = MaterialTheme.typography.labelLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(50))
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                )
+            }
+        }
     }
 }
 

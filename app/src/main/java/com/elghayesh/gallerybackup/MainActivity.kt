@@ -7,12 +7,15 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -40,7 +43,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.Lifecycle
 import androidx.navigation.NavController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -195,37 +197,53 @@ class MainActivity : ComponentActivity() {
 }
 
 /**
- * Every screen transition in this app's NavHost animates (the default Navigation Compose
- * crossfade/slide), which takes a moment to actually settle -- during that window the
- * destination that triggered it is in the STARTED lifecycle state, not yet RESUMED. A second
- * navigate() call landing in that window (a genuine double-tap, or a single tap somehow producing
- * two click events -- gesture ambiguity across a tap and a long-press timer racing each other can
- * do this) doesn't get rejected by NavController on its own: it's simply pushed as a second
- * transition on top of the first, before the first one ever finished. That's what was actually
- * behind three seemingly unrelated glitches all being reported for the same action of opening a
- * folder: the second navigate() interrupting the first's still-playing transition is why the
- * animation was inconsistent (sometimes visibly cut short, sometimes not triggered at all if it
- * landed early enough); and since a folder's own screen is often already composed and laid out
- * behind that still-finishing transition, a second click can land on ITS content instead of the
- * tile that was actually tapped -- opening a media item that happens to be at that same screen
- * position instead of the folder, or a different folder tile than the one under the finger. None
- * of this was a hit-testing bug in the gallery grid itself (already rewritten twice this session);
- * it's specifically about a second, redundant navigation call being allowed to fire while the
- * first hadn't settled yet. Routing every forward navigation through this guard -- which only
- * calls through once the current back stack entry has actually reached RESUMED, i.e. its own
- * transition is done -- makes a second call while one is still in flight a no-op instead of a
- * second, conflicting destination change.
+ * Three seemingly unrelated glitches all reported for the same action of opening a folder --
+ * opening a media item instead, opening a different folder, and the transition animation
+ * sometimes not playing -- all actually traced back to the default Navigation Compose
+ * crossfade: it keeps the outgoing screen composed (and, critically, still hit-testable) while
+ * the incoming one fades in on top, so a second tap landing in that overlap window could resolve
+ * against whatever ends up on top there instead of the tile actually under the finger. Gating
+ * navigate() calls on the destination reaching the RESUMED lifecycle state (this function's
+ * previous approach) papered over that by refusing ANY second navigate() until the whole ~300ms
+ * transition settled -- which also swallowed a person's own deliberate fast taps when quickly
+ * opening and closing folders, since those legitimately land inside that same window.
+ *
+ * The actual fix is [AppNavHost] passing `EnterTransition.None`/`ExitTransition.None` for every
+ * destination, which removes the crossfade (and the animation-consistency complaint along with
+ * it): a new destination is composed and made exclusively interactive in the same frame, with no
+ * window where the outgoing screen can still catch a stray tap. That leaves this guard only a
+ * much smaller job -- filtering a genuine single-tap-fires-twice artifact (gesture ambiguity
+ * between a tap and a long-press timer racing each other can occasionally do this), which shows
+ * up as two navigate() calls mere milliseconds apart -- so it only needs to reject a second call
+ * within a short real-time window, short enough to never interfere with someone deliberately
+ * tapping through folders quickly.
  */
+private const val NAVIGATE_DEBOUNCE_MS = 150L
+private var lastNavigateAtMs = 0L
+
 private fun NavController.navigateSafely(route: String) {
-    if (currentBackStackEntry?.lifecycle?.currentState == Lifecycle.State.RESUMED) {
-        navigate(route)
-    }
+    val now = SystemClock.elapsedRealtime()
+    if (now - lastNavigateAtMs < NAVIGATE_DEBOUNCE_MS) return
+    lastNavigateAtMs = now
+    navigate(route)
 }
 
 @Composable
 private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: BackupViewModel) {
     val navController = rememberNavController()
-    NavHost(navController = navController, startDestination = "gallery/{path}") {
+    // No crossfade/slide between destinations -- see navigateSafely's doc comment above for why
+    // an animated transition (which keeps the outgoing screen composed and hit-testable while the
+    // incoming one fades in) was the actual root cause of taps resolving against the wrong
+    // screen. An instant cut has no such overlap window, and also means there's no animation left
+    // to look inconsistent.
+    NavHost(
+        navController = navController,
+        startDestination = "gallery/{path}",
+        enterTransition = { EnterTransition.None },
+        exitTransition = { ExitTransition.None },
+        popEnterTransition = { EnterTransition.None },
+        popExitTransition = { ExitTransition.None },
+    ) {
         composable(
             route = "gallery/{path}",
             arguments = listOf(navArgument("path") { type = NavType.StringType; defaultValue = "" }),
