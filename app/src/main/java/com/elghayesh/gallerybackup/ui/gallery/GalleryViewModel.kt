@@ -20,6 +20,7 @@ import com.elghayesh.gallerybackup.data.settings.AccentColor
 import com.elghayesh.gallerybackup.data.settings.FolderCover
 import com.elghayesh.gallerybackup.data.settings.FolderSortOrder
 import com.elghayesh.gallerybackup.data.settings.FolderSortOverride
+import com.elghayesh.gallerybackup.data.settings.FolderGroupSetting
 import com.elghayesh.gallerybackup.data.settings.GalleryPreferencesRepository
 import com.elghayesh.gallerybackup.data.settings.ThemeMode
 import com.elghayesh.gallerybackup.data.settings.ViewType
@@ -136,8 +137,8 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         prefs.favoriteMediaIds.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
     val pinContentToBottom: StateFlow<Boolean> =
         prefs.pinContentToBottom.stateIn(viewModelScope, SharingStarted.Eagerly, false)
-    val dateDividerFolders: StateFlow<Set<String>> =
-        prefs.dateDividerFolders.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
+    val folderGroupSettings: StateFlow<Map<String, FolderGroupSetting>> =
+        prefs.folderGroupSettings.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
 
     /** [root] with hidden/trashed content removed, plus any still-empty user-created folders added in. */
     val visibleRoot: StateFlow<FolderNode?> = combine(
@@ -244,8 +245,8 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setMediaFavorite(id: Long, favorite: Boolean) = viewModelScope.launch { prefs.setMediaFavorite(id, favorite) }
     fun setPinContentToBottom(value: Boolean) = viewModelScope.launch { prefs.setPinContentToBottom(value) }
-    fun setFolderDateDividers(path: String, enabled: Boolean) =
-        viewModelScope.launch { prefs.setFolderDateDividers(path, enabled) }
+    fun setFolderGroupSetting(path: String, setting: FolderGroupSetting) =
+        viewModelScope.launch { prefs.setFolderGroupSetting(path, setting) }
 
     /** Favorites every id in [ids] if any of them isn't already a favorite, otherwise un-favorites them all. */
     fun toggleFavorites(ids: List<Long>) {

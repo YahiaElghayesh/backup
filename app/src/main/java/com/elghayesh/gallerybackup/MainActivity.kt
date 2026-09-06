@@ -56,6 +56,8 @@ import com.elghayesh.gallerybackup.ui.gallery.FolderVisibilityExplorerScreen
 import com.elghayesh.gallerybackup.ui.gallery.GalleryScreen
 import com.elghayesh.gallerybackup.ui.gallery.GallerySettingsScreen
 import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
+import com.elghayesh.gallerybackup.ui.gallery.effectiveFolderSort
+import com.elghayesh.gallerybackup.ui.gallery.sortedMedia
 import com.elghayesh.gallerybackup.ui.settings.BackupFolderExplorerScreen
 import com.elghayesh.gallerybackup.ui.settings.BackupSettingsScreen
 import com.elghayesh.gallerybackup.ui.settings.BackupViewModel
@@ -335,7 +337,12 @@ private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: Back
             val path = URLDecoder.decode(backStackEntry.arguments?.getString("path") ?: "", "UTF-8")
             val index = backStackEntry.arguments?.getInt("index") ?: 0
             val root by galleryViewModel.visibleRoot.collectAsState()
-            val item = root?.findNode(path)?.items?.sortedByDescending { it.dateModifiedSec }?.getOrNull(index)
+            val folderSort by galleryViewModel.folderSort.collectAsState()
+            val folderSortOverrides by galleryViewModel.folderSortOverrides.collectAsState()
+            // Same effectiveFolderSort/sortedMedia as GalleryScreen -- see sortedMedia's own doc
+            // comment for why a hardcoded newest-first here could open the wrong item.
+            val order = effectiveFolderSort(path, folderSort, folderSortOverrides)
+            val item = sortedMedia(root?.findNode(path)?.items ?: emptyList(), order).getOrNull(index)
             if (item != null) {
                 PhotoEditScreen(item = item, viewModel = galleryViewModel, onDone = { navController.popBackStack() })
             }
@@ -350,7 +357,10 @@ private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: Back
             val path = URLDecoder.decode(backStackEntry.arguments?.getString("path") ?: "", "UTF-8")
             val index = backStackEntry.arguments?.getInt("index") ?: 0
             val root by galleryViewModel.visibleRoot.collectAsState()
-            val item = root?.findNode(path)?.items?.sortedByDescending { it.dateModifiedSec }?.getOrNull(index)
+            val folderSort by galleryViewModel.folderSort.collectAsState()
+            val folderSortOverrides by galleryViewModel.folderSortOverrides.collectAsState()
+            val order = effectiveFolderSort(path, folderSort, folderSortOverrides)
+            val item = sortedMedia(root?.findNode(path)?.items ?: emptyList(), order).getOrNull(index)
             if (item != null) {
                 VideoTrimScreen(item = item, viewModel = galleryViewModel, onDone = { navController.popBackStack() })
             }

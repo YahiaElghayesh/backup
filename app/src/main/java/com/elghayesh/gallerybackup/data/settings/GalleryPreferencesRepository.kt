@@ -75,6 +75,28 @@ sealed class FolderCover {
  * global default, and doesn't create one of these. */
 data class FolderSortOverride(val order: FolderSortOrder, val includeSubfolders: Boolean)
 
+/** What a folder's media listing is split into runs by, with a small label + line between each
+ * run. [NONE] means "don't group" -- a folder simply absent from
+ * [GalleryPreferencesRepository.folderGroupSettings] behaves the same as [NONE], so opting back
+ * out removes its entry entirely rather than storing an explicit "off". [LAST_MODIFIED_DAILY]/
+ * [LAST_MODIFIED_MONTHLY] group by [com.elghayesh.gallerybackup.data.media.MediaItem.dateModifiedSec]
+ * (the file's own modified time -- MediaStore's DATE_TAKEN isn't captured by the scanner yet, so
+ * this deliberately isn't labeled "date taken" until that's true). [FILE_TYPE] splits
+ * photos from videos; [EXTENSION] splits by the file's own extension (e.g. "jpg", "mp4"). */
+enum class GroupCriterion(val label: String) {
+    NONE("Do not group files"),
+    LAST_MODIFIED_DAILY("Last modified (daily)"),
+    LAST_MODIFIED_MONTHLY("Last modified (monthly)"),
+    FILE_TYPE("File type"),
+    EXTENSION("Extension"),
+}
+
+/** A folder's own group-by choice -- opt-in per folder (like [FolderSortOverride] is per-scope),
+ * since grouping only makes sense for a folder with enough of a spread in whatever it's grouped by
+ * to matter. [ascending] orders the runs themselves: oldest-group-first for the date criteria,
+ * A-Z for [GroupCriterion.FILE_TYPE]/[GroupCriterion.EXTENSION]'s labels. */
+data class FolderGroupSetting(val criterion: GroupCriterion, val ascending: Boolean)
+
 /**
  * Gallery display/browsing preferences: how folders look and sort, theming, and which
  * folders/items are excluded or hidden from view. Separate from [SettingsRepository],
@@ -109,7 +131,7 @@ class GalleryPreferencesRepository(private val context: Context) {
         val FOLDER_COVERS_JSON = stringPreferencesKey("folder_covers_json")
         val FAVORITE_MEDIA_IDS = stringSetPreferencesKey("favorite_media_ids")
         val PIN_CONTENT_TO_BOTTOM = booleanPreferencesKey("pin_content_to_bottom")
-        val DATE_DIVIDER_FOLDERS = stringSetPreferencesKey("date_divider_folders")
+        val FOLDER_GROUP_SETTINGS_JSON = stringPreferencesKey("folder_group_settings_json")
     }
 
     private fun legacyViewType(prefs: androidx.datastore.preferences.core.Preferences): ViewType? =
@@ -218,16 +240,19 @@ class GalleryPreferencesRepository(private val context: Context) {
         context.galleryPrefsStore.edit { it[Keys.PIN_CONTENT_TO_BOTTOM] = value }
     }
 
-    /** Folders whose media listing groups by month/year, with a small divider label between each
-     * group -- opt-in per folder rather than global, since it only makes sense for folders with
-     * enough of a date spread to matter. */
-    val dateDividerFolders: Flow<Set<String>> =
-        context.galleryPrefsStore.data.map { it[Keys.DATE_DIVIDER_FOLDERS] ?: emptySet() }
+    /** Per-folder group-by choices, keyed by folder path. A folder absent from this map is
+     * ungrouped -- see [FolderGroupSetting]. */
+    val folderGroupSettings: Flow<Map<String, FolderGroupSetting>> =
+        context.galleryPrefsStore.data.map { parseFolderGroupSettings(it[Keys.FOLDER_GROUP_SETTINGS_JSON]) }
 
-    suspend fun setFolderDateDividers(path: String, enabled: Boolean) {
+    /** Sets [path]'s group-by choice, or clears it entirely when [setting]'s criterion is
+     * [GroupCriterion.NONE] -- mirroring the previous simple on/off toggle's behavior of just
+     * removing the folder from the set rather than persisting an explicit "off" entry. */
+    suspend fun setFolderGroupSetting(path: String, setting: FolderGroupSetting) {
         context.galleryPrefsStore.edit { prefs ->
-            val current = prefs[Keys.DATE_DIVIDER_FOLDERS] ?: emptySet()
-            prefs[Keys.DATE_DIVIDER_FOLDERS] = if (enabled) current + path else current - path
+            val current = parseFolderGroupSettings(prefs[Keys.FOLDER_GROUP_SETTINGS_JSON]).toMutableMap()
+            if (setting.criterion == GroupCriterion.NONE) current.remove(path) else current[path] = setting
+            prefs[Keys.FOLDER_GROUP_SETTINGS_JSON] = serializeFolderGroupSettings(current)
         }
     }
 
@@ -439,6 +464,36 @@ class GalleryPreferencesRepository(private val context: Context) {
                     put("path", path)
                     put("order", override.order.name)
                     put("subfolders", override.includeSubfolders)
+                },
+            )
+        }
+        return array.toString()
+    }
+
+    private fun parseFolderGroupSettings(json: String?): Map<String, FolderGroupSetting> {
+        if (json.isNullOrBlank()) return emptyMap()
+        return try {
+            val array = org.json.JSONArray(json)
+            buildMap {
+                for (i in 0 until array.length()) {
+                    val obj = array.getJSONObject(i)
+                    val criterion = runCatching { GroupCriterion.valueOf(obj.getString("criterion")) }.getOrNull() ?: continue
+                    put(obj.getString("path"), FolderGroupSetting(criterion, obj.getBoolean("ascending")))
+                }
+            }
+        } catch (e: Exception) {
+            emptyMap()
+        }
+    }
+
+    private fun serializeFolderGroupSettings(map: Map<String, FolderGroupSetting>): String {
+        val array = org.json.JSONArray()
+        for ((path, setting) in map) {
+            array.put(
+                org.json.JSONObject().apply {
+                    put("path", path)
+                    put("criterion", setting.criterion.name)
+                    put("ascending", setting.ascending)
                 },
             )
         }

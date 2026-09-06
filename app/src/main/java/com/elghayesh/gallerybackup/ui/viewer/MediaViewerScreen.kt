@@ -76,6 +76,8 @@ import com.elghayesh.gallerybackup.ui.common.RenameDialog
 import com.elghayesh.gallerybackup.ui.common.rememberDeleteRequester
 import com.elghayesh.gallerybackup.ui.common.shareMedia
 import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
+import com.elghayesh.gallerybackup.ui.gallery.effectiveFolderSort
+import com.elghayesh.gallerybackup.ui.gallery.sortedMedia
 
 private enum class ViewerTransferMode { MOVE, COPY }
 
@@ -97,8 +99,14 @@ fun MediaViewerScreen(
     val visibleRoot by viewModel.visibleRoot.collectAsState()
     val hiddenMediaIds by viewModel.hiddenMediaIds.collectAsState()
     val favoriteMediaIds by viewModel.favoriteMediaIds.collectAsState()
-    val media = remember(visibleRoot, path) {
-        visibleRoot?.findNode(path)?.items?.sortedByDescending { it.dateModifiedSec } ?: emptyList()
+    val folderSort by viewModel.folderSort.collectAsState()
+    val folderSortOverrides by viewModel.folderSortOverrides.collectAsState()
+    // Must use sortedMedia with this folder's own effectiveFolderSort -- not a hardcoded
+    // newest-first -- so an index picked from GalleryScreen's grid (which sorts the exact same
+    // way) always resolves to the same item here, however the folder is currently sorted.
+    val media = remember(visibleRoot, path, folderSort, folderSortOverrides) {
+        val order = effectiveFolderSort(path, folderSort, folderSortOverrides)
+        sortedMedia(visibleRoot?.findNode(path)?.items ?: emptyList(), order)
     }
 
     if (media.isEmpty()) {
@@ -232,8 +240,7 @@ fun MediaViewerScreen(
                         // other video player treats as a single tap.
                         onTap = {
                             videoState.controlsVisible = !videoState.controlsVisible
-                            val player = videoState.exoPlayer
-                            if (player.isPlaying) player.pause() else player.play()
+                            videoState.togglePlayPause()
                         },
                         onSwipeNext = onSwipeNext,
                         onSwipePrevious = onSwipePrevious,
@@ -374,6 +381,19 @@ private class VideoPlayerState(val exoPlayer: ExoPlayer) {
     var positionMs by mutableStateOf(0L)
     var durationMs by mutableStateOf(0L)
     var isScrubbing by mutableStateOf(false)
+
+    /** Pauses/resumes and updates [isPlaying] in the same call -- the background poll in
+     * [rememberVideoPlayerState] only re-reads [ExoPlayer.isPlaying] every 300ms, so relying on it
+     * alone to update the play/pause icon left a brief but visible window where a control just
+     * pressed still showed its OLD state (e.g. tapping to pause briefly still showed the pause
+     * icon, as if still playing, before flipping to the correct play icon a moment later once the
+     * poll caught up). Setting isPlaying here, synchronously with the toggle itself, closes that
+     * window -- ExoPlayer's pause()/play() update playWhenReady (and so isPlaying) immediately on
+     * the calling thread, before this even returns. */
+    fun togglePlayPause() {
+        if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
+        isPlaying = exoPlayer.isPlaying
+    }
 }
 
 @Composable
@@ -447,7 +467,7 @@ private fun VideoControlsOverlay(state: VideoPlayerState) {
                     contentDescription = if (state.isPlaying) "Pause" else "Play",
                     size = 72.dp,
                 ) {
-                    if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
+                    state.togglePlayPause()
                 }
                 PlayerControlButton(Icons.Filled.Forward10, "Forward 10 seconds") {
                     exoPlayer.seekTo((exoPlayer.currentPosition + 10_000).coerceAtMost(exoPlayer.duration.coerceAtLeast(0)))

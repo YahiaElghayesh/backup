@@ -64,6 +64,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -120,8 +121,10 @@ import com.elghayesh.gallerybackup.data.media.promotedChildren
 import com.elghayesh.gallerybackup.data.media.promotionAwareCoverUri
 import com.elghayesh.gallerybackup.data.media.promotionAwareItemCount
 import com.elghayesh.gallerybackup.data.settings.FolderCover
+import com.elghayesh.gallerybackup.data.settings.FolderGroupSetting
 import com.elghayesh.gallerybackup.data.settings.FolderSortOrder
 import com.elghayesh.gallerybackup.data.settings.FolderSortOverride
+import com.elghayesh.gallerybackup.data.settings.GroupCriterion
 import com.elghayesh.gallerybackup.data.settings.ViewType
 import com.elghayesh.gallerybackup.ui.common.CreateFolderDialog
 import com.elghayesh.gallerybackup.ui.common.FolderCoverDialog
@@ -178,8 +181,9 @@ fun GalleryScreen(
     val folderCovers by viewModel.folderCovers.collectAsState()
     val favoriteMediaIds by viewModel.favoriteMediaIds.collectAsState()
     val pinContentToBottom by viewModel.pinContentToBottom.collectAsState()
-    val dateDividerFolders by viewModel.dateDividerFolders.collectAsState()
-    val dateDividersEnabled = path in dateDividerFolders
+    val folderGroupSettings by viewModel.folderGroupSettings.collectAsState()
+    val groupSetting = folderGroupSettings[path] ?: FolderGroupSetting(GroupCriterion.NONE, true)
+    val dateDividersEnabled = groupSetting.criterion != GroupCriterion.NONE
     val node = visibleRoot?.findNode(path)
 
     // A pinned folder is promoted out of its real parent's listing wherever that parent is shown
@@ -214,7 +218,13 @@ fun GalleryScreen(
     } else {
         realFolders
     }
-    val media = if (hasSelfTile) emptyList() else node?.items?.sortedByDescending { it.dateModifiedSec } ?: emptyList()
+    // Previously always hardcoded to newest-first regardless of the folder's own sort order/
+    // override -- meaning changing "Sort by" did nothing at all for a folder made up of media
+    // rather than subfolders, since only the (separate) folders list respected it. Applying the
+    // exact same effectiveFolderSort here is also why MediaViewerScreen and the photo/video
+    // editors independently recompute it too (see sortedMedia's own doc comment) -- an index
+    // picked from this list has to resolve to the same item wherever else that index is used.
+    val media = if (hasSelfTile) emptyList() else sortedMedia(node?.items ?: emptyList(), effectiveFolderSort)
     // Read fresh inside the drag-select pointerInput below without needing folders/media in its
     // key -- keying on them directly would restart that gesture's coroutine (and lose an
     // in-progress drag) the instant a selection change recomposes this screen and produces new
@@ -231,6 +241,7 @@ fun GalleryScreen(
 
     var overflowExpanded by remember { mutableStateOf(false) }
     var showSortDialog by remember { mutableStateOf(false) }
+    var showGroupByDialog by remember { mutableStateOf(false) }
     var transferMode by remember { mutableStateOf<FolderTransferMode?>(null) }
     var showProperties by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
@@ -285,6 +296,13 @@ fun GalleryScreen(
             folderName = if (path.isEmpty()) "Gallery" else path.substringAfterLast('/'),
             onSelect = { order, scope -> viewModel.setFolderSort(order, scope, path) },
             onDismiss = { showSortDialog = false },
+        )
+    }
+    if (showGroupByDialog) {
+        GroupByDialog(
+            current = groupSetting,
+            onConfirm = { setting -> viewModel.setFolderGroupSetting(path, setting); showGroupByDialog = false },
+            onDismiss = { showGroupByDialog = false },
         )
     }
     if (showCreateFolderDialog) {
@@ -380,11 +398,8 @@ fun GalleryScreen(
                                     onClick = { overflowExpanded = false; showCreateFolderDialog = true },
                                 )
                                 DropdownMenuItem(
-                                    text = { Text(if (dateDividersEnabled) "Hide month/year dividers" else "Group by month/year") },
-                                    onClick = {
-                                        viewModel.setFolderDateDividers(path, !dateDividersEnabled)
-                                        overflowExpanded = false
-                                    },
+                                    text = { Text("Group by...") },
+                                    onClick = { overflowExpanded = false; showGroupByDialog = true },
                                 )
                                 DropdownMenuItem(
                                     text = { Text("Rescan device") },
@@ -589,7 +604,7 @@ fun GalleryScreen(
                                     )
                                 }
                                 if (dateDividersEnabled) {
-                                    groupMediaByMonth(media).forEach { (label, group) ->
+                                    groupMedia(media, groupSetting).forEach { (label, group) ->
                                         item(key = "divider:$label", span = { GridItemSpan(GRID_SPAN_UNITS) }) {
                                             DateDividerLabel(label)
                                         }
@@ -724,7 +739,7 @@ fun GalleryScreen(
                                 // list normally does.
                                 val groupedRows: List<Pair<String?, List<IndexedValue<MediaItem>>>> =
                                     if (dateDividersEnabled) {
-                                        groupMediaByMonth(media).flatMap { (label, group) ->
+                                        groupMedia(media, groupSetting).flatMap { (label, group) ->
                                             val indexed = group.map { IndexedValue(media.indexOf(it), it) }
                                             listOf(label to emptyList<IndexedValue<MediaItem>>()) +
                                                 indexed.chunked(mediaGridColumns).map { null to it }
@@ -772,7 +787,7 @@ fun GalleryScreen(
                             } else {
                                 val groupedItems: List<Pair<String?, IndexedValue<MediaItem>?>> =
                                     if (dateDividersEnabled) {
-                                        groupMediaByMonth(media).flatMap { (label, group) ->
+                                        groupMedia(media, groupSetting).flatMap { (label, group) ->
                                             listOf(label to null) + group.map { null to IndexedValue(media.indexOf(it), it) }
                                         }
                                     } else {
@@ -1281,16 +1296,51 @@ internal fun sortedFolders(folders: List<FolderNode>, order: FolderSortOrder, in
         FolderSortOrder.COUNT_ASC -> folders.sortedBy { it.promotionAwareItemCount(includedFolders) }
     }
 
-/** Groups already-ordered [media] into consecutive runs sharing the same calendar month and year
- * (e.g. "September 2026"), for the optional per-folder "group by month/year" display -- a run
- * breaks the moment the label changes, so this only makes sense applied to a list already sorted
- * by date (ascending or descending both work, just with the groups appearing in that same order). */
-private fun groupMediaByMonth(media: List<MediaItem>): List<Pair<String, List<MediaItem>>> {
-    if (media.isEmpty()) return emptyList()
-    val formatter = java.text.SimpleDateFormat("MMMM yyyy", java.util.Locale.getDefault())
+/** The same sort order a folder's subfolders are sorted by, applied to its own media items too --
+ * internal (like [sortedFolders]/[effectiveFolderSort]) so [MediaViewerScreen] and the photo/video
+ * editors can independently re-derive the exact same order an index was picked from here, rather
+ * than each hardcoding its own. [FolderSortOrder.COUNT_ASC]/[FolderSortOrder.COUNT_DESC] have no
+ * per-item analog (there's no "count" on a single photo) so they fall back to newest-first, same
+ * as the app's own long-standing default for media. */
+internal fun sortedMedia(media: List<MediaItem>, order: FolderSortOrder): List<MediaItem> =
+    when (order) {
+        FolderSortOrder.NAME_ASC -> media.sortedBy { it.displayName.lowercase() }
+        FolderSortOrder.NAME_DESC -> media.sortedByDescending { it.displayName.lowercase() }
+        FolderSortOrder.DATE_DESC, FolderSortOrder.COUNT_DESC -> media.sortedByDescending { it.dateModifiedSec }
+        FolderSortOrder.DATE_ASC, FolderSortOrder.COUNT_ASC -> media.sortedBy { it.dateModifiedSec }
+    }
+
+/**
+ * Splits already-ordered [media] into consecutive runs sharing the same label under [setting]'s
+ * criterion (e.g. "September 2026" for [GroupCriterion.LAST_MODIFIED_MONTHLY], "Videos"/"Photos"
+ * for [GroupCriterion.FILE_TYPE]) -- a run breaks the moment the label changes, so date grouping
+ * only forms one run per period when [media] is already date-sorted (as it usually is); this never
+ * re-sorts the items themselves, only regroups them, so a folder sorted by something else can
+ * still show correctly-labeled runs, just possibly more of them if the label isn't already
+ * contiguous. [GroupCriterion.NONE] returns no groups at all (callers check that first via
+ * whatever boolean they derive from the setting, same as the old dateDividersEnabled). Runs are
+ * reversed as a whole (not the items inside each) when [FolderGroupSetting.ascending] is false.
+ */
+internal fun groupMedia(media: List<MediaItem>, setting: FolderGroupSetting): List<Pair<String, List<MediaItem>>> {
+    if (media.isEmpty() || setting.criterion == GroupCriterion.NONE) return emptyList()
+    val labelOf: (MediaItem) -> String = when (setting.criterion) {
+        GroupCriterion.LAST_MODIFIED_DAILY -> {
+            val formatter = java.text.SimpleDateFormat("MMMM d, yyyy", java.util.Locale.getDefault())
+            { item -> formatter.format(java.util.Date(item.dateModifiedSec * 1000)) }
+        }
+        GroupCriterion.LAST_MODIFIED_MONTHLY -> {
+            val formatter = java.text.SimpleDateFormat("MMMM yyyy", java.util.Locale.getDefault())
+            { item -> formatter.format(java.util.Date(item.dateModifiedSec * 1000)) }
+        }
+        GroupCriterion.FILE_TYPE -> { item -> if (item.isVideo) "Videos" else "Photos" }
+        GroupCriterion.EXTENSION -> {
+            { item -> item.displayName.substringAfterLast('.', "").uppercase().ifEmpty { "No extension" } }
+        }
+        GroupCriterion.NONE -> { _ -> "" }
+    }
     val groups = mutableListOf<Pair<String, MutableList<MediaItem>>>()
     for (item in media) {
-        val label = formatter.format(java.util.Date(item.dateModifiedSec * 1000))
+        val label = labelOf(item)
         val lastGroup = groups.lastOrNull()
         if (lastGroup != null && lastGroup.first == label) {
             lastGroup.second.add(item)
@@ -1298,7 +1348,7 @@ private fun groupMediaByMonth(media: List<MediaItem>): List<Pair<String, List<Me
             groups.add(label to mutableListOf(item))
         }
     }
-    return groups
+    return if (setting.ascending) groups else groups.asReversed()
 }
 
 /** The small "September 2026"-style label + line the "group by month/year" folder option draws
@@ -1359,8 +1409,42 @@ private fun BoxScope.EmptyState(icon: ImageVector, title: String, subtitle: Stri
     }
 }
 
+/** The criterion half of a [FolderSortOrder] -- e.g. both [FolderSortOrder.NAME_ASC] and
+ * [FolderSortOrder.NAME_DESC] are [NAME], just with a different [FolderSortOrder.isAscending].
+ * Splitting the combined enum into criterion + direction for the dialog (see [SortDialog]) is what
+ * lets it show them as two separate, independent radio groups -- a criterion list of 3 plus an
+ * ascending/descending pair -- instead of one flat list of 6 combined options like "Name (A-Z)"
+ * that made changing only the direction for the same criterion mean re-scanning the whole list for
+ * the right combined entry. */
+private enum class SortCriterionUi(val label: String) {
+    NAME("Name"),
+    DATE_MODIFIED("Last modified"),
+    ITEM_COUNT("Item count"),
+}
+
+private fun FolderSortOrder.criterionUi(): SortCriterionUi = when (this) {
+    FolderSortOrder.NAME_ASC, FolderSortOrder.NAME_DESC -> SortCriterionUi.NAME
+    FolderSortOrder.DATE_ASC, FolderSortOrder.DATE_DESC -> SortCriterionUi.DATE_MODIFIED
+    FolderSortOrder.COUNT_ASC, FolderSortOrder.COUNT_DESC -> SortCriterionUi.ITEM_COUNT
+}
+
+private fun FolderSortOrder.isAscending(): Boolean =
+    this == FolderSortOrder.NAME_ASC || this == FolderSortOrder.DATE_ASC || this == FolderSortOrder.COUNT_ASC
+
+private fun sortOrderOf(criterion: SortCriterionUi, ascending: Boolean): FolderSortOrder = when (criterion) {
+    SortCriterionUi.NAME -> if (ascending) FolderSortOrder.NAME_ASC else FolderSortOrder.NAME_DESC
+    SortCriterionUi.DATE_MODIFIED -> if (ascending) FolderSortOrder.DATE_ASC else FolderSortOrder.DATE_DESC
+    SortCriterionUi.ITEM_COUNT -> if (ascending) FolderSortOrder.COUNT_ASC else FolderSortOrder.COUNT_DESC
+}
+
 /** Picking an order doesn't apply it immediately -- it first asks which folders it should apply
- * to (matching [SortScope]), since a folder's sort can now be scoped rather than always global. */
+ * to (matching [SortScope]), since a folder's sort can now be scoped rather than always global.
+ * That second step (and [SortScope] itself) is unchanged from before; only this first step's
+ * layout is new, to match a criterion-radios + direction-radios + Cancel/OK dialog shape rather
+ * than the old flat list of 6 combined options. "Path"/"Size"/"Random"/"Custom" from the reference
+ * layout aren't included yet -- each needs real underlying data or behavior this app doesn't have
+ * yet (recursive folder size, a persisted shuffle, or a drag-to-reorder UI) rather than being
+ * faked as a criterion that wouldn't actually do anything. */
 @Composable
 private fun SortDialog(
     current: FolderSortOrder,
@@ -1368,33 +1452,42 @@ private fun SortDialog(
     onSelect: (FolderSortOrder, SortScope) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    var pendingOrder by remember { mutableStateOf<FolderSortOrder?>(null) }
-    val order = pendingOrder
-    if (order == null) {
+    var criterion by remember { mutableStateOf(current.criterionUi()) }
+    var ascending by remember { mutableStateOf(current.isAscending()) }
+    var showScopeStep by remember { mutableStateOf(false) }
+
+    if (!showScopeStep) {
         AlertDialog(
             onDismissRequest = onDismiss,
-            title = { Text("Sort folders by") },
+            title = { Text("Sort by") },
             text = {
                 Column {
-                    FolderSortOrder.entries.forEach { entry ->
+                    SortCriterionUi.entries.forEach { entry ->
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable { pendingOrder = entry }
+                                .clickable { criterion = entry }
                                 .padding(vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            RadioButton(selected = entry == current, onClick = { pendingOrder = entry })
+                            RadioButton(selected = entry == criterion, onClick = { criterion = entry })
                             Text(entry.label, modifier = Modifier.padding(start = 8.dp))
                         }
                     }
+                    HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                    SortDirectionOption("Ascending", selected = ascending) { ascending = true }
+                    SortDirectionOption("Descending", selected = !ascending) { ascending = false }
                 }
             },
             confirmButton = {
-                TextButton(onClick = onDismiss) { Text("Close") }
+                TextButton(onClick = { showScopeStep = true }) { Text("OK") }
+            },
+            dismissButton = {
+                TextButton(onClick = onDismiss) { Text("Cancel") }
             },
         )
     } else {
+        val order = sortOrderOf(criterion, ascending)
         AlertDialog(
             onDismissRequest = onDismiss,
             title = { Text("Apply to") },
@@ -1414,7 +1507,7 @@ private fun SortDialog(
                 }
             },
             confirmButton = {
-                TextButton(onClick = { pendingOrder = null }) { Text("Back") }
+                TextButton(onClick = { showScopeStep = false }) { Text("Back") }
             },
         )
     }
@@ -1431,6 +1524,70 @@ private fun SortScopeOption(label: String, onClick: () -> Unit) {
     ) {
         Text(label)
     }
+}
+
+/** A single "<Label>" radio row, shared by [SortDialog] and [GroupByDialog] for their
+ * ascending/descending pair. */
+@Composable
+private fun SortDirectionOption(label: String, selected: Boolean, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioButton(selected = selected, onClick = onClick)
+        Text(label, modifier = Modifier.padding(start = 8.dp))
+    }
+}
+
+/**
+ * "Group by", opened from a folder's own three-dot menu -- replaces what used to be a single
+ * on/off "Group by month/year" toggle with a full dialog offering multiple grouping criteria (see
+ * [GroupCriterion]), laid out the same way as [SortDialog]'s redesigned first step: criterion
+ * radios, then an ascending/descending pair once a real criterion is picked (meaningless, so
+ * hidden, for [GroupCriterion.NONE]). Applies only to this exact folder -- unlike sort, grouping
+ * has no "all folders"/"subfolders" scope, so there's no second step here. "Date taken" from the
+ * reference layout isn't included yet since the scanner doesn't capture MediaStore's DATE_TAKEN
+ * column separately from last-modified yet (see [GroupCriterion]'s own doc comment).
+ */
+@Composable
+private fun GroupByDialog(
+    current: FolderGroupSetting,
+    onConfirm: (FolderGroupSetting) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var criterion by remember { mutableStateOf(current.criterion) }
+    var ascending by remember { mutableStateOf(current.ascending) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Group by") },
+        text = {
+            Column {
+                GroupCriterion.entries.forEach { entry ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { criterion = entry }
+                            .padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = entry == criterion, onClick = { criterion = entry })
+                        Text(entry.label, modifier = Modifier.padding(start = 8.dp))
+                    }
+                }
+                if (criterion != GroupCriterion.NONE) {
+                    HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                    SortDirectionOption("Ascending", selected = ascending) { ascending = true }
+                    SortDirectionOption("Descending", selected = !ascending) { ascending = false }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(FolderGroupSetting(criterion, ascending)) }) { Text("OK") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
 }
 
 @Composable
