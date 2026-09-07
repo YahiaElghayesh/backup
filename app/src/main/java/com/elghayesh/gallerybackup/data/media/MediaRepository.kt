@@ -73,9 +73,18 @@ class MediaRepository(private val context: Context) {
      * access" granted, this walks the real filesystem, finds media files MediaStore doesn't know
      * about yet, and explicitly asks the system to scan just those, so the next [scanFolderTree]
      * picks them up. A no-op without that permission -- there's no way to discover them otherwise.
+     *
+     * This is the slow half of a refresh (a full recursive directory walk, versus
+     * [scanFolderTree]'s fast, already-indexed MediaStore query) and on nearly every call finds
+     * nothing new -- MediaStore's own background scanner already indexes almost everything almost
+     * immediately. Callers should run [scanFolderTree] first and show that result right away,
+     * then call this afterward, so the common case (nothing unindexed) never delays the UI
+     * reflecting what MediaStore already knows. Returns true if it found and queued anything,
+     * meaning the caller should call [scanFolderTree] again afterward to pick up the newly-indexed
+     * files.
      */
-    suspend fun rescanUnindexedMedia() = withContext(Dispatchers.IO) {
-        if (!hasAllFilesAccess()) return@withContext
+    suspend fun rescanUnindexedMedia(): Boolean = withContext(Dispatchers.IO) {
+        if (!hasAllFilesAccess()) return@withContext false
         val indexed = indexedAbsolutePaths()
         val missing = mutableListOf<String>()
         val root = Environment.getExternalStorageDirectory()
@@ -92,7 +101,7 @@ class MediaRepository(private val context: Context) {
             }
         }
         walk(root, true)
-        if (missing.isEmpty()) return@withContext
+        if (missing.isEmpty()) return@withContext false
         suspendCancellableCoroutine<Unit> { cont ->
             var remaining = missing.size
             MediaScannerConnection.scanFile(context, missing.toTypedArray(), null) { _, _ ->
@@ -100,6 +109,7 @@ class MediaRepository(private val context: Context) {
                 if (remaining <= 0 && cont.isActive) cont.resume(Unit)
             }
         }
+        true
     }
 
     /** Absolute filesystem paths of every image/video MediaStore currently has indexed. */

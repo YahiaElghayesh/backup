@@ -192,12 +192,23 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         refresh()
     }
 
+    /** Runs the fast, MediaStore-only scan first and publishes it immediately -- so the gallery
+     * (and any in-flight pull-to-refresh spinner) reflects the latest MediaStore state as soon as
+     * that alone is ready, rather than sitting on the OLD data while waiting on
+     * [MediaRepository.rescanUnindexedMedia]'s much slower full filesystem walk, which almost
+     * always finds nothing new anyway. That slow walk still runs, just afterward and without
+     * blocking [isLoading] -- if it does find something MediaStore didn't have yet, a second,
+     * still-fast MediaStore scan picks it up and publishes again. Old content stays on screen the
+     * entire time either way: neither scan ever clears [_rawRoot] before its own replacement is
+     * ready. */
     fun refresh() {
         viewModelScope.launch {
             _isLoading.value = true
-            repository.rescanUnindexedMedia()
             _rawRoot.value = repository.scanFolderTree()
             _isLoading.value = false
+            if (repository.rescanUnindexedMedia()) {
+                _rawRoot.value = repository.scanFolderTree()
+            }
         }
     }
 
