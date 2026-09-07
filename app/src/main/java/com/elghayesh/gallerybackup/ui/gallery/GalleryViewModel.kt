@@ -200,7 +200,16 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
      * blocking [isLoading] -- if it does find something MediaStore didn't have yet, a second,
      * still-fast MediaStore scan picks it up and publishes again. Old content stays on screen the
      * entire time either way: neither scan ever clears [_rawRoot] before its own replacement is
-     * ready. */
+     * ready.
+     *
+     * [MediaRepository.refineDateTakenFromExif] runs last, also without blocking [isLoading] --
+     * it's what corrects "date taken" from the fast scan's rough MediaStore-based guess to each
+     * photo's own real EXIF capture time (see its doc comment for why that matters), but it pays
+     * an actual per-photo file-open cost, so it must never be what the user waits on to see their
+     * gallery at all. A folder sorted/grouped by date taken can briefly show the fast, rougher
+     * order right after a cold start, then silently snap to the correct one once this finishes --
+     * far better than leaving the whole gallery blocked on "Scanning..." for however long a large
+     * library's full EXIF pass takes. */
     fun refresh() {
         viewModelScope.launch {
             _isLoading.value = true
@@ -208,6 +217,9 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
             _isLoading.value = false
             if (repository.rescanUnindexedMedia()) {
                 _rawRoot.value = repository.scanFolderTree()
+            }
+            _rawRoot.value?.let { current ->
+                _rawRoot.value = repository.refineDateTakenFromExif(current)
             }
         }
     }

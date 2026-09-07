@@ -225,19 +225,16 @@ class MediaRepository(private val context: Context) {
                     derivePathFromAbsolute(fullPath, storageRoot)
                 }
                 val uri = ContentUris.withAppendedId(collection, id)
+                // A fast, first-pass guess only -- MediaStore's own DATE_TAKEN if it has one, else
+                // DATE_MODIFIED. This is deliberately NOT reading real EXIF here: this whole query
+                // (and therefore this loop) is on the app's blocking "first paint" path, and
+                // opening every single photo's file to parse its EXIF header here made a large
+                // library's first scan sit on "Scanning your photos..." for a very long time. The
+                // real per-file EXIF read happens afterward, in the background, via
+                // refineDateTakenFromExif -- see its own doc comment.
                 val dateModifiedSec = cursor.getLong(dateCol)
                 val dateTakenMs = if (dateTakenCol >= 0) cursor.getLong(dateTakenCol) else 0L
-                // Prefer EXIF's own DateTimeOriginal, read directly from the file, over MediaStore's
-                // DATE_TAKEN column -- see dateTakenSecFor's own doc comment for why the column
-                // alone isn't trustworthy. Only meaningful for photos; video containers don't carry
-                // the same EXIF tag, so this is skipped for those. Falls through to MediaStore's own
-                // DATE_TAKEN (still milliseconds, still worth trying if it's there) and finally to
-                // dateModifiedSec if neither has anything -- never left at a bogus zero.
-                val dateTakenSec = if (isVideo) {
-                    null
-                } else {
-                    readExifDateTakenSec(uri)
-                } ?: (if (dateTakenMs > 0) dateTakenMs / 1000 else null) ?: dateModifiedSec
+                val dateTakenSec = if (dateTakenMs > 0) dateTakenMs / 1000 else dateModifiedSec
                 result += MediaItem(
                     id = id,
                     uri = uri,
@@ -255,29 +252,58 @@ class MediaRepository(private val context: Context) {
         return result
     }
 
+    /** Successfully-read EXIF dates, by media id, kept for this repository instance's lifetime so
+     * [refineDateTakenFromExif] never re-opens a file it's already resolved -- only genuinely new
+     * or previously-failed items cost an actual file open on a later call. Cleared naturally when
+     * the app process dies; there's no need to persist it, since it's cheap to rebuild and a photo
+     * whose EXIF changed after being cached would need a fresh read anyway (which a process
+     * restart or app update effectively gives it). */
+    private val exifDateTakenCache = mutableMapOf<Long, Long>()
+
     /**
-     * A photo's real capture time, read straight from its own EXIF DateTimeOriginal tag, or null
-     * if the file has none (or reading it fails) -- callers fall back to MediaStore's own
-     * DATE_TAKEN column, then to DATE_MODIFIED, in that case.
+     * Re-derives [MediaItem.dateTakenSec] for every photo in [root] from its own EXIF
+     * DateTimeOriginal tag, read directly from the file, replacing the fast scan's MediaStore-
+     * DATE_TAKEN-or-modified-time guess.
      *
-     * MediaStore's DATE_TAKEN is a value it cached once, during whatever scan first indexed the
-     * file -- it does NOT get refreshed just because the file's actual EXIF changes afterward
-     * (e.g. a desktop batch EXIF editor connected over USB/MTP rewriting a whole folder's photos,
-     * which is a common way third-party tools "fix" capture dates), and in practice it's also
-     * simply unreliable/absent for a lot of real photos depending on which app or device produced
-     * them in the first place. Reading DateTimeOriginal directly from the file's own current bytes
-     * every time, like this, is what desktop tools (Windows Explorer's own date-taken property)
-     * and other gallery apps that get this right are actually doing -- it can never go stale the
-     * way a cached database column can, since there's no cache to go stale.
+     * MediaStore's own DATE_TAKEN column is a value it cached once, during whatever scan first
+     * indexed the file -- it does NOT get refreshed just because the file's actual EXIF changes
+     * afterward (e.g. a desktop batch EXIF editor connected over USB/MTP rewriting a whole
+     * folder's photos, which is a common way third-party tools "fix" capture dates), and in
+     * practice it's also simply unreliable/absent for a lot of real photos depending on which app
+     * or device produced them in the first place. Reading DateTimeOriginal directly from the
+     * file's own current bytes, like this, is what desktop tools (Windows Explorer's own
+     * date-taken property) and other gallery apps that get this right are actually doing -- it
+     * can never go stale the way a cached database column can, since there's no cache to go stale.
+     *
+     * This is the slow half of a refresh -- an actual file open + EXIF header parse per photo,
+     * versus [scanFolderTree]'s single indexed MediaStore query -- so callers must run it in the
+     * BACKGROUND, after already showing [scanFolderTree]'s fast result, exactly like
+     * [rescanUnindexedMedia]. [exifDateTakenCache] is what keeps repeated calls (e.g. on every
+     * auto-refresh) cheap: only items not already resolved pay the file-open cost.
      */
-    private fun readExifDateTakenSec(uri: android.net.Uri): Long? {
-        return try {
+    suspend fun refineDateTakenFromExif(root: FolderNode): FolderNode = withContext(Dispatchers.IO) {
+        val refined = root.allItemsRecursive().map { item ->
+            if (item.isVideo) {
+                item
+            } else {
+                val exifSec = readExifDateTakenSec(item.id, item.uri)
+                if (exifSec != null) item.copy(dateTakenSec = exifSec) else item
+            }
+        }
+        FolderNode.buildTree(refined)
+    }
+
+    private fun readExifDateTakenSec(id: Long, uri: android.net.Uri): Long? {
+        exifDateTakenCache[id]?.let { return it }
+        val result = try {
             context.contentResolver.openInputStream(uri)?.use { stream ->
                 androidx.exifinterface.media.ExifInterface(stream).dateTimeOriginal?.let { it / 1000 }
             }
         } catch (e: Exception) {
             null
         }
+        if (result != null) exifDateTakenCache[id] = result
+        return result
     }
 
     /** Pre-Android-10 fallback: derive "DCIM/Camera" from "/storage/emulated/0/DCIM/Camera/foo.jpg". */
