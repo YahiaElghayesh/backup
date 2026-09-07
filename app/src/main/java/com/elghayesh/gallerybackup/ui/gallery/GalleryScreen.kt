@@ -9,6 +9,8 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -1457,7 +1459,11 @@ private fun SortDialog(
         onDismissRequest = onDismiss,
         title = { Text("Sort by") },
         text = {
-            Column {
+            // AlertDialog's text slot isn't scrollable on its own -- it just clips whatever
+            // doesn't fit the dialog's max height -- and this content (6 criteria + direction
+            // pair + the folder-only checkbox + a note) doesn't reliably fit on every screen size,
+            // which was cutting off the checkbox with no way to reach it.
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 SortCriterion.entries.forEach { entry ->
                     Row(
                         modifier = Modifier
@@ -1527,9 +1533,7 @@ private fun SortDirectionOption(label: String, selected: Boolean, onClick: () ->
  * [GroupCriterion]), laid out the same way as [SortDialog]'s redesigned first step: criterion
  * radios, then an ascending/descending pair once a real criterion is picked (meaningless, so
  * hidden, for [GroupCriterion.NONE]). Applies only to this exact folder -- unlike sort, grouping
- * has no "all folders"/"subfolders" scope, so there's no second step here. "Date taken" from the
- * reference layout isn't included yet since the scanner doesn't capture MediaStore's DATE_TAKEN
- * column separately from last-modified yet (see [GroupCriterion]'s own doc comment).
+ * has no "all folders"/"subfolders" scope, so there's no second step here.
  */
 @Composable
 private fun GroupByDialog(
@@ -1543,7 +1547,8 @@ private fun GroupByDialog(
         onDismissRequest = onDismiss,
         title = { Text("Group by") },
         text = {
-            Column {
+            // See SortDialog's own comment on its Column for why this needs to scroll too.
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 GroupCriterion.entries.forEach { entry ->
                     Row(
                         modifier = Modifier

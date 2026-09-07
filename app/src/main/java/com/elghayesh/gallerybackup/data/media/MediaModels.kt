@@ -13,10 +13,13 @@ data class MediaItem(
     val displayName: String,
     val folderPath: String,
     val dateModifiedSec: Long,
-    /** MediaStore's own DATE_TAKEN (EXIF capture time for photos; not every video has one),
-     * converted to seconds for consistency with [dateModifiedSec] -- falls back to
-     * [dateModifiedSec] itself when the scanner found no real value, so this is always a usable
-     * timestamp rather than sometimes zero. */
+    /** A photo's real capture time -- read directly from its own EXIF DateTimeOriginal tag (see
+     * MediaRepository.readExifDateTakenSec), NOT from MediaStore's own cached DATE_TAKEN column,
+     * which proved unreliable: it's a value MediaStore cached once during whatever scan first
+     * indexed the file, and never refreshes just because the file's actual EXIF changes
+     * afterward. Falls back to MediaStore's DATE_TAKEN, then to [dateModifiedSec], for videos
+     * (no EXIF) or when a photo has no EXIF date at all -- so this is always a usable timestamp
+     * rather than sometimes zero, in units of seconds for consistency with [dateModifiedSec]. */
     val dateTakenSec: Long,
     val size: Long,
     val mimeType: String,

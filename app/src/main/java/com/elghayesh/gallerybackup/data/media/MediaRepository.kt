@@ -225,12 +225,19 @@ class MediaRepository(private val context: Context) {
                     derivePathFromAbsolute(fullPath, storageRoot)
                 }
                 val uri = ContentUris.withAppendedId(collection, id)
-                // DATE_TAKEN is milliseconds (unlike DATE_MODIFIED, which is seconds) and can be
-                // absent/zero -- not every video has a real capture time -- so this falls back to
-                // dateModifiedSec rather than ever storing a bogus/zero "date taken".
                 val dateModifiedSec = cursor.getLong(dateCol)
                 val dateTakenMs = if (dateTakenCol >= 0) cursor.getLong(dateTakenCol) else 0L
-                val dateTakenSec = if (dateTakenMs > 0) dateTakenMs / 1000 else dateModifiedSec
+                // Prefer EXIF's own DateTimeOriginal, read directly from the file, over MediaStore's
+                // DATE_TAKEN column -- see dateTakenSecFor's own doc comment for why the column
+                // alone isn't trustworthy. Only meaningful for photos; video containers don't carry
+                // the same EXIF tag, so this is skipped for those. Falls through to MediaStore's own
+                // DATE_TAKEN (still milliseconds, still worth trying if it's there) and finally to
+                // dateModifiedSec if neither has anything -- never left at a bogus zero.
+                val dateTakenSec = if (isVideo) {
+                    null
+                } else {
+                    readExifDateTakenSec(uri)
+                } ?: (if (dateTakenMs > 0) dateTakenMs / 1000 else null) ?: dateModifiedSec
                 result += MediaItem(
                     id = id,
                     uri = uri,
@@ -246,6 +253,31 @@ class MediaRepository(private val context: Context) {
             }
         }
         return result
+    }
+
+    /**
+     * A photo's real capture time, read straight from its own EXIF DateTimeOriginal tag, or null
+     * if the file has none (or reading it fails) -- callers fall back to MediaStore's own
+     * DATE_TAKEN column, then to DATE_MODIFIED, in that case.
+     *
+     * MediaStore's DATE_TAKEN is a value it cached once, during whatever scan first indexed the
+     * file -- it does NOT get refreshed just because the file's actual EXIF changes afterward
+     * (e.g. a desktop batch EXIF editor connected over USB/MTP rewriting a whole folder's photos,
+     * which is a common way third-party tools "fix" capture dates), and in practice it's also
+     * simply unreliable/absent for a lot of real photos depending on which app or device produced
+     * them in the first place. Reading DateTimeOriginal directly from the file's own current bytes
+     * every time, like this, is what desktop tools (Windows Explorer's own date-taken property)
+     * and other gallery apps that get this right are actually doing -- it can never go stale the
+     * way a cached database column can, since there's no cache to go stale.
+     */
+    private fun readExifDateTakenSec(uri: android.net.Uri): Long? {
+        return try {
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+                androidx.exifinterface.media.ExifInterface(stream).dateTimeOriginal?.let { it / 1000 }
+            }
+        } catch (e: Exception) {
+            null
+        }
     }
 
     /** Pre-Android-10 fallback: derive "DCIM/Camera" from "/storage/emulated/0/DCIM/Camera/foo.jpg". */

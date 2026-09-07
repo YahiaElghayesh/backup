@@ -71,6 +71,11 @@ dependencies {
     androidTestImplementation(composeBom)
 
     implementation("androidx.core:core-ktx:1.13.1")
+    // Reads EXIF (e.g. DateTimeOriginal) directly from a photo's own file bytes for "date taken" --
+    // MediaStore's own cached DATE_TAKEN column proved unreliable (see MediaRepository.
+    // readExifDateTakenSec for why), and this is what other gallery apps and desktop tools
+    // apparently rely on instead.
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.3")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.3")
     implementation("androidx.activity:activity-compose:1.9.0")
