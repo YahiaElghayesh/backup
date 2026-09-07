@@ -56,6 +56,7 @@ import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomAppBar
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -116,15 +117,17 @@ import com.elghayesh.gallerybackup.data.media.FolderNode
 import com.elghayesh.gallerybackup.data.media.MediaItem
 import com.elghayesh.gallerybackup.data.media.allItemsRecursive
 import com.elghayesh.gallerybackup.data.media.findNode
+import com.elghayesh.gallerybackup.data.media.latestDateTakenSec
 import com.elghayesh.gallerybackup.data.media.latestModifiedSec
 import com.elghayesh.gallerybackup.data.media.promotedChildren
 import com.elghayesh.gallerybackup.data.media.promotionAwareCoverUri
 import com.elghayesh.gallerybackup.data.media.promotionAwareItemCount
+import com.elghayesh.gallerybackup.data.media.totalSizeBytes
 import com.elghayesh.gallerybackup.data.settings.FolderCover
 import com.elghayesh.gallerybackup.data.settings.FolderGroupSetting
-import com.elghayesh.gallerybackup.data.settings.FolderSortOrder
-import com.elghayesh.gallerybackup.data.settings.FolderSortOverride
+import com.elghayesh.gallerybackup.data.settings.FolderSortSetting
 import com.elghayesh.gallerybackup.data.settings.GroupCriterion
+import com.elghayesh.gallerybackup.data.settings.SortCriterion
 import com.elghayesh.gallerybackup.data.settings.ViewType
 import com.elghayesh.gallerybackup.ui.common.CreateFolderDialog
 import com.elghayesh.gallerybackup.ui.common.FolderCoverDialog
@@ -293,8 +296,11 @@ fun GalleryScreen(
     if (showSortDialog) {
         SortDialog(
             current = effectiveFolderSort,
-            folderName = if (path.isEmpty()) "Gallery" else path.substringAfterLast('/'),
-            onSelect = { order, scope -> viewModel.setFolderSort(order, scope, path) },
+            isCurrentAnOverride = path in folderSortOverrides,
+            onConfirm = { setting, thisFolderOnly ->
+                viewModel.setFolderSort(setting, thisFolderOnly, path)
+                showSortDialog = false
+            },
             onDismiss = { showSortDialog = false },
         )
     }
@@ -1267,48 +1273,47 @@ private fun folderOrMediaAtListPosition(
     }
 }
 
-/** The sort order that actually applies at [path]: its own override if it has one, else the
- * nearest ancestor's override that was scoped to include subfolders, else the global default.
- * Internal (not private) so the Move/Copy destination picker can sort its own folder list the
- * exact same way the gallery itself would at that same path. */
+/** The sort setting that actually applies at [path]: its own override if it has one, else the
+ * global default. No ancestor-cascading -- an override applies to exactly the folder it was set
+ * on, matching the sort dialog's simple "use for this folder only" checkbox rather than a 3-way
+ * scope picker. Internal (not private) so the Move/Copy destination picker, [MediaViewerScreen],
+ * and the photo/video editors can each independently re-derive the exact same setting an index
+ * was picked under here. */
 internal fun effectiveFolderSort(
     path: String,
-    globalDefault: FolderSortOrder,
-    overrides: Map<String, FolderSortOverride>,
-): FolderSortOrder {
-    overrides[path]?.let { return it.order }
-    var ancestor = path
-    while (ancestor.isNotEmpty()) {
-        ancestor = ancestor.substringBeforeLast('/', "")
-        val override = overrides[ancestor]
-        if (override != null && override.includeSubfolders) return override.order
+    globalDefault: FolderSortSetting,
+    overrides: Map<String, FolderSortSetting>,
+): FolderSortSetting = overrides[path] ?: globalDefault
+
+internal fun sortedFolders(folders: List<FolderNode>, setting: FolderSortSetting, includedFolders: Set<String>): List<FolderNode> {
+    val sorted = when (setting.criterion) {
+        SortCriterion.NAME -> folders.sortedBy { it.name.lowercase() }
+        SortCriterion.PATH -> folders.sortedBy { it.path.lowercase() }
+        SortCriterion.SIZE -> folders.sortedBy { it.totalSizeBytes() }
+        SortCriterion.LAST_MODIFIED -> folders.sortedBy { it.latestModifiedSec() }
+        SortCriterion.DATE_TAKEN -> folders.sortedBy { it.latestDateTakenSec() }
+        SortCriterion.RANDOM -> folders.shuffled(kotlin.random.Random(setting.randomSeed))
     }
-    return globalDefault
+    return if (setting.criterion == SortCriterion.RANDOM || setting.ascending) sorted else sorted.asReversed()
 }
 
-internal fun sortedFolders(folders: List<FolderNode>, order: FolderSortOrder, includedFolders: Set<String>): List<FolderNode> =
-    when (order) {
-        FolderSortOrder.NAME_ASC -> folders.sortedBy { it.name.lowercase() }
-        FolderSortOrder.NAME_DESC -> folders.sortedByDescending { it.name.lowercase() }
-        FolderSortOrder.DATE_DESC -> folders.sortedByDescending { it.latestModifiedSec() }
-        FolderSortOrder.DATE_ASC -> folders.sortedBy { it.latestModifiedSec() }
-        FolderSortOrder.COUNT_DESC -> folders.sortedByDescending { it.promotionAwareItemCount(includedFolders) }
-        FolderSortOrder.COUNT_ASC -> folders.sortedBy { it.promotionAwareItemCount(includedFolders) }
+/** The same sort setting a folder's subfolders are sorted by, applied to its own media items too
+ * -- internal (like [sortedFolders]/[effectiveFolderSort]) so [MediaViewerScreen] and the photo/
+ * video editors can independently re-derive the exact same order an index was picked from here,
+ * rather than each hardcoding its own. [SortCriterion.PATH] is a no-op for media: every item in
+ * one folder's listing already shares the same [MediaItem.folderPath], so there's nothing to
+ * differentiate them by (it's only meaningful for [sortedFolders]). */
+internal fun sortedMedia(media: List<MediaItem>, setting: FolderSortSetting): List<MediaItem> {
+    val sorted = when (setting.criterion) {
+        SortCriterion.NAME -> media.sortedBy { it.displayName.lowercase() }
+        SortCriterion.PATH -> media
+        SortCriterion.SIZE -> media.sortedBy { it.size }
+        SortCriterion.LAST_MODIFIED -> media.sortedBy { it.dateModifiedSec }
+        SortCriterion.DATE_TAKEN -> media.sortedBy { it.dateTakenSec }
+        SortCriterion.RANDOM -> media.shuffled(kotlin.random.Random(setting.randomSeed))
     }
-
-/** The same sort order a folder's subfolders are sorted by, applied to its own media items too --
- * internal (like [sortedFolders]/[effectiveFolderSort]) so [MediaViewerScreen] and the photo/video
- * editors can independently re-derive the exact same order an index was picked from here, rather
- * than each hardcoding its own. [FolderSortOrder.COUNT_ASC]/[FolderSortOrder.COUNT_DESC] have no
- * per-item analog (there's no "count" on a single photo) so they fall back to newest-first, same
- * as the app's own long-standing default for media. */
-internal fun sortedMedia(media: List<MediaItem>, order: FolderSortOrder): List<MediaItem> =
-    when (order) {
-        FolderSortOrder.NAME_ASC -> media.sortedBy { it.displayName.lowercase() }
-        FolderSortOrder.NAME_DESC -> media.sortedByDescending { it.displayName.lowercase() }
-        FolderSortOrder.DATE_DESC, FolderSortOrder.COUNT_DESC -> media.sortedByDescending { it.dateModifiedSec }
-        FolderSortOrder.DATE_ASC, FolderSortOrder.COUNT_ASC -> media.sortedBy { it.dateModifiedSec }
-    }
+    return if (setting.criterion == SortCriterion.RANDOM || setting.ascending) sorted else sorted.asReversed()
+}
 
 /**
  * Splits already-ordered [media] into consecutive runs sharing the same label under [setting]'s
@@ -1341,6 +1346,16 @@ internal fun groupMedia(media: List<MediaItem>, setting: FolderGroupSetting): Li
         GroupCriterion.LAST_MODIFIED_MONTHLY -> {
             val formatter = java.text.SimpleDateFormat("MMMM yyyy", java.util.Locale.getDefault())
             val label: (MediaItem) -> String = { item -> formatter.format(java.util.Date(item.dateModifiedSec * 1000)) }
+            label
+        }
+        GroupCriterion.DATE_TAKEN_DAILY -> {
+            val formatter = java.text.SimpleDateFormat("MMMM d, yyyy", java.util.Locale.getDefault())
+            val label: (MediaItem) -> String = { item -> formatter.format(java.util.Date(item.dateTakenSec * 1000)) }
+            label
+        }
+        GroupCriterion.DATE_TAKEN_MONTHLY -> {
+            val formatter = java.text.SimpleDateFormat("MMMM yyyy", java.util.Locale.getDefault())
+            val label: (MediaItem) -> String = { item -> formatter.format(java.util.Date(item.dateTakenSec * 1000)) }
             label
         }
         GroupCriterion.FILE_TYPE -> { item -> if (item.isVideo) "Videos" else "Photos" }
@@ -1420,121 +1435,77 @@ private fun BoxScope.EmptyState(icon: ImageVector, title: String, subtitle: Stri
     }
 }
 
-/** The criterion half of a [FolderSortOrder] -- e.g. both [FolderSortOrder.NAME_ASC] and
- * [FolderSortOrder.NAME_DESC] are [NAME], just with a different [FolderSortOrder.isAscending].
- * Splitting the combined enum into criterion + direction for the dialog (see [SortDialog]) is what
- * lets it show them as two separate, independent radio groups -- a criterion list of 3 plus an
- * ascending/descending pair -- instead of one flat list of 6 combined options like "Name (A-Z)"
- * that made changing only the direction for the same criterion mean re-scanning the whole list for
- * the right combined entry. */
-private enum class SortCriterionUi(val label: String) {
-    NAME("Name"),
-    DATE_MODIFIED("Last modified"),
-    ITEM_COUNT("Item count"),
-}
-
-private fun FolderSortOrder.criterionUi(): SortCriterionUi = when (this) {
-    FolderSortOrder.NAME_ASC, FolderSortOrder.NAME_DESC -> SortCriterionUi.NAME
-    FolderSortOrder.DATE_ASC, FolderSortOrder.DATE_DESC -> SortCriterionUi.DATE_MODIFIED
-    FolderSortOrder.COUNT_ASC, FolderSortOrder.COUNT_DESC -> SortCriterionUi.ITEM_COUNT
-}
-
-private fun FolderSortOrder.isAscending(): Boolean =
-    this == FolderSortOrder.NAME_ASC || this == FolderSortOrder.DATE_ASC || this == FolderSortOrder.COUNT_ASC
-
-private fun sortOrderOf(criterion: SortCriterionUi, ascending: Boolean): FolderSortOrder = when (criterion) {
-    SortCriterionUi.NAME -> if (ascending) FolderSortOrder.NAME_ASC else FolderSortOrder.NAME_DESC
-    SortCriterionUi.DATE_MODIFIED -> if (ascending) FolderSortOrder.DATE_ASC else FolderSortOrder.DATE_DESC
-    SortCriterionUi.ITEM_COUNT -> if (ascending) FolderSortOrder.COUNT_ASC else FolderSortOrder.COUNT_DESC
-}
-
-/** Picking an order doesn't apply it immediately -- it first asks which folders it should apply
- * to (matching [SortScope]), since a folder's sort can now be scoped rather than always global.
- * That second step (and [SortScope] itself) is unchanged from before; only this first step's
- * layout is new, to match a criterion-radios + direction-radios + Cancel/OK dialog shape rather
- * than the old flat list of 6 combined options. "Path"/"Size"/"Random"/"Custom" from the reference
- * layout aren't included yet -- each needs real underlying data or behavior this app doesn't have
- * yet (recursive folder size, a persisted shuffle, or a drag-to-reorder UI) rather than being
- * faked as a criterion that wouldn't actually do anything. */
+/**
+ * A single dialog: criterion radios, an ascending/descending pair, a "use for this folder only"
+ * checkbox, and Cancel/OK -- matching a familiar file-manager "Sort by" layout exactly, including
+ * the checkbox replacing what used to be a separate second step ("all folders" / "just this
+ * folder" / "this folder and subfolders"). Dropping the "and subfolders" cascade option is
+ * deliberate, to match that reference exactly: an override now applies to exactly the folder it
+ * was set from, nothing else (see [effectiveFolderSort]).
+ */
 @Composable
 private fun SortDialog(
-    current: FolderSortOrder,
-    folderName: String,
-    onSelect: (FolderSortOrder, SortScope) -> Unit,
+    current: FolderSortSetting,
+    isCurrentAnOverride: Boolean,
+    onConfirm: (FolderSortSetting, thisFolderOnly: Boolean) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    var criterion by remember { mutableStateOf(current.criterionUi()) }
-    var ascending by remember { mutableStateOf(current.isAscending()) }
-    var showScopeStep by remember { mutableStateOf(false) }
-
-    if (!showScopeStep) {
-        AlertDialog(
-            onDismissRequest = onDismiss,
-            title = { Text("Sort by") },
-            text = {
-                Column {
-                    SortCriterionUi.entries.forEach { entry ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { criterion = entry }
-                                .padding(vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            RadioButton(selected = entry == criterion, onClick = { criterion = entry })
-                            Text(entry.label, modifier = Modifier.padding(start = 8.dp))
-                        }
-                    }
-                    HorizontalDivider(Modifier.padding(vertical = 8.dp))
-                    SortDirectionOption("Ascending", selected = ascending) { ascending = true }
-                    SortDirectionOption("Descending", selected = !ascending) { ascending = false }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showScopeStep = true }) { Text("OK") }
-            },
-            dismissButton = {
-                TextButton(onClick = onDismiss) { Text("Cancel") }
-            },
-        )
-    } else {
-        val order = sortOrderOf(criterion, ascending)
-        AlertDialog(
-            onDismissRequest = onDismiss,
-            title = { Text("Apply to") },
-            text = {
-                Column {
-                    Text(
-                        "Sort by \"${order.label}\" for:",
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(bottom = 4.dp),
-                    )
-                    SortScopeOption("All folders") { onSelect(order, SortScope.ALL); onDismiss() }
-                    SortScopeOption("Just \"$folderName\"") { onSelect(order, SortScope.THIS_FOLDER); onDismiss() }
-                    SortScopeOption("\"$folderName\" and its subfolders") {
-                        onSelect(order, SortScope.THIS_FOLDER_AND_SUBFOLDERS)
-                        onDismiss()
+    var criterion by remember { mutableStateOf(current.criterion) }
+    var ascending by remember { mutableStateOf(current.ascending) }
+    var thisFolderOnly by remember { mutableStateOf(isCurrentAnOverride) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Sort by") },
+        text = {
+            Column {
+                SortCriterion.entries.forEach { entry ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { criterion = entry }
+                            .padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = entry == criterion, onClick = { criterion = entry })
+                        Text(entry.label, modifier = Modifier.padding(start = 8.dp))
                     }
                 }
-            },
-            confirmButton = {
-                TextButton(onClick = { showScopeStep = false }) { Text("Back") }
-            },
-        )
-    }
-}
-
-@Composable
-private fun SortScopeOption(label: String, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(label)
-    }
+                HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                SortDirectionOption("Ascending", selected = ascending) { ascending = true }
+                SortDirectionOption("Descending", selected = !ascending) { ascending = false }
+                HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { thisFolderOnly = !thisFolderOnly }
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Checkbox(checked = thisFolderOnly, onCheckedChange = { thisFolderOnly = it })
+                    Text("Use for this folder only", modifier = Modifier.padding(start = 8.dp))
+                }
+                Text(
+                    "Please note that grouping and sorting are 2 independent fields",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    // A fresh seed every time Random is (re)confirmed -- see FolderSortSetting's
+                    // own doc comment for why this doesn't just reshuffle on every read instead.
+                    val randomSeed = if (criterion == SortCriterion.RANDOM) System.nanoTime() else current.randomSeed
+                    onConfirm(FolderSortSetting(criterion, ascending, randomSeed), thisFolderOnly)
+                },
+            ) { Text("OK") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
 }
 
 /** A single "<Label>" radio row, shared by [SortDialog] and [GroupByDialog] for their

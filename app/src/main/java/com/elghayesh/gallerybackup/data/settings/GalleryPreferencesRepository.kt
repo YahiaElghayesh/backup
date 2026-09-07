@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -16,14 +17,26 @@ enum class ViewType { GRID, LIST }
 
 enum class ThemeMode { SYSTEM, LIGHT, DARK }
 
-enum class FolderSortOrder(val label: String) {
-    NAME_ASC("Name (A-Z)"),
-    NAME_DESC("Name (Z-A)"),
-    DATE_DESC("Newest first"),
-    DATE_ASC("Oldest first"),
-    COUNT_DESC("Most items first"),
-    COUNT_ASC("Fewest items first"),
+/** What a folder's (or the whole gallery's) contents are ordered by -- direction is a separate
+ * field on [FolderSortSetting], not baked into the criterion itself, so the sort dialog can show
+ * criterion and direction as two independent radio groups. [PATH] only meaningfully orders
+ * folders relative to each other; media items are always listed already scoped to one folder, so
+ * they all share the same path and [PATH] is a no-op for them (falls back to [NAME] as a stable
+ * tie-break). [DATE_TAKEN] uses [com.elghayesh.gallerybackup.data.media.MediaItem.dateTakenSec]. */
+enum class SortCriterion(val label: String) {
+    NAME("Name"),
+    PATH("Path"),
+    SIZE("Size"),
+    LAST_MODIFIED("Last modified"),
+    DATE_TAKEN("Date taken"),
+    RANDOM("Random"),
 }
+
+/** A sort choice: [criterion] + [ascending], plus [randomSeed] which only matters for
+ * [SortCriterion.RANDOM] -- regenerated each time Random is (re)confirmed from the sort dialog, so
+ * the shuffled order stays stable across recompositions/navigations until the user deliberately
+ * re-sorts, rather than reshuffling on every read. */
+data class FolderSortSetting(val criterion: SortCriterion, val ascending: Boolean, val randomSeed: Long = 0L)
 
 /** One of a handful of preset accent colors -- deliberately not a full color picker, to keep this
  * simple. Deliberately muted/desaturated rather than the bright, saturated tones a picker would
@@ -68,31 +81,26 @@ sealed class FolderCover {
     data class Photo(val uri: String) : FolderCover()
 }
 
-/** A per-folder sort override, set from the sort dialog's "this folder" / "this folder and
- * subfolders" scope choices. [includeSubfolders] false = applies to just this exact folder's own
- * listing; true = also applies to every descendant that doesn't have its own, more specific
- * override. Picking "all folders" instead updates [GalleryPreferencesRepository.folderSort], the
- * global default, and doesn't create one of these. */
-data class FolderSortOverride(val order: FolderSortOrder, val includeSubfolders: Boolean)
-
 /** What a folder's media listing is split into runs by, with a small label + line between each
  * run. [NONE] means "don't group" -- a folder simply absent from
  * [GalleryPreferencesRepository.folderGroupSettings] behaves the same as [NONE], so opting back
  * out removes its entry entirely rather than storing an explicit "off". [LAST_MODIFIED_DAILY]/
- * [LAST_MODIFIED_MONTHLY] group by [com.elghayesh.gallerybackup.data.media.MediaItem.dateModifiedSec]
- * (the file's own modified time -- MediaStore's DATE_TAKEN isn't captured by the scanner yet, so
- * this deliberately isn't labeled "date taken" until that's true). [FILE_TYPE] splits
- * photos from videos; [EXTENSION] splits by the file's own extension (e.g. "jpg", "mp4"). */
+ * [LAST_MODIFIED_MONTHLY] group by [com.elghayesh.gallerybackup.data.media.MediaItem.dateModifiedSec];
+ * [DATE_TAKEN_DAILY]/[DATE_TAKEN_MONTHLY] by [com.elghayesh.gallerybackup.data.media.MediaItem.dateTakenSec].
+ * [FILE_TYPE] splits photos from videos; [EXTENSION] splits by the file's own extension (e.g.
+ * "jpg", "mp4"). */
 enum class GroupCriterion(val label: String) {
     NONE("Do not group files"),
     LAST_MODIFIED_DAILY("Last modified (daily)"),
     LAST_MODIFIED_MONTHLY("Last modified (monthly)"),
+    DATE_TAKEN_DAILY("Date taken (daily)"),
+    DATE_TAKEN_MONTHLY("Date taken (monthly)"),
     FILE_TYPE("File type"),
     EXTENSION("Extension"),
 }
 
-/** A folder's own group-by choice -- opt-in per folder (like [FolderSortOverride] is per-scope),
- * since grouping only makes sense for a folder with enough of a spread in whatever it's grouped by
+/** A folder's own group-by choice -- opt-in per folder, since grouping only makes sense for a
+ * folder with enough of a spread in whatever it's grouped by
  * to matter. [ascending] orders the runs themselves: oldest-group-first for the date criteria,
  * A-Z for [GroupCriterion.FILE_TYPE]/[GroupCriterion.EXTENSION]'s labels. */
 data class FolderGroupSetting(val criterion: GroupCriterion, val ascending: Boolean)
@@ -119,7 +127,9 @@ class GalleryPreferencesRepository(private val context: Context) {
         val MEDIA_ROW_SIZE = intPreferencesKey("media_row_size")
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val ACCENT_COLOR = stringPreferencesKey("accent_color")
-        val FOLDER_SORT = stringPreferencesKey("folder_sort")
+        val FOLDER_SORT_CRITERION = stringPreferencesKey("folder_sort_criterion")
+        val FOLDER_SORT_ASCENDING = booleanPreferencesKey("folder_sort_ascending")
+        val FOLDER_SORT_RANDOM_SEED = longPreferencesKey("folder_sort_random_seed")
         val FOLDER_SORT_OVERRIDES_JSON = stringPreferencesKey("folder_sort_overrides_json")
         val EXCLUDED_FOLDERS = stringSetPreferencesKey("excluded_folders")
         val INCLUDED_FOLDERS = stringSetPreferencesKey("included_folders")
@@ -177,12 +187,22 @@ class GalleryPreferencesRepository(private val context: Context) {
         prefs[Keys.ACCENT_COLOR]?.let { runCatching { AccentColor.valueOf(it) }.getOrNull() } ?: AccentColor.BLUE
     }
 
-    val folderSort: Flow<FolderSortOrder> = context.galleryPrefsStore.data.map { prefs ->
-        prefs[Keys.FOLDER_SORT]?.let { runCatching { FolderSortOrder.valueOf(it) }.getOrNull() } ?: FolderSortOrder.NAME_ASC
+    /** The global default sort, used by any folder without its own entry in [folderSortOverrides]. */
+    val folderSort: Flow<FolderSortSetting> = context.galleryPrefsStore.data.map { prefs ->
+        val criterion = prefs[Keys.FOLDER_SORT_CRITERION]?.let { runCatching { SortCriterion.valueOf(it) }.getOrNull() }
+            ?: SortCriterion.NAME
+        FolderSortSetting(
+            criterion = criterion,
+            ascending = prefs[Keys.FOLDER_SORT_ASCENDING] ?: true,
+            randomSeed = prefs[Keys.FOLDER_SORT_RANDOM_SEED] ?: 0L,
+        )
     }
 
-    /** Per-folder sort overrides, keyed by folder path (root is ""). See [FolderSortOverride]. */
-    val folderSortOverrides: Flow<Map<String, FolderSortOverride>> =
+    /** Per-folder sort overrides, keyed by folder path (root is "") -- set via the sort dialog's
+     * "use for this folder only" checkbox. A folder absent from this map uses [folderSort], the
+     * global default, with no ancestor-cascading in between: each folder's own choice is either
+     * exactly this map's entry for it, or exactly the global default, nothing in between. */
+    val folderSortOverrides: Flow<Map<String, FolderSortSetting>> =
         context.galleryPrefsStore.data.map { parseFolderSortOverrides(it[Keys.FOLDER_SORT_OVERRIDES_JSON]) }
 
     /**
@@ -288,16 +308,20 @@ class GalleryPreferencesRepository(private val context: Context) {
         context.galleryPrefsStore.edit { it[Keys.ACCENT_COLOR] = color.name }
     }
 
-    suspend fun setFolderSort(order: FolderSortOrder) {
-        context.galleryPrefsStore.edit { it[Keys.FOLDER_SORT] = order.name }
+    suspend fun setFolderSort(setting: FolderSortSetting) {
+        context.galleryPrefsStore.edit { prefs ->
+            prefs[Keys.FOLDER_SORT_CRITERION] = setting.criterion.name
+            prefs[Keys.FOLDER_SORT_ASCENDING] = setting.ascending
+            prefs[Keys.FOLDER_SORT_RANDOM_SEED] = setting.randomSeed
+        }
     }
 
-    /** Sets [path]'s own sort order, scoped to just that folder or to it and its subfolders (see
-     * [FolderSortOverride]). Also clears any previous override at that exact path. */
-    suspend fun setFolderSortOverride(path: String, order: FolderSortOrder, includeSubfolders: Boolean) {
+    /** Sets [path]'s own sort, overriding the global default for just that exact folder ("use for
+     * this folder only" in the sort dialog). Also clears any previous override at that path. */
+    suspend fun setFolderSortOverride(path: String, setting: FolderSortSetting) {
         context.galleryPrefsStore.edit { prefs ->
             val current = parseFolderSortOverrides(prefs[Keys.FOLDER_SORT_OVERRIDES_JSON]).toMutableMap()
-            current[path] = FolderSortOverride(order, includeSubfolders)
+            current[path] = setting
             prefs[Keys.FOLDER_SORT_OVERRIDES_JSON] = serializeFolderSortOverrides(current)
         }
     }
@@ -440,15 +464,18 @@ class GalleryPreferencesRepository(private val context: Context) {
         return array.toString()
     }
 
-    private fun parseFolderSortOverrides(json: String?): Map<String, FolderSortOverride> {
+    private fun parseFolderSortOverrides(json: String?): Map<String, FolderSortSetting> {
         if (json.isNullOrBlank()) return emptyMap()
         return try {
             val array = org.json.JSONArray(json)
             buildMap {
                 for (i in 0 until array.length()) {
                     val obj = array.getJSONObject(i)
-                    val order = runCatching { FolderSortOrder.valueOf(obj.getString("order")) }.getOrNull() ?: continue
-                    put(obj.getString("path"), FolderSortOverride(order, obj.getBoolean("subfolders")))
+                    val criterion = runCatching { SortCriterion.valueOf(obj.getString("criterion")) }.getOrNull() ?: continue
+                    put(
+                        obj.getString("path"),
+                        FolderSortSetting(criterion, obj.getBoolean("ascending"), obj.optLong("randomSeed", 0L)),
+                    )
                 }
             }
         } catch (e: Exception) {
@@ -456,14 +483,15 @@ class GalleryPreferencesRepository(private val context: Context) {
         }
     }
 
-    private fun serializeFolderSortOverrides(map: Map<String, FolderSortOverride>): String {
+    private fun serializeFolderSortOverrides(map: Map<String, FolderSortSetting>): String {
         val array = org.json.JSONArray()
-        for ((path, override) in map) {
+        for ((path, setting) in map) {
             array.put(
                 org.json.JSONObject().apply {
                     put("path", path)
-                    put("order", override.order.name)
-                    put("subfolders", override.includeSubfolders)
+                    put("criterion", setting.criterion.name)
+                    put("ascending", setting.ascending)
+                    put("randomSeed", setting.randomSeed)
                 },
             )
         }

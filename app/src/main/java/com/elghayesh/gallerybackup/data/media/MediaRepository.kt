@@ -178,6 +178,7 @@ class MediaRepository(private val context: Context) {
             add(MediaStore.MediaColumns._ID)
             add(MediaStore.MediaColumns.DISPLAY_NAME)
             add(MediaStore.MediaColumns.DATE_MODIFIED)
+            add(MediaStore.MediaColumns.DATE_TAKEN)
             add(MediaStore.MediaColumns.SIZE)
             add(MediaStore.MediaColumns.MIME_TYPE)
             if (useRelativePath) {
@@ -193,6 +194,7 @@ class MediaRepository(private val context: Context) {
             val idCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
             val nameCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
             val dateCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_MODIFIED)
+            val dateTakenCol = cursor.getColumnIndex(MediaStore.MediaColumns.DATE_TAKEN)
             val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
             val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
             val relPathCol = if (useRelativePath)
@@ -213,12 +215,19 @@ class MediaRepository(private val context: Context) {
                     derivePathFromAbsolute(fullPath, storageRoot)
                 }
                 val uri = ContentUris.withAppendedId(collection, id)
+                // DATE_TAKEN is milliseconds (unlike DATE_MODIFIED, which is seconds) and can be
+                // absent/zero -- not every video has a real capture time -- so this falls back to
+                // dateModifiedSec rather than ever storing a bogus/zero "date taken".
+                val dateModifiedSec = cursor.getLong(dateCol)
+                val dateTakenMs = if (dateTakenCol >= 0) cursor.getLong(dateTakenCol) else 0L
+                val dateTakenSec = if (dateTakenMs > 0) dateTakenMs / 1000 else dateModifiedSec
                 result += MediaItem(
                     id = id,
                     uri = uri,
                     displayName = cursor.getString(nameCol) ?: "",
                     folderPath = folderPath,
-                    dateModifiedSec = cursor.getLong(dateCol),
+                    dateModifiedSec = dateModifiedSec,
+                    dateTakenSec = dateTakenSec,
                     size = cursor.getLong(sizeCol),
                     mimeType = cursor.getString(mimeCol) ?: if (isVideo) "video/*" else "image/*",
                     isVideo = isVideo,

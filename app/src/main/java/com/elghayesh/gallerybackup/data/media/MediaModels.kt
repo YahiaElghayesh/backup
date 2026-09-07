@@ -13,6 +13,11 @@ data class MediaItem(
     val displayName: String,
     val folderPath: String,
     val dateModifiedSec: Long,
+    /** MediaStore's own DATE_TAKEN (EXIF capture time for photos; not every video has one),
+     * converted to seconds for consistency with [dateModifiedSec] -- falls back to
+     * [dateModifiedSec] itself when the scanner found no real value, so this is always a usable
+     * timestamp rather than sometimes zero. */
+    val dateTakenSec: Long,
     val size: Long,
     val mimeType: String,
     val isVideo: Boolean,
@@ -84,6 +89,18 @@ fun FolderNode.latestModifiedSec(): Long {
     val childMax = children.values.maxOfOrNull { it.latestModifiedSec() } ?: 0L
     return maxOf(ownMax, childMax)
 }
+
+/** Most recent [MediaItem.dateTakenSec] anywhere in this folder or its subfolders; 0 if empty. */
+fun FolderNode.latestDateTakenSec(): Long {
+    val ownMax = items.maxOfOrNull { it.dateTakenSec } ?: 0L
+    val childMax = children.values.maxOfOrNull { it.latestDateTakenSec() } ?: 0L
+    return maxOf(ownMax, childMax)
+}
+
+/** Total file size (bytes) of every item in this folder and every folder beneath it -- the
+ * per-folder analog of [MediaItem.size], for the "Size" sort criterion. */
+fun FolderNode.totalSizeBytes(): Long =
+    items.sumOf { it.size } + children.values.sumOf { it.totalSizeBytes() }
 
 /**
  * Returns a copy of this tree with folders in [hiddenFolders] / items in [hiddenMediaIds] removed

@@ -18,10 +18,10 @@ import com.elghayesh.gallerybackup.data.media.filtered
 import com.elghayesh.gallerybackup.data.media.withVirtualFolders
 import com.elghayesh.gallerybackup.data.settings.AccentColor
 import com.elghayesh.gallerybackup.data.settings.FolderCover
-import com.elghayesh.gallerybackup.data.settings.FolderSortOrder
-import com.elghayesh.gallerybackup.data.settings.FolderSortOverride
 import com.elghayesh.gallerybackup.data.settings.FolderGroupSetting
+import com.elghayesh.gallerybackup.data.settings.FolderSortSetting
 import com.elghayesh.gallerybackup.data.settings.GalleryPreferencesRepository
+import com.elghayesh.gallerybackup.data.settings.SortCriterion
 import com.elghayesh.gallerybackup.data.settings.ThemeMode
 import com.elghayesh.gallerybackup.data.settings.ViewType
 import com.elghayesh.gallerybackup.sync.MediaChangeSignal
@@ -38,10 +38,6 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-
-/** Scope for a sort choice made from a specific folder: the new global default, just that
- * folder's own listing, or that folder plus every descendant beneath it. */
-enum class SortScope { ALL, THIS_FOLDER, THIS_FOLDER_AND_SUBFOLDERS }
 
 private data class RootFilterInputs(
     val raw: FolderNode?,
@@ -112,9 +108,9 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         prefs.themeMode.stateIn(viewModelScope, SharingStarted.Eagerly, ThemeMode.SYSTEM)
     val accentColor: StateFlow<AccentColor> =
         prefs.accentColor.stateIn(viewModelScope, SharingStarted.Eagerly, AccentColor.BLUE)
-    val folderSort: StateFlow<FolderSortOrder> =
-        prefs.folderSort.stateIn(viewModelScope, SharingStarted.Eagerly, FolderSortOrder.NAME_ASC)
-    val folderSortOverrides: StateFlow<Map<String, FolderSortOverride>> =
+    val folderSort: StateFlow<FolderSortSetting> =
+        prefs.folderSort.stateIn(viewModelScope, SharingStarted.Eagerly, FolderSortSetting(SortCriterion.NAME, true))
+    val folderSortOverrides: StateFlow<Map<String, FolderSortSetting>> =
         prefs.folderSortOverrides.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
     val includedFolders: StateFlow<Set<String>> =
         prefs.includedFolders.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
@@ -217,18 +213,17 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     fun setMediaRowSize(sizeDp: Int) = viewModelScope.launch { prefs.setMediaRowSize(sizeDp) }
     fun setThemeMode(mode: ThemeMode) = viewModelScope.launch { prefs.setThemeMode(mode) }
     fun setAccentColor(color: AccentColor) = viewModelScope.launch { prefs.setAccentColor(color) }
-    /** Applies [order] either as the new global default (also clearing any override sitting at
-     * [path] so the change is visible immediately where it was made), to just [path]'s own
-     * listing, or to [path] and everything beneath it that doesn't have its own override. */
-    fun setFolderSort(order: FolderSortOrder, scope: SortScope, path: String) {
+    /** Applies [setting] either as [path]'s own override ([thisFolderOnly] true, from the sort
+     * dialog's "use for this folder only" checkbox) or as the new global default for every folder
+     * without its own override (also clearing any override sitting at [path] itself, so the
+     * change is visible immediately where it was made). */
+    fun setFolderSort(setting: FolderSortSetting, thisFolderOnly: Boolean, path: String) {
         viewModelScope.launch {
-            when (scope) {
-                SortScope.ALL -> {
-                    prefs.setFolderSort(order)
-                    prefs.clearFolderSortOverride(path)
-                }
-                SortScope.THIS_FOLDER -> prefs.setFolderSortOverride(path, order, includeSubfolders = false)
-                SortScope.THIS_FOLDER_AND_SUBFOLDERS -> prefs.setFolderSortOverride(path, order, includeSubfolders = true)
+            if (thisFolderOnly) {
+                prefs.setFolderSortOverride(path, setting)
+            } else {
+                prefs.setFolderSort(setting)
+                prefs.clearFolderSortOverride(path)
             }
         }
     }
