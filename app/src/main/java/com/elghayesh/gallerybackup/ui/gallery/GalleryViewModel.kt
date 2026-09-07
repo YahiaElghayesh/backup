@@ -25,6 +25,7 @@ import com.elghayesh.gallerybackup.data.settings.SortCriterion
 import com.elghayesh.gallerybackup.data.settings.ThemeMode
 import com.elghayesh.gallerybackup.data.settings.ViewType
 import com.elghayesh.gallerybackup.sync.MediaChangeSignal
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -38,6 +39,8 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 private data class RootFilterInputs(
     val raw: FolderNode?,
@@ -55,8 +58,24 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
 
     private val deleteConsentChannel = Channel<PendingIntent>(Channel.CONFLATED)
     val deleteConsentRequests: Flow<PendingIntent> = deleteConsentChannel.receiveAsFlow()
+    // Only one trash/delete-consent flow is allowed in flight at a time -- trashMutex serializes
+    // every caller (direct delete, and copy-then-trash for move/rename) through this single set of
+    // pending* fields. Without it, two overlapping calls (e.g. a fast double-tap re-firing a
+    // rename before the first run's system consent dialog even appeared) would stomp on each
+    // other's pendingDeleteIds/pendingDeleteIsSoft, and the CONFLATED deleteConsentChannel would
+    // silently drop whichever consent request lost the race -- exactly the kind of thing that
+    // leaves a rename/move only half-applied, with stray copies left behind and the wrong batch of
+    // originals trashed.
+    private val trashMutex = Mutex()
     private var pendingDeleteIds: List<Long> = emptyList()
     private var pendingDeleteIsSoft: Boolean = false
+    private var pendingDeleteResult: CompletableDeferred<Boolean>? = null
+
+    // Guards renameMediaItem/renameFolder against re-entrant double-invocation (e.g. a fast
+    // double-tap on the rename dialog's confirm button firing before the dialog has closed) --
+    // each rename copies bytes into a new file and trashes the original, so running it twice
+    // concurrently on the same target duplicates the copy before trashMutex ever gets involved.
+    private val renameMutex = Mutex()
 
     private val restoreConsentChannel = Channel<PendingIntent>(Channel.CONFLATED)
     val restoreConsentRequests: Flow<PendingIntent> = restoreConsentChannel.receiveAsFlow()
@@ -326,17 +345,48 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun deleteMediaItems(items: List<MediaItem>, skipTrash: Boolean) {
         viewModelScope.launch {
+            val preRSoftTrash = !skipTrash && Build.VERSION.SDK_INT < Build.VERSION_CODES.R
+            val approved = requestTrash(items, skipTrash)
+            if (approved && !preRSoftTrash) refresh()
+            clearSelection()
+        }
+    }
+
+    /**
+     * Trashes (or, if [skipTrash], permanently deletes) [items]' underlying MediaStore rows --
+     * used both for a direct delete and, by [trashOriginals], for the "trash the originals" half
+     * of a copy-then-trash move/rename. Every caller funnels through [trashMutex], so only one
+     * trash/delete-consent flow is ever in flight: see the field doc on [trashMutex] for why that
+     * matters. Suspends until the whole thing -- including the async system consent dialog on
+     * Android 11+, resolved externally via [onDeleteConfirmed] -- has actually completed, so a
+     * caller's own subsequent [refresh] reflects the real end state (originals actually gone)
+     * rather than the in-between moment where a copy and its not-yet-trashed original both exist.
+     * Returns false if the user cancelled the system dialog -- nothing was trashed/deleted.
+     */
+    private suspend fun requestTrash(items: List<MediaItem>, skipTrash: Boolean): Boolean {
+        if (items.isEmpty()) return true
+        return trashMutex.withLock {
             if (!skipTrash && Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
                 trashRepository.trash(items.map { it.id })
-                clearSelection()
-                return@launch
+                return@withLock true
             }
-            pendingDeleteIds = items.map { it.id }
-            pendingDeleteIsSoft = !skipTrash
             when (val result = trashManager.requestDelete(items.map { it.uri }, skipTrash = skipTrash)) {
-                is DeleteResult.ConsentRequired -> deleteConsentChannel.send(result.pendingIntent)
-                DeleteResult.Deleted -> onDeleteConfirmed(approved = true)
-                is DeleteResult.Error -> Unit
+                is DeleteResult.ConsentRequired -> {
+                    val deferred = CompletableDeferred<Boolean>()
+                    pendingDeleteIds = items.map { it.id }
+                    pendingDeleteIsSoft = !skipTrash
+                    pendingDeleteResult = deferred
+                    deleteConsentChannel.send(result.pendingIntent)
+                    deferred.await()
+                }
+                DeleteResult.Deleted -> {
+                    // Only reachable pre-R (a hard delete there runs synchronously inside
+                    // TrashManager with no consent step) -- R+ always returns ConsentRequired for
+                    // a non-empty list.
+                    if (skipTrash) trashRepository.forget(items.map { it.id }) else trashRepository.trash(items.map { it.id })
+                    true
+                }
+                is DeleteResult.Error -> false
             }
         }
     }
@@ -344,7 +394,8 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     /** Call after the system dialog launched from [deleteConsentRequests] resolves. [approved]
      * is false if the user cancelled it -- MediaStore never touched the files in that case, so
      * neither should MediaHub's own trash bookkeeping; the pending soft-trash or permanent
-     * delete just never happened. */
+     * delete just never happened. Resolves whichever [requestTrash] call is currently awaiting
+     * [pendingDeleteResult] -- trashMutex guarantees there's ever at most one. */
     fun onDeleteConfirmed(approved: Boolean) {
         viewModelScope.launch {
             if (approved) {
@@ -353,10 +404,10 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
                 } else {
                     trashRepository.forget(pendingDeleteIds)
                 }
-                refresh()
             }
             pendingDeleteIds = emptyList()
-            clearSelection()
+            pendingDeleteResult?.complete(approved)
+            pendingDeleteResult = null
         }
     }
 
@@ -433,20 +484,10 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
      * [TrashRepository.trash] directly here, which is pure local bookkeeping that never touches
      * MediaStore at all, leaving the "moved" original fully visible everywhere else. Below
      * Android 11, where there's no real OS trash to hook into, this stays local bookkeeping.
+     * Delegates to [requestTrash] (skipTrash = false) so it shares the same single serialized
+     * pending-consent slot as a direct delete, and suspends until trashing has actually resolved.
      */
-    private suspend fun trashOriginals(items: List<MediaItem>) {
-        if (items.isEmpty()) return
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            trashRepository.trash(items.map { it.id })
-            return
-        }
-        pendingDeleteIds = items.map { it.id }
-        pendingDeleteIsSoft = true
-        val result = trashManager.requestDelete(items.map { it.uri }, skipTrash = false)
-        if (result is DeleteResult.ConsentRequired) {
-            deleteConsentChannel.send(result.pendingIntent)
-        }
-    }
+    private suspend fun trashOriginals(items: List<MediaItem>): Boolean = requestTrash(items, skipTrash = false)
 
     /** Copies [items] into [destinationFolderPath], leaving the originals in place. */
     fun copyMediaItems(items: List<MediaItem>, destinationFolderPath: String) {
@@ -458,7 +499,12 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Copies [items] into [destinationFolderPath], then trashes the originals. */
+    /**
+     * Copies [items] into [destinationFolderPath], then trashes the originals -- waiting for the
+     * trash to actually finish (including any system consent dialog) before refreshing, so the
+     * gallery's next state reflects the real end result instead of the moment in between where
+     * both the copy and the not-yet-trashed original exist at once.
+     */
     fun moveMediaItems(items: List<MediaItem>, destinationFolderPath: String) {
         viewModelScope.launch {
             val context: Context = getApplication()
@@ -469,22 +515,32 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Renames [item] by copying its bytes into a new file with [newDisplayName] and trashing the original. */
+    /**
+     * Renames [item] by copying its bytes into a new file with [newDisplayName] and trashing the
+     * original. Guarded by [renameMutex] -- a rename that's already in flight for some item makes
+     * a second, re-entrant rename call (e.g. a fast double-tap on the rename dialog's confirm
+     * button before it closes) a silent no-op instead of racing the first one's copy.
+     */
     fun renameMediaItem(item: MediaItem, newDisplayName: String) {
         viewModelScope.launch {
-            val context: Context = getApplication()
-            val ext = item.displayName.substringAfterLast('.', "")
-            val finalName = if (ext.isNotEmpty() && !newDisplayName.endsWith(".$ext", ignoreCase = true)) {
-                "$newDisplayName.$ext"
-            } else {
-                newDisplayName
+            if (!renameMutex.tryLock()) return@launch
+            try {
+                val context: Context = getApplication()
+                val ext = item.displayName.substringAfterLast('.', "")
+                val finalName = if (ext.isNotEmpty() && !newDisplayName.endsWith(".$ext", ignoreCase = true)) {
+                    "$newDisplayName.$ext"
+                } else {
+                    newDisplayName
+                }
+                val renamed = item.copy(displayName = finalName)
+                if (copyMediaTo(context, renamed, item.folderPath) != null) {
+                    trashOriginals(listOf(item))
+                }
+                refresh()
+                clearSelection()
+            } finally {
+                renameMutex.unlock()
             }
-            val renamed = item.copy(displayName = finalName)
-            if (copyMediaTo(context, renamed, item.folderPath) != null) {
-                trashOriginals(listOf(item))
-            }
-            refresh()
-            clearSelection()
         }
     }
 
@@ -519,25 +575,37 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Renames [folder] by copying every item under it (recursively) into a sibling path with
+     * [newName] swapped in for its last segment, then trashing the originals. Guarded by
+     * [renameMutex] for the same reason as [renameMediaItem] -- a re-entrant call while one is
+     * already in flight (a fast double-tap on the rename dialog's confirm button) is a silent
+     * no-op instead of both copying the same recursive item list concurrently.
+     */
     fun renameFolder(folder: FolderNode, newName: String) {
         viewModelScope.launch {
-            val context: Context = getApplication()
-            val lastSlash = folder.path.lastIndexOf('/')
-            val parentPath = if (lastSlash < 0) "" else folder.path.substring(0, lastSlash)
-            val newFolderPath = if (parentPath.isEmpty()) newName else "$parentPath/$newName"
+            if (!renameMutex.tryLock()) return@launch
+            try {
+                val context: Context = getApplication()
+                val lastSlash = folder.path.lastIndexOf('/')
+                val parentPath = if (lastSlash < 0) "" else folder.path.substring(0, lastSlash)
+                val newFolderPath = if (parentPath.isEmpty()) newName else "$parentPath/$newName"
 
-            val copiedItems = folder.allItemsRecursive().filter { item ->
-                val target = remapFolderPath(item.folderPath, folder.path, newFolderPath)
-                copyMediaTo(context, item, target) != null
-            }
-            trashOriginals(copiedItems)
+                val copiedItems = folder.allItemsRecursive().filter { item ->
+                    val target = remapFolderPath(item.folderPath, folder.path, newFolderPath)
+                    copyMediaTo(context, item, target) != null
+                }
+                trashOriginals(copiedItems)
 
-            folderCovers.value[folder.path]?.let { cover ->
-                prefs.setFolderCover(folder.path, null)
-                prefs.setFolderCover(newFolderPath, cover)
+                folderCovers.value[folder.path]?.let { cover ->
+                    prefs.setFolderCover(folder.path, null)
+                    prefs.setFolderCover(newFolderPath, cover)
+                }
+                refresh()
+                clearSelection()
+            } finally {
+                renameMutex.unlock()
             }
-            refresh()
-            clearSelection()
         }
     }
 
@@ -558,6 +626,24 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { folders.forEach { prefs.setFolderCover(it.path, null) } }
     }
 
-    private fun remapFolderPath(itemFolderPath: String, oldPrefix: String, newPrefix: String): String =
-        if (itemFolderPath == oldPrefix) newPrefix else newPrefix + itemFolderPath.removePrefix(oldPrefix)
+    /**
+     * Rewrites [itemFolderPath] (an item's real, raw MediaStore folder path) so its [oldPrefix]
+     * segment (a folder being moved/renamed) becomes [newPrefix], preserving whatever subfolder
+     * segments come after it. Both sides are trimmed of leading/trailing slashes before comparing
+     * -- MediaStore's own RELATIVE_PATH column (what [MediaItem.folderPath] is read from on
+     * Android 10+) always carries a trailing slash, e.g. "Root/Sub/Nested/", while [FolderNode]'s
+     * own [FolderNode.path] never does, e.g. "Root/Sub/Nested"; comparing those directly without
+     * normalizing first made [itemFolderPath] == [oldPrefix] false even for an item genuinely
+     * inside the folder being renamed. The join is always done with an explicit "/" rather than by
+     * relying on whatever separator characters happened to survive in the leftover suffix, so this
+     * can never glue [newPrefix] straight onto an unrelated path with no separator between them --
+     * the concrete, visible symptom that was actually reported (a renamed folder's on-disk name
+     * ending up as the new name concatenated directly onto an ancestor folder's name).
+     */
+    private fun remapFolderPath(itemFolderPath: String, oldPrefix: String, newPrefix: String): String {
+        val normalizedItem = itemFolderPath.trim('/')
+        val normalizedOld = oldPrefix.trim('/')
+        val suffix = normalizedItem.removePrefix(normalizedOld).trim('/')
+        return if (suffix.isEmpty()) newPrefix else "$newPrefix/$suffix"
+    }
 }

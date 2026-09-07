@@ -13,17 +13,32 @@ import androidx.compose.runtime.setValue
 @Composable
 fun RenameDialog(title: String, initialName: String, onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
     var text by remember { mutableStateOf(initialName) }
+    // A rename can take a moment (it copies bytes into a new file before trashing the original),
+    // and the dialog doesn't disappear the instant the button is tapped -- recomposition takes at
+    // least a frame. Without this, a fast double-tap fires onConfirm twice before showRenameDialog
+    // ever flips to false at the call site, racing two copies of the same rename against each
+    // other. The ViewModel now also guards against that re-entrantly, but disabling here gives the
+    // user visible feedback instead of a silent no-op on the second tap.
+    var confirmed by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
         text = {
-            OutlinedTextField(value = text, onValueChange = { text = it }, singleLine = true)
+            OutlinedTextField(value = text, onValueChange = { text = it }, singleLine = true, enabled = !confirmed)
         },
         confirmButton = {
-            TextButton(onClick = { if (text.isNotBlank()) onConfirm(text.trim()) }) { Text("Rename") }
+            TextButton(
+                enabled = !confirmed,
+                onClick = {
+                    if (text.isNotBlank()) {
+                        confirmed = true
+                        onConfirm(text.trim())
+                    }
+                },
+            ) { Text("Rename") }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss, enabled = !confirmed) { Text("Cancel") }
         },
     )
 }
