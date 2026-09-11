@@ -36,37 +36,33 @@ fun PropertiesDialog(items: List<MediaItem>, onDismiss: () -> Unit) {
 private fun SingleItemProperties(item: MediaItem) {
     val context = LocalContext.current
     var dimensions by remember(item.id) { mutableStateOf<String?>(null) }
-    var exifDebug by remember(item.id) { mutableStateOf<ExifDebugInfo?>(null) }
+    // Read straight from the file when this dialog opens, rather than trusting item.dateTakenSec --
+    // that field is only as fresh as MediaRepository's own background date-refinement pass, which
+    // runs once over the *entire* library and only publishes after every photo in it has been
+    // read, so a freshly opened Properties dialog for one specific photo could easily be checked
+    // before that whole-library pass has reached (or finished with) this file, showing the rough
+    // fast-scan guess (MediaStore's date-taken-or-modified-time fallback) long after the real EXIF
+    // date was actually readable. A single photo's own EXIF is cheap enough to just read here,
+    // on demand, independent of that -- see readDateTakenSec's own doc comment for the parsing.
+    var liveDateTakenSec by remember(item.id) { mutableStateOf<Long?>(null) }
     LaunchedEffect(item.id) {
         if (!item.isVideo) {
             dimensions = decodeImageDimensions(context, item)
-            exifDebug = readExifDebugInfo(context, item)
+            liveDateTakenSec = readDateTakenSec(context, item)
         }
     }
+    val dateTakenSec = if (item.isVideo) item.dateTakenSec else (liveDateTakenSec ?: item.dateTakenSec)
     Column {
         PropertyRow("Name", item.displayName)
         PropertyRow("Folder", item.folderPath.ifEmpty { "(root)" })
         PropertyRow("Type", item.mimeType)
         PropertyRow("Size", formatBytes(item.size))
         PropertyRow("Modified", DateFormat.getDateTimeInstance().format(Date(item.dateModifiedSec * 1000)))
-        PropertyRow("Date taken", DateFormat.getDateTimeInstance().format(Date(item.dateTakenSec * 1000)))
+        PropertyRow("Date taken", DateFormat.getDateTimeInstance().format(Date(dateTakenSec * 1000)))
         if (item.isVideo) {
             PropertyRow("Duration", formatDuration(item.durationMs))
         } else {
             dimensions?.let { PropertyRow("Dimensions", it) }
-        }
-        // TEMPORARY diagnostic rows -- see readExifDebugInfo's doc comment. Not meant to stay in
-        // the shipped Properties dialog. "Computed date taken" independently re-derives the date
-        // right here, live, from a fresh file read -- bypassing MediaRepository/its cache/the
-        // refresh() pipeline entirely -- so we can tell apart "the parsing logic is still wrong"
-        // from "the parsing is fine but its result never reaches what's displayed above".
-        exifDebug?.let { debug ->
-            PropertyRow("EXIF debug", debug.raw)
-            PropertyRow(
-                "Computed date taken",
-                debug.computedSec?.let { DateFormat.getDateTimeInstance().format(Date(it * 1000)) }
-                    ?: "computed null",
-            )
         }
     }
 }
@@ -94,47 +90,64 @@ private fun PropertyRow(label: String, value: String) {
     Text("$label: $value")
 }
 
-private data class ExifDebugInfo(val raw: String, val computedSec: Long?)
-
 private val exifDateTimePattern = Regex("""(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})""")
+private val filenameDateTimePatterns = listOf(
+    Regex("""(\d{4})[-_](\d{2})[-_](\d{2})[ _T](\d{2})[-:]?(\d{2})[-:]?(\d{2})"""),
+    Regex("""(\d{4})(\d{2})(\d{2})[_-](\d{2})(\d{2})(\d{2})"""),
+)
+private val filenameDateOnlyPattern = Regex("""(\d{4})-(\d{2})-(\d{2})""")
 
-/** TEMPORARY diagnostic: reads the raw (unparsed) EXIF date-related tag strings directly from
- * the file, bypassing MediaRepository's cache and typed getters entirely, so we can see exactly
- * what -- if anything -- is actually stored in a given photo's EXIF, and whether the app's own
- * date-tag reading is throwing partway through. Also independently re-parses that raw string
- * right here (mirroring MediaRepository.parseExifDateTimeString's logic exactly, but computed
- * fresh in this dialog rather than read back from the repository) -- see the call site's comment
- * for why. */
-private suspend fun readExifDebugInfo(context: Context, item: MediaItem): ExifDebugInfo =
+/**
+ * Reads [item]'s own capture date on demand, straight from its current file bytes -- the same
+ * EXIF-then-filename logic as MediaRepository.readExifDateTakenSec, reading the raw EXIF tag
+ * string ourselves (not ExifInterface's typed getDateTimeOriginal()/etc., which have been seen to
+ * return null even for a well-formed, present tag -- e.g. when a long SubSecTimeOriginal value
+ * trips up their internal parsing) and falling back to a date embedded in the filename
+ * (e.g. "2016-12-30.jpg") when EXIF has nothing usable at all. Returns null (letting the caller
+ * fall back to [MediaItem.dateTakenSec]) only if neither source has anything to offer.
+ */
+private suspend fun readDateTakenSec(context: Context, item: MediaItem): Long? =
     withContext(Dispatchers.IO) {
-        try {
+        val fromExif = try {
             context.contentResolver.openInputStream(item.uri)?.use { stream ->
                 val exif = androidx.exifinterface.media.ExifInterface(stream)
-                val original = exif.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_DATETIME_ORIGINAL)
-                val digitized = exif.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_DATETIME_DIGITIZED)
-                val dateTime = exif.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_DATETIME)
-                val subsec = exif.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_SUBSEC_TIME_ORIGINAL)
-                val offset = exif.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_OFFSET_TIME_ORIGINAL)
-                val make = exif.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_MAKE)
-                val raw = "Original=$original Digitized=$digitized DateTime=$dateTime " +
-                    "Subsec=$subsec Offset=$offset Make=$make"
-                val chosen = original ?: digitized ?: dateTime
-                val computedSec = chosen?.let { value ->
-                    exifDateTimePattern.find(value.trim())?.let { match ->
-                        val g = match.groupValues
-                        val cal = java.util.Calendar.getInstance().apply {
-                            clear()
-                            set(g[1].toInt(), g[2].toInt() - 1, g[3].toInt(), g[4].toInt(), g[5].toInt(), g[6].toInt())
-                        }
-                        cal.timeInMillis / 1000
-                    }
+                val raw = exif.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_DATETIME_ORIGINAL)
+                    ?: exif.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_DATETIME_DIGITIZED)
+                    ?: exif.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_DATETIME)
+                raw?.let { value ->
+                    exifDateTimePattern.find(value.trim())?.let { dateMatchToEpochSec(it, hasTime = true) }
                 }
-                ExifDebugInfo(raw, computedSec)
-            } ?: ExifDebugInfo("could not open stream", null)
+            }
         } catch (e: Throwable) {
-            ExifDebugInfo("threw: ${e::class.simpleName}: ${e.message}", null)
+            null
         }
+        fromExif ?: parseDateFromFilename(item.displayName)
     }
+
+private fun parseDateFromFilename(displayName: String): Long? {
+    val base = displayName.substringBeforeLast('.')
+    for (pattern in filenameDateTimePatterns) {
+        pattern.find(base)?.let { match -> dateMatchToEpochSec(match, hasTime = true) }?.let { return it }
+    }
+    return filenameDateOnlyPattern.find(base)?.let { match -> dateMatchToEpochSec(match, hasTime = false) }
+}
+
+private fun dateMatchToEpochSec(match: MatchResult, hasTime: Boolean): Long? {
+    val g = match.groupValues
+    val year = g[1].toIntOrNull() ?: return null
+    val month = g[2].toIntOrNull() ?: return null
+    val day = g[3].toIntOrNull() ?: return null
+    if (year !in 1990..2100 || month !in 1..12 || day !in 1..31) return null
+    val hour = if (hasTime) g.getOrNull(4)?.toIntOrNull() ?: 0 else 0
+    val minute = if (hasTime) g.getOrNull(5)?.toIntOrNull() ?: 0 else 0
+    val second = if (hasTime) g.getOrNull(6)?.toIntOrNull() ?: 0 else 0
+    if (hour !in 0..23 || minute !in 0..59 || second !in 0..59) return null
+    val calendar = java.util.Calendar.getInstance().apply {
+        clear()
+        set(year, month - 1, day, hour, minute, second)
+    }
+    return calendar.timeInMillis / 1000
+}
 
 private suspend fun decodeImageDimensions(context: Context, item: MediaItem): String? =
     withContext(Dispatchers.IO) {
