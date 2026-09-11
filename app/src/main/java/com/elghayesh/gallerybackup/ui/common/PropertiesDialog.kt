@@ -45,6 +45,7 @@ private fun SingleItemProperties(item: MediaItem) {
         PropertyRow("Type", item.mimeType)
         PropertyRow("Size", formatBytes(item.size))
         PropertyRow("Modified", DateFormat.getDateTimeInstance().format(Date(item.dateModifiedSec * 1000)))
+        PropertyRow("Date taken", DateFormat.getDateTimeInstance().format(Date(item.dateTakenSec * 1000)))
         if (item.isVideo) {
             PropertyRow("Duration", formatDuration(item.durationMs))
         } else {
