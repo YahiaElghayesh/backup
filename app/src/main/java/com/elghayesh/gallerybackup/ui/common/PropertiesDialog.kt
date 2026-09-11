@@ -36,8 +36,12 @@ fun PropertiesDialog(items: List<MediaItem>, onDismiss: () -> Unit) {
 private fun SingleItemProperties(item: MediaItem) {
     val context = LocalContext.current
     var dimensions by remember(item.id) { mutableStateOf<String?>(null) }
+    var exifDebug by remember(item.id) { mutableStateOf<String?>(null) }
     LaunchedEffect(item.id) {
-        if (!item.isVideo) dimensions = decodeImageDimensions(context, item)
+        if (!item.isVideo) {
+            dimensions = decodeImageDimensions(context, item)
+            exifDebug = readExifDebugInfo(context, item)
+        }
     }
     Column {
         PropertyRow("Name", item.displayName)
@@ -51,6 +55,10 @@ private fun SingleItemProperties(item: MediaItem) {
         } else {
             dimensions?.let { PropertyRow("Dimensions", it) }
         }
+        // TEMPORARY diagnostic row -- shows the raw EXIF date tags straight from the file, to
+        // find out why "Date taken" above isn't picking up a real capture date for some photos.
+        // Remove once that's root-caused; not meant to stay in the shipped Properties dialog.
+        exifDebug?.let { PropertyRow("EXIF debug", it) }
     }
 }
 
@@ -76,6 +84,29 @@ private fun MultiItemProperties(items: List<MediaItem>) {
 private fun PropertyRow(label: String, value: String) {
     Text("$label: $value")
 }
+
+/** TEMPORARY diagnostic: reads the raw (unparsed) EXIF date-related tag strings directly from
+ * the file, bypassing MediaRepository's cache and typed getters entirely, so we can see exactly
+ * what -- if anything -- is actually stored in a given photo's EXIF, and whether the app's own
+ * date-tag reading is throwing partway through. */
+private suspend fun readExifDebugInfo(context: Context, item: MediaItem): String =
+    withContext(Dispatchers.IO) {
+        try {
+            context.contentResolver.openInputStream(item.uri)?.use { stream ->
+                val exif = androidx.exifinterface.media.ExifInterface(stream)
+                val original = exif.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_DATETIME_ORIGINAL)
+                val digitized = exif.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_DATETIME_DIGITIZED)
+                val dateTime = exif.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_DATETIME)
+                val subsec = exif.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_SUBSEC_TIME_ORIGINAL)
+                val offset = exif.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_OFFSET_TIME_ORIGINAL)
+                val make = exif.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_MAKE)
+                "Original=$original Digitized=$digitized DateTime=$dateTime " +
+                    "Subsec=$subsec Offset=$offset Make=$make"
+            } ?: "could not open stream"
+        } catch (e: Throwable) {
+            "threw: ${e::class.simpleName}: ${e.message}"
+        }
+    }
 
 private suspend fun decodeImageDimensions(context: Context, item: MediaItem): String? =
     withContext(Dispatchers.IO) {

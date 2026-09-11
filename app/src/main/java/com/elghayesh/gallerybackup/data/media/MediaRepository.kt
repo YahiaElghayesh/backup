@@ -310,13 +310,18 @@ class MediaRepository(private val context: Context) {
      */
     private fun readExifDateTakenSec(id: Long, uri: android.net.Uri, displayName: String): Long? {
         exifDateTakenCache[id]?.let { return it }
+        // Catches Throwable, not just Exception: this runs once per photo inside a map() over the
+        // whole library in refineDateTakenFromExif, with no per-item isolation from its caller --
+        // one photo whose EXIF trips something other than a plain Exception (a corrupt embedded
+        // thumbnail causing an OutOfMemoryError, say) would otherwise abort date refinement for
+        // every other photo in the library too, not just this one.
         val fromExif = try {
             context.contentResolver.openInputStream(uri)?.use { stream ->
                 val exif = androidx.exifinterface.media.ExifInterface(stream)
                 val ms = exif.dateTimeOriginal ?: exif.dateTimeDigitized ?: exif.dateTime
                 ms?.let { it / 1000 }
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             null
         }
         val result = fromExif ?: parseDateFromFilename(displayName)
