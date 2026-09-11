@@ -25,15 +25,20 @@ private val MEDIA_EXTENSIONS = setOf(
  */
 class MediaRepository(private val context: Context) {
 
+    private val dateTakenDao = com.elghayesh.gallerybackup.data.db.BackupDatabase.get(context).dateTakenDao()
+
     suspend fun scanFolderTree(): FolderNode = withContext(Dispatchers.IO) {
+        val dateTakenOverrides = dateTakenDao.getAll().associate { it.mediaId to it.dateTakenSec }
         val items = mutableListOf<MediaItem>()
         items += queryCollection(
             collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
             isVideo = false,
+            dateTakenOverrides = dateTakenOverrides,
         )
         items += queryCollection(
             collection = MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
             isVideo = true,
+            dateTakenOverrides = dateTakenOverrides,
         )
         FolderNode.buildTree(items)
     }
@@ -180,6 +185,7 @@ class MediaRepository(private val context: Context) {
         collection: android.net.Uri,
         isVideo: Boolean,
         queryArgs: android.os.Bundle? = null,
+        dateTakenOverrides: Map<Long, Long> = emptyMap(),
     ): List<MediaItem> {
         val result = mutableListOf<MediaItem>()
         val useRelativePath = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
@@ -225,16 +231,23 @@ class MediaRepository(private val context: Context) {
                     derivePathFromAbsolute(fullPath, storageRoot)
                 }
                 val uri = ContentUris.withAppendedId(collection, id)
-                // A fast, first-pass guess only -- MediaStore's own DATE_TAKEN if it has one, else
-                // DATE_MODIFIED. This is deliberately NOT reading real EXIF here: this whole query
-                // (and therefore this loop) is on the app's blocking "first paint" path, and
-                // opening every single photo's file to parse its EXIF header here made a large
-                // library's first scan sit on "Scanning your photos..." for a very long time. The
-                // real per-file EXIF read happens afterward, in the background, via
-                // refineDateTakenFromExif -- see its own doc comment.
+                // A previously-persisted, confirmed-correct EXIF/filename date (see
+                // refineDateTakenFromExif and DateTakenEntity) wins immediately, with no file open
+                // needed here -- that's what lets a folder already show up correctly sorted the
+                // moment it's opened, on every launch after the first time a photo's real date was
+                // resolved, not just eventually once that launch's own background pass catches up.
+                // Failing that, this is a fast, first-pass guess only -- MediaStore's own
+                // DATE_TAKEN if it has one, else DATE_MODIFIED. This is deliberately NOT reading
+                // real EXIF here: this whole query (and therefore this loop) is on the app's
+                // blocking "first paint" path, and opening every single not-yet-resolved photo's
+                // file to parse its EXIF header here made a large library's first scan sit on
+                // "Scanning your photos..." for a very long time. The real per-file EXIF read for
+                // anything not already covered by an override happens afterward, in the
+                // background, via refineDateTakenFromExif -- see its own doc comment.
                 val dateModifiedSec = cursor.getLong(dateCol)
                 val dateTakenMs = if (dateTakenCol >= 0) cursor.getLong(dateTakenCol) else 0L
-                val dateTakenSec = if (dateTakenMs > 0) dateTakenMs / 1000 else dateModifiedSec
+                val dateTakenSec = dateTakenOverrides[id]
+                    ?: (if (dateTakenMs > 0) dateTakenMs / 1000 else dateModifiedSec)
                 result += MediaItem(
                     id = id,
                     uri = uri,
@@ -252,18 +265,10 @@ class MediaRepository(private val context: Context) {
         return result
     }
 
-    /** Successfully-read EXIF dates, by media id, kept for this repository instance's lifetime so
-     * [refineDateTakenFromExif] never re-opens a file it's already resolved -- only genuinely new
-     * or previously-failed items cost an actual file open on a later call. Cleared naturally when
-     * the app process dies; there's no need to persist it, since it's cheap to rebuild and a photo
-     * whose EXIF changed after being cached would need a fresh read anyway (which a process
-     * restart or app update effectively gives it). */
-    private val exifDateTakenCache = mutableMapOf<Long, Long>()
-
     /**
-     * Re-derives [MediaItem.dateTakenSec] for every photo in [root] from its own EXIF
-     * DateTimeOriginal tag, read directly from the file, replacing the fast scan's MediaStore-
-     * DATE_TAKEN-or-modified-time guess.
+     * Re-derives [MediaItem.dateTakenSec] for every photo in [root] not already covered by a
+     * persisted [DateTakenEntity] override, from its own EXIF DateTimeOriginal tag read directly
+     * from the file, replacing the fast scan's MediaStore-DATE_TAKEN-or-modified-time guess.
      *
      * MediaStore's own DATE_TAKEN column is a value it cached once, during whatever scan first
      * indexed the file -- it does NOT get refreshed just because the file's actual EXIF changes
@@ -275,21 +280,32 @@ class MediaRepository(private val context: Context) {
      * date-taken property) and other gallery apps that get this right are actually doing -- it
      * can never go stale the way a cached database column can, since there's no cache to go stale.
      *
-     * This is the slow half of a refresh -- an actual file open + EXIF header parse per photo,
-     * versus [scanFolderTree]'s single indexed MediaStore query -- so callers must run it in the
-     * BACKGROUND, after already showing [scanFolderTree]'s fast result, exactly like
-     * [rescanUnindexedMedia]. [exifDateTakenCache] is what keeps repeated calls (e.g. on every
-     * auto-refresh) cheap: only items not already resolved pay the file-open cost.
+     * This is the slow half of a refresh -- an actual file open + EXIF header parse per not-yet-
+     * resolved photo, versus [scanFolderTree]'s single indexed MediaStore query -- so callers must
+     * run it in the BACKGROUND, after already showing [scanFolderTree]'s fast result, exactly like
+     * [rescanUnindexedMedia]. Every successfully-resolved date is persisted to [dateTakenDao] (one
+     * batched write at the end, not per photo) and skipped here on every later call, in this
+     * process or a future one -- [scanFolderTree] applies the same persisted values immediately on
+     * its own next run, which is what lets a folder already be correctly sorted the moment it's
+     * opened rather than only once this whole-library pass has caught up with it again.
      */
     suspend fun refineDateTakenFromExif(root: FolderNode): FolderNode = withContext(Dispatchers.IO) {
+        val alreadyResolved = dateTakenDao.getAll().mapTo(mutableSetOf()) { it.mediaId }
+        val toPersist = mutableListOf<com.elghayesh.gallerybackup.data.db.DateTakenEntity>()
         val refined = root.allItemsRecursive().map { item ->
-            if (item.isVideo) {
+            if (item.isVideo || item.id in alreadyResolved) {
                 item
             } else {
-                val exifSec = readExifDateTakenSec(item.id, item.uri, item.displayName)
-                if (exifSec != null) item.copy(dateTakenSec = exifSec) else item
+                val exifSec = readExifDateTakenSec(item.uri, item.displayName)
+                if (exifSec != null) {
+                    toPersist += com.elghayesh.gallerybackup.data.db.DateTakenEntity(item.id, exifSec)
+                    item.copy(dateTakenSec = exifSec)
+                } else {
+                    item
+                }
             }
         }
+        if (toPersist.isNotEmpty()) dateTakenDao.upsertAll(toPersist)
         FolderNode.buildTree(refined)
     }
 
@@ -319,13 +335,12 @@ class MediaRepository(private val context: Context) {
      * holds the date tags is simply absent) would otherwise keep falling through to file-modified
      * time even after a rename tool had already given it the real date, right there in its name.
      */
-    private fun readExifDateTakenSec(id: Long, uri: android.net.Uri, displayName: String): Long? {
-        exifDateTakenCache[id]?.let { return it }
-        // Catches Throwable, not just Exception: this runs once per photo inside a map() over the
-        // whole library in refineDateTakenFromExif, with no per-item isolation from its caller --
-        // one photo whose EXIF trips something other than a plain Exception (a corrupt embedded
-        // thumbnail causing an OutOfMemoryError, say) would otherwise abort date refinement for
-        // every other photo in the library too, not just this one.
+    private fun readExifDateTakenSec(uri: android.net.Uri, displayName: String): Long? {
+        // Catches Throwable, not just Exception: this runs once per not-yet-resolved photo inside
+        // a map() over the whole library in refineDateTakenFromExif, with no per-item isolation
+        // from its caller -- one photo whose EXIF trips something other than a plain Exception (a
+        // corrupt embedded thumbnail causing an OutOfMemoryError, say) would otherwise abort date
+        // refinement for every other photo in the library too, not just this one.
         val fromExif = try {
             context.contentResolver.openInputStream(uri)?.use { stream ->
                 val exif = androidx.exifinterface.media.ExifInterface(stream)
@@ -337,9 +352,7 @@ class MediaRepository(private val context: Context) {
         } catch (e: Throwable) {
             null
         }
-        val result = fromExif ?: parseDateFromFilename(displayName)
-        if (result != null) exifDateTakenCache[id] = result
-        return result
+        return fromExif ?: parseDateFromFilename(displayName)
     }
 
     /** Standard EXIF date/time tag pattern: "yyyy:MM:dd HH:mm:ss". Deliberately ignores any

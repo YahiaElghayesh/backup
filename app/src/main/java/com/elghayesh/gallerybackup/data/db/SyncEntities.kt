@@ -99,14 +99,38 @@ interface OneDriveSyncedFileDao {
     suspend fun upsert(entity: OneDriveSyncedFileEntity)
 }
 
+/**
+ * A photo's real capture date, once successfully read from its own EXIF (or, failing that, its
+ * filename) -- see MediaRepository.refineDateTakenFromExif. Persisting this (instead of just an
+ * in-memory, per-process cache) is what lets a folder's sort order be correct the moment it's
+ * opened on every later app launch, not just eventually after that launch's own background
+ * refinement pass has caught up: MediaRepository.scanFolderTree applies these overrides directly
+ * during its own fast, MediaStore-only scan, before the slower per-photo EXIF pass even starts.
+ */
+@Entity(tableName = "date_taken_overrides")
+data class DateTakenEntity(
+    @PrimaryKey val mediaId: Long,
+    val dateTakenSec: Long,
+)
+
+@Dao
+interface DateTakenDao {
+    @Query("SELECT * FROM date_taken_overrides")
+    suspend fun getAll(): List<DateTakenEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(entities: List<DateTakenEntity>)
+}
+
 @Database(
     entities = [
         SyncedFolderEntity::class,
         SyncedFileEntity::class,
         TrashedMediaEntity::class,
         OneDriveSyncedFileEntity::class,
+        DateTakenEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = false,
 )
 abstract class BackupDatabase : RoomDatabase() {
@@ -114,6 +138,7 @@ abstract class BackupDatabase : RoomDatabase() {
     abstract fun syncedFileDao(): SyncedFileDao
     abstract fun trashedMediaDao(): TrashedMediaDao
     abstract fun oneDriveSyncedFileDao(): OneDriveSyncedFileDao
+    abstract fun dateTakenDao(): DateTakenDao
 
     companion object {
         @Volatile private var instance: BackupDatabase? = null
