@@ -213,32 +213,40 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Runs the fast, MediaStore-only scan first and publishes it immediately -- so the gallery
      * (and any in-flight pull-to-refresh spinner) reflects the latest MediaStore state as soon as
-     * that alone is ready, rather than sitting on the OLD data while waiting on
-     * [MediaRepository.rescanUnindexedMedia]'s much slower full filesystem walk, which almost
-     * always finds nothing new anyway. That slow walk still runs, just afterward and without
-     * blocking [isLoading] -- if it does find something MediaStore didn't have yet, a second,
-     * still-fast MediaStore scan picks it up and publishes again. Old content stays on screen the
-     * entire time either way: neither scan ever clears [_rawRoot] before its own replacement is
-     * ready.
+     * that alone is ready, rather than sitting on the OLD data while waiting on either of the two
+     * slower background passes below. Old content stays on screen the entire time either way:
+     * none of the three scans ever clears [_rawRoot] before its own replacement is ready.
      *
-     * [MediaRepository.refineDateTakenFromExif] runs last, also without blocking [isLoading] --
-     * it's what corrects "date taken" from the fast scan's rough MediaStore-based guess to each
-     * photo's own real EXIF capture time (see its doc comment for why that matters), but it pays
-     * an actual per-photo file-open cost, so it must never be what the user waits on to see their
-     * gallery at all. A folder sorted/grouped by date taken can briefly show the fast, rougher
-     * order right after a cold start, then silently snap to the correct one once this finishes --
-     * far better than leaving the whole gallery blocked on "Scanning..." for however long a large
-     * library's full EXIF pass takes. */
+     * [MediaRepository.refineDateTakenFromExif] runs next, without blocking [isLoading] -- it's
+     * what corrects "date taken" from the fast scan's rough MediaStore-based guess to each photo's
+     * own real EXIF capture time (see its doc comment for why that matters, and how it persists
+     * what it finds so this only ever costs a per-photo file-open once, ever, per photo -- not on
+     * every single refresh). A folder sorted/grouped by date taken can briefly show the fast,
+     * rougher order right after a cold start, then silently snap to the correct one once this
+     * finishes -- far better than leaving the whole gallery blocked on "Scanning..." for however
+     * long a large library's full EXIF pass takes. Deliberately runs BEFORE
+     * [MediaRepository.rescanUnindexedMedia] (a full filesystem walk that almost always finds
+     * nothing new, since MediaStore's own scanner already indexes almost everything already) --
+     * this is the far more commonly useful of the two background passes, so it shouldn't have to
+     * wait on the rarer one. Safe to run in either order regardless: [MediaRepository.scanFolderTree]
+     * re-applies every already-resolved date from persisted storage on its own next call, so a
+     * subsequent scan from [rescanUnindexedMedia] finding new files can't undo this pass's work.
+     *
+     * [MediaRepository.rescanUnindexedMedia] runs last. It waits on a callback from Android's own
+     * system media-scanner service that (rarely, but really) never fires -- bounded to at most 15
+     * seconds internally for exactly that reason -- so running it last, after the far more useful
+     * date-refinement pass, means that rare stall can no longer hold up date refinement itself
+     * the way it did when the two were the other way around. */
     fun refresh() {
         viewModelScope.launch {
             _isLoading.value = true
             _rawRoot.value = repository.scanFolderTree()
             _isLoading.value = false
-            if (repository.rescanUnindexedMedia()) {
-                _rawRoot.value = repository.scanFolderTree()
-            }
             _rawRoot.value?.let { current ->
                 _rawRoot.value = repository.refineDateTakenFromExif(current)
+            }
+            if (repository.rescanUnindexedMedia()) {
+                _rawRoot.value = repository.scanFolderTree()
             }
         }
     }

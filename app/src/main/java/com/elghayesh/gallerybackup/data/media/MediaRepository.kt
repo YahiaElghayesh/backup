@@ -10,6 +10,7 @@ import android.provider.MediaStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import kotlin.coroutines.resume
 
@@ -107,11 +108,23 @@ class MediaRepository(private val context: Context) {
         }
         walk(root, true)
         if (missing.isEmpty()) return@withContext false
-        suspendCancellableCoroutine<Unit> { cont ->
-            var remaining = missing.size
-            MediaScannerConnection.scanFile(context, missing.toTypedArray(), null) { _, _ ->
-                remaining--
-                if (remaining <= 0 && cont.isActive) cont.resume(Unit)
+        // MediaScannerConnection's own callback isn't guaranteed to fire for every path -- a
+        // flaky connection to the system media scanner service, a scan that silently drops one
+        // file, or OEM-specific scanner quirks (some Android skins throttle/kill scanning
+        // services more aggressively than stock Android) can all leave `remaining` stuck above
+        // zero forever. Without a timeout, that hangs this whole suspend call indefinitely --
+        // which hangs the refresh() coroutine that called it, which means refineDateTakenFromExif
+        // (further down the same coroutine) never runs at all, on any future refresh either,
+        // since every refresh() re-enters this same wait. A photo's date can be read perfectly
+        // correctly and still never make it into the gallery's sort order if this step never lets
+        // the rest of the pipeline proceed.
+        withTimeoutOrNull(15_000) {
+            suspendCancellableCoroutine<Unit> { cont ->
+                var remaining = missing.size
+                MediaScannerConnection.scanFile(context, missing.toTypedArray(), null) { _, _ ->
+                    remaining--
+                    if (remaining <= 0 && cont.isActive) cont.resume(Unit)
+                }
             }
         }
         true
