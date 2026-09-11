@@ -286,7 +286,7 @@ class MediaRepository(private val context: Context) {
             if (item.isVideo) {
                 item
             } else {
-                val exifSec = readExifDateTakenSec(item.id, item.uri)
+                val exifSec = readExifDateTakenSec(item.id, item.uri, item.displayName)
                 if (exifSec != null) item.copy(dateTakenSec = exifSec) else item
             }
         }
@@ -299,14 +299,18 @@ class MediaRepository(private val context: Context) {
      * Third-party batch EXIF-fixing tools (like the one this app's own user described using to
      * correct a whole folder's capture dates) don't all write DateTimeOriginal specifically --
      * some only touch DateTime or DateTimeDigitized, leaving DateTimeOriginal absent or stale.
-     * Reading only DateTimeOriginal silently fell through to the MediaStore/modified-time guess
-     * for exactly those files, even though a real, corrected date was sitting right there in a
-     * sibling tag -- which is why another gallery app could show the right date on a photo this
-     * app's Properties dialog reported as matching its (unrelated) file-modified time.
+     *
+     * Falls back to [parseDateFromFilename] when none of those tags produce anything -- some of
+     * those same batch tools instead (or additionally) rename the file itself to embed the
+     * corrected date, e.g. "2016-12-30.jpg", without ever touching EXIF. A photo whose camera app
+     * never wrote a DateTimeOriginal/Digitized/DateTime tag in the first place (common on cheaper
+     * or older devices -- Make/Model in IFD0 can be present while the separate Exif SubIFD that
+     * holds the date tags is simply absent) would otherwise keep falling through to file-modified
+     * time even after a rename tool had already given it the real date, right there in its name.
      */
-    private fun readExifDateTakenSec(id: Long, uri: android.net.Uri): Long? {
+    private fun readExifDateTakenSec(id: Long, uri: android.net.Uri, displayName: String): Long? {
         exifDateTakenCache[id]?.let { return it }
-        val result = try {
+        val fromExif = try {
             context.contentResolver.openInputStream(uri)?.use { stream ->
                 val exif = androidx.exifinterface.media.ExifInterface(stream)
                 val ms = exif.dateTimeOriginal ?: exif.dateTimeDigitized ?: exif.dateTime
@@ -315,8 +319,51 @@ class MediaRepository(private val context: Context) {
         } catch (e: Exception) {
             null
         }
+        val result = fromExif ?: parseDateFromFilename(displayName)
         if (result != null) exifDateTakenCache[id] = result
         return result
+    }
+
+    /** yyyy-MM-dd[_ T]HH-mm-ss or yyyyMMdd_HHmmss, e.g. "2016-12-30_14-30-22", "IMG_20161230_143022". */
+    private val filenameDateTimePatterns = listOf(
+        Regex("""(\d{4})[-_](\d{2})[-_](\d{2})[ _T](\d{2})[-:]?(\d{2})[-:]?(\d{2})"""),
+        Regex("""(\d{4})(\d{2})(\d{2})[_-](\d{2})(\d{2})(\d{2})"""),
+    )
+
+    /** yyyy-MM-dd, e.g. "2016-12-30.jpg". */
+    private val filenameDateOnlyPattern = Regex("""(\d{4})-(\d{2})-(\d{2})""")
+
+    /**
+     * Recovers a capture date from [displayName] when EXIF has none to offer -- see the doc
+     * comment on [readExifDateTakenSec] for why a file can genuinely have no usable EXIF date tag
+     * at all. Only matches clearly date-shaped patterns (dashes/underscores as separators, an
+     * explicit time component where present) and validates every field against a real calendar
+     * range, so an unrelated numeric filename (a camera's IMG_1234.jpg, a download id, ...) isn't
+     * misread as a date.
+     */
+    private fun parseDateFromFilename(displayName: String): Long? {
+        val base = displayName.substringBeforeLast('.')
+        for (pattern in filenameDateTimePatterns) {
+            pattern.find(base)?.let { match -> filenameMatchToEpochSec(match, hasTime = true) }?.let { return it }
+        }
+        return filenameDateOnlyPattern.find(base)?.let { match -> filenameMatchToEpochSec(match, hasTime = false) }
+    }
+
+    private fun filenameMatchToEpochSec(match: MatchResult, hasTime: Boolean): Long? {
+        val g = match.groupValues
+        val year = g[1].toIntOrNull() ?: return null
+        val month = g[2].toIntOrNull() ?: return null
+        val day = g[3].toIntOrNull() ?: return null
+        if (year !in 1990..2100 || month !in 1..12 || day !in 1..31) return null
+        val hour = if (hasTime) g.getOrNull(4)?.toIntOrNull() ?: 0 else 0
+        val minute = if (hasTime) g.getOrNull(5)?.toIntOrNull() ?: 0 else 0
+        val second = if (hasTime) g.getOrNull(6)?.toIntOrNull() ?: 0 else 0
+        if (hour !in 0..23 || minute !in 0..59 || second !in 0..59) return null
+        val calendar = java.util.Calendar.getInstance().apply {
+            clear()
+            set(year, month - 1, day, hour, minute, second)
+        }
+        return calendar.timeInMillis / 1000
     }
 
     /** Pre-Android-10 fallback: derive "DCIM/Camera" from "/storage/emulated/0/DCIM/Camera/foo.jpg". */
