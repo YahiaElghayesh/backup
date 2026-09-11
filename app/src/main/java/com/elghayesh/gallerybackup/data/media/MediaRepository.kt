@@ -300,6 +300,17 @@ class MediaRepository(private val context: Context) {
      * correct a whole folder's capture dates) don't all write DateTimeOriginal specifically --
      * some only touch DateTime or DateTimeDigitized, leaving DateTimeOriginal absent or stale.
      *
+     * Deliberately does NOT use ExifInterface's own typed getDateTimeOriginal()/getDateTime()
+     * (which return a parsed Long directly) -- confirmed via a raw-tag debug dump against a real
+     * failing photo that those getters can return null even though the underlying tag is present
+     * and perfectly well-formed ("2016:12:30 00:00:00", standard EXIF format). The same photo had
+     * an unusually long SubSecTimeOriginal value (6 digits: "564295", vs. the 2-3 digits most
+     * cameras write), which is the most likely trigger for whatever the typed getters' internal
+     * subsecond handling doesn't like. Reading the raw attribute string with getAttribute() and
+     * parsing just the primary "yyyy:MM:dd HH:mm:ss" portion ourselves sidesteps that entirely --
+     * capture time to the nearest second is enough for sorting/display, so subsecond precision
+     * isn't worth the fragility of depending on it.
+     *
      * Falls back to [parseDateFromFilename] when none of those tags produce anything -- some of
      * those same batch tools instead (or additionally) rename the file itself to embed the
      * corrected date, e.g. "2016-12-30.jpg", without ever touching EXIF. A photo whose camera app
@@ -318,8 +329,10 @@ class MediaRepository(private val context: Context) {
         val fromExif = try {
             context.contentResolver.openInputStream(uri)?.use { stream ->
                 val exif = androidx.exifinterface.media.ExifInterface(stream)
-                val ms = exif.dateTimeOriginal ?: exif.dateTimeDigitized ?: exif.dateTime
-                ms?.let { it / 1000 }
+                val raw = exif.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_DATETIME_ORIGINAL)
+                    ?: exif.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_DATETIME_DIGITIZED)
+                    ?: exif.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_DATETIME)
+                raw?.let { parseExifDateTimeString(it) }
             }
         } catch (e: Throwable) {
             null
@@ -327,6 +340,16 @@ class MediaRepository(private val context: Context) {
         val result = fromExif ?: parseDateFromFilename(displayName)
         if (result != null) exifDateTakenCache[id] = result
         return result
+    }
+
+    /** Standard EXIF date/time tag pattern: "yyyy:MM:dd HH:mm:ss". Deliberately ignores any
+     * trailing subsecond/offset tags -- see [readExifDateTakenSec]'s doc comment for why those
+     * aren't worth depending on here. */
+    private val exifDateTimePattern = Regex("""(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})""")
+
+    private fun parseExifDateTimeString(value: String): Long? {
+        val match = exifDateTimePattern.find(value.trim()) ?: return null
+        return filenameMatchToEpochSec(match, hasTime = true)
     }
 
     /** yyyy-MM-dd[_ T]HH-mm-ss or yyyyMMdd_HHmmss, e.g. "2016-12-30_14-30-22", "IMG_20161230_143022". */
