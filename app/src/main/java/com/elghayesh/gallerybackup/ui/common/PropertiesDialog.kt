@@ -36,7 +36,7 @@ fun PropertiesDialog(items: List<MediaItem>, onDismiss: () -> Unit) {
 private fun SingleItemProperties(item: MediaItem) {
     val context = LocalContext.current
     var dimensions by remember(item.id) { mutableStateOf<String?>(null) }
-    var exifDebug by remember(item.id) { mutableStateOf<String?>(null) }
+    var exifDebug by remember(item.id) { mutableStateOf<ExifDebugInfo?>(null) }
     LaunchedEffect(item.id) {
         if (!item.isVideo) {
             dimensions = decodeImageDimensions(context, item)
@@ -55,10 +55,19 @@ private fun SingleItemProperties(item: MediaItem) {
         } else {
             dimensions?.let { PropertyRow("Dimensions", it) }
         }
-        // TEMPORARY diagnostic row -- shows the raw EXIF date tags straight from the file, to
-        // find out why "Date taken" above isn't picking up a real capture date for some photos.
-        // Remove once that's root-caused; not meant to stay in the shipped Properties dialog.
-        exifDebug?.let { PropertyRow("EXIF debug", it) }
+        // TEMPORARY diagnostic rows -- see readExifDebugInfo's doc comment. Not meant to stay in
+        // the shipped Properties dialog. "Computed date taken" independently re-derives the date
+        // right here, live, from a fresh file read -- bypassing MediaRepository/its cache/the
+        // refresh() pipeline entirely -- so we can tell apart "the parsing logic is still wrong"
+        // from "the parsing is fine but its result never reaches what's displayed above".
+        exifDebug?.let { debug ->
+            PropertyRow("EXIF debug", debug.raw)
+            PropertyRow(
+                "Computed date taken",
+                debug.computedSec?.let { DateFormat.getDateTimeInstance().format(Date(it * 1000)) }
+                    ?: "computed null",
+            )
+        }
     }
 }
 
@@ -85,11 +94,18 @@ private fun PropertyRow(label: String, value: String) {
     Text("$label: $value")
 }
 
+private data class ExifDebugInfo(val raw: String, val computedSec: Long?)
+
+private val exifDateTimePattern = Regex("""(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})""")
+
 /** TEMPORARY diagnostic: reads the raw (unparsed) EXIF date-related tag strings directly from
  * the file, bypassing MediaRepository's cache and typed getters entirely, so we can see exactly
  * what -- if anything -- is actually stored in a given photo's EXIF, and whether the app's own
- * date-tag reading is throwing partway through. */
-private suspend fun readExifDebugInfo(context: Context, item: MediaItem): String =
+ * date-tag reading is throwing partway through. Also independently re-parses that raw string
+ * right here (mirroring MediaRepository.parseExifDateTimeString's logic exactly, but computed
+ * fresh in this dialog rather than read back from the repository) -- see the call site's comment
+ * for why. */
+private suspend fun readExifDebugInfo(context: Context, item: MediaItem): ExifDebugInfo =
     withContext(Dispatchers.IO) {
         try {
             context.contentResolver.openInputStream(item.uri)?.use { stream ->
@@ -100,11 +116,23 @@ private suspend fun readExifDebugInfo(context: Context, item: MediaItem): String
                 val subsec = exif.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_SUBSEC_TIME_ORIGINAL)
                 val offset = exif.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_OFFSET_TIME_ORIGINAL)
                 val make = exif.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_MAKE)
-                "Original=$original Digitized=$digitized DateTime=$dateTime " +
+                val raw = "Original=$original Digitized=$digitized DateTime=$dateTime " +
                     "Subsec=$subsec Offset=$offset Make=$make"
-            } ?: "could not open stream"
+                val chosen = original ?: digitized ?: dateTime
+                val computedSec = chosen?.let { value ->
+                    exifDateTimePattern.find(value.trim())?.let { match ->
+                        val g = match.groupValues
+                        val cal = java.util.Calendar.getInstance().apply {
+                            clear()
+                            set(g[1].toInt(), g[2].toInt() - 1, g[3].toInt(), g[4].toInt(), g[5].toInt(), g[6].toInt())
+                        }
+                        cal.timeInMillis / 1000
+                    }
+                }
+                ExifDebugInfo(raw, computedSec)
+            } ?: ExifDebugInfo("could not open stream", null)
         } catch (e: Throwable) {
-            "threw: ${e::class.simpleName}: ${e.message}"
+            ExifDebugInfo("threw: ${e::class.simpleName}: ${e.message}", null)
         }
     }
 
