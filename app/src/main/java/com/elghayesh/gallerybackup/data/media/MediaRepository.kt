@@ -293,11 +293,24 @@ class MediaRepository(private val context: Context) {
         FolderNode.buildTree(refined)
     }
 
+    /**
+     * Reads a capture date straight from EXIF, trying DateTimeOriginal first (the tag meant
+     * specifically for "when the shutter opened"), then DateTimeDigitized, then plain DateTime.
+     * Third-party batch EXIF-fixing tools (like the one this app's own user described using to
+     * correct a whole folder's capture dates) don't all write DateTimeOriginal specifically --
+     * some only touch DateTime or DateTimeDigitized, leaving DateTimeOriginal absent or stale.
+     * Reading only DateTimeOriginal silently fell through to the MediaStore/modified-time guess
+     * for exactly those files, even though a real, corrected date was sitting right there in a
+     * sibling tag -- which is why another gallery app could show the right date on a photo this
+     * app's Properties dialog reported as matching its (unrelated) file-modified time.
+     */
     private fun readExifDateTakenSec(id: Long, uri: android.net.Uri): Long? {
         exifDateTakenCache[id]?.let { return it }
         val result = try {
             context.contentResolver.openInputStream(uri)?.use { stream ->
-                androidx.exifinterface.media.ExifInterface(stream).dateTimeOriginal?.let { it / 1000 }
+                val exif = androidx.exifinterface.media.ExifInterface(stream)
+                val ms = exif.dateTimeOriginal ?: exif.dateTimeDigitized ?: exif.dateTime
+                ms?.let { it / 1000 }
             }
         } catch (e: Exception) {
             null
