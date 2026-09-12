@@ -572,7 +572,7 @@ fun PhotoEditScreen(
             }
         },
     ) { padding ->
-        Box(Modifier.padding(padding).fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+        BoxWithConstraints(Modifier.padding(padding).fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
             val bitmap = workingBitmap
             when {
                 isLoading -> CircularProgressIndicator(color = Color.White)
@@ -610,12 +610,28 @@ fun PhotoEditScreen(
                             },
                             onDragEnd = { endLiveMutation() },
                         )
-                        return@Box
+                        return@BoxWithConstraints
+                    }
+                    // Sized explicitly to fit within BOTH available dimensions (not just
+                    // Modifier.aspectRatio() off of the full width) -- for a photo tall/narrow
+                    // enough that width-first sizing would make it taller than the space actually
+                    // available here (between the top bar and the bottom tool panel), that alone
+                    // could push part of the image, and the crop handles anchored to its edges,
+                    // outside the visible screen entirely, which is exactly why some photos
+                    // showed no visible/reachable crop corners while others did.
+                    val photoRatio = bitmap.width.toFloat() / bitmap.height.toFloat()
+                    val photoWidthDp: androidx.compose.ui.unit.Dp
+                    val photoHeightDp: androidx.compose.ui.unit.Dp
+                    if (maxWidth / photoRatio <= maxHeight) {
+                        photoWidthDp = maxWidth
+                        photoHeightDp = maxWidth / photoRatio
+                    } else {
+                        photoHeightDp = maxHeight
+                        photoWidthDp = maxHeight * photoRatio
                     }
                     Box(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .aspectRatio(bitmap.width.toFloat() / bitmap.height.toFloat())
+                            .size(photoWidthDp, photoHeightDp)
                             .onSizeChanged { boxSize = it }
                             // Press and hold anywhere on the photo to instantly preview the untouched
                             // original -- release to go back to the edited version.

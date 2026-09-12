@@ -45,27 +45,25 @@ enum class SortCriterion(val label: String) {
 data class FolderSortSetting(val criterion: SortCriterion, val ascending: Boolean, val randomSeed: Long = 0L)
 
 /** One of a handful of preset accent colors -- deliberately not a full color picker, to keep this
- * simple. A previous version of this palette spaced 12 hues perfectly evenly (every 30 degrees) --
- * that math is exactly what caused the next problem: green occupies a much WIDER perceptual band
- * than other hues, so a uniform wheel unavoidably put 3-4 entries (roughly 60-150 degrees: an
- * amber/gold, a lime, a green, and a teal) all reading as "shades of green" at a glance. This
- * palette instead deliberately gives green only ONE slot and spreads the other 11 across the
- * remaining hue range, so no two entries are perceptually crowded together -- and at a somewhat
- * lower saturation/lightness than a naive wheel would default to, so the set doesn't read as
- * neon/garish, just clearly distinct. */
+ * simple. Two earlier versions of this palette tried to space hues evenly around the color wheel
+ * (first every 30 degrees, then a version that gave green just one slot but still spaced the rest
+ * mathematically) -- both still produced multiple entries close enough to read as "shades of the
+ * same color" (several greens, several purples), because evenly-spaced hue angles don't correspond
+ * to evenly-spaced PERCEIVED color categories. This palette instead hand-picks one clearly-named,
+ * commonly-recognized color per family (red, orange, yellow, green, teal, blue, purple, magenta,
+ * brown, gray) -- exactly one of each, nothing else sharing its family, so no two entries can be
+ * mistaken for shades of one another. */
 enum class AccentColor(val seed: Long) {
-    RED(0xFFA1492B),
-    ORANGE(0xFFA17F2B),
-    GREEN(0xFF52A12B),
-    TEAL(0xFF2BA13F),
-    CYAN(0xFF2BA174),
-    SKY(0xFF2B98A1),
-    BLUE(0xFF2B62A1),
-    INDIGO(0xFF2B2DA1),
-    VIOLET(0xFF5F2BA1),
-    MAGENTA(0xFF952BA1),
-    PINK(0xFFA12B78),
-    ROSE(0xFFA12B42),
+    RED(0xFFC0392B),
+    ORANGE(0xFFD35400),
+    YELLOW(0xFFD4AC0D),
+    GREEN(0xFF27AE60),
+    TEAL(0xFF16A085),
+    BLUE(0xFF2471A3),
+    PURPLE(0xFF8E44AD),
+    MAGENTA(0xFFC2185B),
+    BROWN(0xFF795548),
+    GRAY(0xFF757575),
     WHITE(0xFFF2F1EF),
     BLACK(0xFF1C1C1C),
 }

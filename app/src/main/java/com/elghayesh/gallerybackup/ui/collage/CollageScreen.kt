@@ -17,6 +17,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -35,11 +36,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -66,6 +70,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.elghayesh.gallerybackup.data.media.MediaItem
@@ -182,11 +187,12 @@ fun CollageScreen(
     var cells by remember { mutableStateOf(CollagePreset.GRID.build(photos.size)) }
     var selectedItemIndex by remember { mutableStateOf<Int?>(null) }
     var canvasAspectPreset by remember { mutableStateOf(CanvasAspectPreset.SQUARE) }
-    var freeWidthUnits by remember { mutableStateOf(4f) }
-    var freeHeightUnits by remember { mutableStateOf(3f) }
+    var freeWidthText by remember { mutableStateOf("4") }
+    var freeHeightText by remember { mutableStateOf("3") }
     var borderWidthDp by remember { mutableStateOf(4f) }
     var backgroundColorSeed by remember { mutableStateOf(AccentColor.WHITE.seed) }
     var isSaving by remember { mutableStateOf(false) }
+    var showDeleteOriginalsPrompt by remember { mutableStateOf(false) }
 
     val bitmaps = remember { mutableStateMapOf<Long, Bitmap>() }
     LaunchedEffect(photos) {
@@ -196,7 +202,10 @@ fun CollageScreen(
         }
     }
 
-    val canvasRatio = canvasAspectPreset.ratio ?: (freeWidthUnits / freeHeightUnits)
+    // No upper limit on what can be typed here -- any positive number is a valid ratio.
+    val freeWidthValue = freeWidthText.toFloatOrNull()?.takeIf { it > 0f } ?: 1f
+    val freeHeightValue = freeHeightText.toFloatOrNull()?.takeIf { it > 0f } ?: 1f
+    val canvasRatio = canvasAspectPreset.ratio ?: (freeWidthValue / freeHeightValue)
 
     fun moveCell(itemIndex: Int, dxNorm: Float, dyNorm: Float) {
         cells = cells.map {
@@ -231,15 +240,37 @@ fun CollageScreen(
         val snapshotRatio = canvasRatio
         val snapshotBorder = borderWidthDp
         val snapshotBackground = backgroundColorSeed
+        // Same folder as the source photos rather than a fixed "Collages" folder -- the first
+        // selected photo's own folder, since a collage combining photos from different folders
+        // has no single obviously-correct destination.
+        val folderPath = photos.first().folderPath
         scope.launch {
-            saveCollage(context, photos, snapshotCells, snapshotRatio, snapshotBorder, snapshotBackground, bitmaps)
+            saveCollage(context, photos, snapshotCells, snapshotRatio, snapshotBorder, snapshotBackground, folderPath, bitmaps)
             viewModel.refresh()
             isSaving = false
-            onDone()
+            showDeleteOriginalsPrompt = true
         }
     }
 
     val panelBg = Color(0xFF1C1C1C)
+
+    if (showDeleteOriginalsPrompt) {
+        AlertDialog(
+            onDismissRequest = { showDeleteOriginalsPrompt = false; onDone() },
+            title = { Text("Delete original photos?") },
+            text = { Text("Collage saved. Delete the ${photos.size} original photos used to make it?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.deleteMediaItems(photos, skipTrash = false)
+                    showDeleteOriginalsPrompt = false
+                    onDone()
+                }) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteOriginalsPrompt = false; onDone() }) { Text("Keep") }
+            },
+        )
+    }
 
     Scaffold(
         containerColor = Color.Black,
@@ -283,23 +314,41 @@ fun CollageScreen(
                 if (canvasAspectPreset == CanvasAspectPreset.FREE) {
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "Canvas shape -- ${freeWidthUnits.roundToInt()} : ${freeHeightUnits.roundToInt()}",
+                        "Canvas shape -- width : height",
                         style = MaterialTheme.typography.labelMedium,
                         color = Color.White.copy(alpha = 0.7f),
                         modifier = Modifier.padding(horizontal = 12.dp),
                     )
-                    Slider(
-                        value = freeWidthUnits,
-                        onValueChange = { freeWidthUnits = it },
-                        valueRange = 1f..6f,
-                        modifier = Modifier.padding(horizontal = 12.dp),
-                    )
-                    Slider(
-                        value = freeHeightUnits,
-                        onValueChange = { freeHeightUnits = it },
-                        valueRange = 1f..6f,
-                        modifier = Modifier.padding(horizontal = 12.dp),
-                    )
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        val fieldColors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedBorderColor = Color.White,
+                            unfocusedBorderColor = Color.White.copy(alpha = 0.4f),
+                            cursorColor = Color.White,
+                        )
+                        OutlinedTextField(
+                            value = freeWidthText,
+                            onValueChange = { freeWidthText = it },
+                            label = { Text("Width") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            colors = fieldColors,
+                            modifier = Modifier.weight(1f),
+                        )
+                        OutlinedTextField(
+                            value = freeHeightText,
+                            onValueChange = { freeHeightText = it },
+                            label = { Text("Height") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            colors = fieldColors,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
                 }
                 Spacer(Modifier.height(8.dp))
                 Text(
@@ -311,7 +360,7 @@ fun CollageScreen(
                 Slider(
                     value = borderWidthDp,
                     onValueChange = { borderWidthDp = it },
-                    valueRange = 0f..24f,
+                    valueRange = 0f..150f,
                     modifier = Modifier.padding(horizontal = 12.dp),
                 )
                 Spacer(Modifier.height(4.dp))
@@ -490,6 +539,7 @@ private suspend fun saveCollage(
     canvasRatio: Float,
     borderWidthDp: Float,
     backgroundColorSeed: Long,
+    folderPath: String,
     bitmaps: Map<Long, Bitmap>,
 ) = withContext(Dispatchers.IO) {
     val longSide = 1600
@@ -539,7 +589,7 @@ private suspend fun saveCollage(
         put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
         put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Collages")
+            put(MediaStore.Images.Media.RELATIVE_PATH, if (folderPath.isEmpty()) "Pictures" else folderPath)
             put(MediaStore.Images.Media.IS_PENDING, 1)
         }
     }
