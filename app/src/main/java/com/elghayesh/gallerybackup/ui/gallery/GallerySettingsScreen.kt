@@ -27,6 +27,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
@@ -46,6 +47,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.elghayesh.gallerybackup.data.settings.AccentColor
+import com.elghayesh.gallerybackup.data.settings.LockMethod
 import com.elghayesh.gallerybackup.data.settings.ThemeMode
 import com.elghayesh.gallerybackup.data.settings.ViewType
 import com.elghayesh.gallerybackup.data.update.UpdateCheckCoordinator
@@ -373,11 +375,13 @@ private fun RecycleBinSettingsScreen(viewModel: GalleryViewModel, onBack: () -> 
 @Composable
 private fun SecuritySettingsScreen(viewModel: GalleryViewModel, onBack: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    val activity = context as? androidx.fragment.app.FragmentActivity
     val scope = rememberCoroutineScope()
     val appLockEnabled by viewModel.appLockEnabled.collectAsState()
     val lockHiddenItems by viewModel.lockHiddenItems.collectAsState()
+    val lockMethod by viewModel.lockMethod.collectAsState()
+    val hasLockPassword by viewModel.hasLockPassword.collectAsState()
     var showNoAuthSetUpDialog by remember { mutableStateOf(false) }
+    var showSetPasswordDialog by remember { mutableStateOf(false) }
 
     if (showNoAuthSetUpDialog) {
         AlertDialog(
@@ -394,15 +398,37 @@ private fun SecuritySettingsScreen(viewModel: GalleryViewModel, onBack: () -> Un
         )
     }
 
+    if (showSetPasswordDialog) {
+        SetLockPasswordDialog(
+            onConfirm = { password ->
+                scope.launch { viewModel.setLockPassword(password) }
+                showSetPasswordDialog = false
+            },
+            onDismiss = { showSetPasswordDialog = false },
+        )
+    }
+
+    /** Confirms the CURRENT credential before flipping a lock switch on -- refuses (and prompts to
+     * fix the missing prerequisite instead) if the chosen [LockMethod] has nothing to check yet:
+     * no device screen lock/biometrics for [LockMethod.BIOMETRIC], no password set yet for
+     * [LockMethod.PASSWORD]. */
     fun requestEnableLock(onGranted: () -> Unit) {
-        if (activity == null || !com.elghayesh.gallerybackup.security.canUseAppLock(activity)) {
-            showNoAuthSetUpDialog = true
-            return
+        when (lockMethod) {
+            LockMethod.BIOMETRIC -> {
+                if (!com.elghayesh.gallerybackup.security.canUseAppLock(context)) {
+                    showNoAuthSetUpDialog = true
+                    return
+                }
+            }
+            LockMethod.PASSWORD -> {
+                if (!hasLockPassword) {
+                    showSetPasswordDialog = true
+                    return
+                }
+            }
         }
         scope.launch {
-            if (com.elghayesh.gallerybackup.security.requestAppLockAuthentication(activity, "Confirm it's you")) {
-                onGranted()
-            }
+            if (viewModel.requestAuth("Confirm it's you")) onGranted()
         }
     }
 
@@ -412,8 +438,8 @@ private fun SecuritySettingsScreen(viewModel: GalleryViewModel, onBack: () -> Un
                 Column(Modifier.weight(1f)) {
                     Text("Lock MediaHub", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        "Require your fingerprint/face or device PIN to open the app, every time " +
-                            "it comes back from the background.",
+                        "Require authentication to open the app, every time it comes back from " +
+                            "the background.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -450,6 +476,36 @@ private fun SecuritySettingsScreen(viewModel: GalleryViewModel, onBack: () -> Un
             Spacer(Modifier.height(20.dp))
             HorizontalDivider()
             Spacer(Modifier.height(20.dp))
+            Text("Unlock method", style = MaterialTheme.typography.titleSmall)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Which credential the app lock, hidden-items lock, and individual folder locks " +
+                    "all ask for.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(10.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                FilterChip(
+                    selected = lockMethod == LockMethod.BIOMETRIC,
+                    onClick = { viewModel.setLockMethod(LockMethod.BIOMETRIC) },
+                    label = { Text("Biometrics / device PIN") },
+                )
+                FilterChip(
+                    selected = lockMethod == LockMethod.PASSWORD,
+                    onClick = { viewModel.setLockMethod(LockMethod.PASSWORD) },
+                    label = { Text("App password") },
+                )
+            }
+            if (lockMethod == LockMethod.PASSWORD) {
+                Spacer(Modifier.height(12.dp))
+                OutlinedButton(onClick = { showSetPasswordDialog = true }) {
+                    Text(if (hasLockPassword) "Change password" else "Set password")
+                }
+            }
+            Spacer(Modifier.height(20.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(20.dp))
             Text("Lock individual folders", style = MaterialTheme.typography.titleSmall)
             Spacer(Modifier.height(4.dp))
             Text(
@@ -461,6 +517,48 @@ private fun SecuritySettingsScreen(viewModel: GalleryViewModel, onBack: () -> Un
             )
         }
     }
+}
+
+@Composable
+private fun SetLockPasswordDialog(onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
+    var password by remember { mutableStateOf("") }
+    var confirmPassword by remember { mutableStateOf("") }
+    val mismatch = confirmPassword.isNotEmpty() && password != confirmPassword
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Set app password") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text("New password") },
+                    singleLine = true,
+                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = confirmPassword,
+                    onValueChange = { confirmPassword = it },
+                    label = { Text("Confirm password") },
+                    singleLine = true,
+                    isError = mismatch,
+                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                )
+                if (mismatch) {
+                    Text("Passwords don't match", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = password.isNotEmpty() && password == confirmPassword,
+                onClick = { onConfirm(password) },
+            ) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 /** One target's (folders, or photos & videos) view type plus whichever size control actually

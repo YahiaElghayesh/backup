@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 private val Context.galleryPrefsStore by preferencesDataStore(name = "gallery_ui_preferences")
@@ -22,6 +23,12 @@ private val THUMBNAIL_SIZE_RANGE_DP = 8..600
 enum class ViewType { GRID, LIST }
 
 enum class ThemeMode { SYSTEM, LIGHT, DARK }
+
+/** Which credential app lock/folder lock/hidden-item lock ask for. [BIOMETRIC] defers to the
+ * device's own fingerprint/face unlock or screen lock PIN/pattern/password; [PASSWORD] is a
+ * separate password set inside MediaHub itself (see [GalleryPreferencesRepository.setLockPassword]),
+ * independent of whatever the device's own lock screen uses. */
+enum class LockMethod { BIOMETRIC, PASSWORD }
 
 /** What a folder's (or the whole gallery's) contents are ordered by -- direction is a separate
  * field on [FolderSortSetting], not baked into the criterion itself, so the sort dialog can show
@@ -156,6 +163,9 @@ class GalleryPreferencesRepository(private val context: Context) {
         val APP_LOCK_ENABLED = booleanPreferencesKey("app_lock_enabled")
         val LOCKED_FOLDERS = stringSetPreferencesKey("locked_folders")
         val LOCK_HIDDEN_ITEMS = booleanPreferencesKey("lock_hidden_items")
+        val LOCK_METHOD = stringPreferencesKey("lock_method")
+        val LOCK_PASSWORD_HASH = stringPreferencesKey("lock_password_hash")
+        val LOCK_PASSWORD_SALT = stringPreferencesKey("lock_password_salt")
     }
 
     private fun legacyViewType(prefs: androidx.datastore.preferences.core.Preferences): ViewType? =
@@ -318,6 +328,48 @@ class GalleryPreferencesRepository(private val context: Context) {
 
     suspend fun setLockHiddenItems(value: Boolean) {
         context.galleryPrefsStore.edit { it[Keys.LOCK_HIDDEN_ITEMS] = value }
+    }
+
+    /** Which credential app lock/folder lock/hidden-item lock ask for -- see [LockMethod]. */
+    val lockMethod: Flow<LockMethod> = context.galleryPrefsStore.data.map { prefs ->
+        prefs[Keys.LOCK_METHOD]?.let { runCatching { LockMethod.valueOf(it) }.getOrNull() } ?: LockMethod.BIOMETRIC
+    }
+
+    suspend fun setLockMethod(method: LockMethod) {
+        context.galleryPrefsStore.edit { it[Keys.LOCK_METHOD] = method.name }
+    }
+
+    /** Whether an in-app password has been set yet -- [LockMethod.PASSWORD] can't be used (and
+     * app lock/folder lock/hidden-item lock can't be turned on under it) until one is. */
+    val hasLockPassword: Flow<Boolean> =
+        context.galleryPrefsStore.data.map { !it[Keys.LOCK_PASSWORD_HASH].isNullOrEmpty() }
+
+    /** Hashes and stores a new in-app lock password -- MediaHub never keeps the password itself,
+     * only a salted PBKDF2 hash of it, the same principle as how a device's own lock screen never
+     * stores your actual PIN either. */
+    suspend fun setLockPassword(password: String) {
+        val salt = generateLockPasswordSalt()
+        val hash = hashLockPassword(password, salt)
+        context.galleryPrefsStore.edit { prefs ->
+            prefs[Keys.LOCK_PASSWORD_SALT] = salt
+            prefs[Keys.LOCK_PASSWORD_HASH] = hash
+        }
+    }
+
+    suspend fun clearLockPassword() {
+        context.galleryPrefsStore.edit { prefs ->
+            prefs.remove(Keys.LOCK_PASSWORD_SALT)
+            prefs.remove(Keys.LOCK_PASSWORD_HASH)
+        }
+    }
+
+    /** Re-hashes [password] with the stored salt and compares against the stored hash -- true only
+     * on an exact match, false (never throws) if no password has been set yet. */
+    suspend fun verifyLockPassword(password: String): Boolean {
+        val prefs = context.galleryPrefsStore.data.first()
+        val salt = prefs[Keys.LOCK_PASSWORD_SALT] ?: return false
+        val storedHash = prefs[Keys.LOCK_PASSWORD_HASH] ?: return false
+        return hashLockPassword(password, salt) == storedHash
     }
 
     /** Sets [path]'s group-by choice, or clears it entirely when [setting]'s criterion is
@@ -590,4 +642,23 @@ class GalleryPreferencesRepository(private val context: Context) {
         }
         return array.toString()
     }
+}
+
+private const val LOCK_PASSWORD_HASH_ITERATIONS = 120_000
+private const val LOCK_PASSWORD_HASH_KEY_BITS = 256
+
+private fun generateLockPasswordSalt(): String {
+    val bytes = ByteArray(16)
+    java.security.SecureRandom().nextBytes(bytes)
+    return android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+}
+
+/** PBKDF2-HMAC-SHA256, a widely recommended baseline for hashing a password stored only on the
+ * device itself -- [password] is never stored, only this hash, salted so the same password never
+ * produces the same stored value on two different devices/accounts. */
+private fun hashLockPassword(password: String, saltBase64: String): String {
+    val salt = android.util.Base64.decode(saltBase64, android.util.Base64.NO_WRAP)
+    val spec = javax.crypto.spec.PBEKeySpec(password.toCharArray(), salt, LOCK_PASSWORD_HASH_ITERATIONS, LOCK_PASSWORD_HASH_KEY_BITS)
+    val key = javax.crypto.SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec)
+    return android.util.Base64.encodeToString(key.encoded, android.util.Base64.NO_WRAP)
 }

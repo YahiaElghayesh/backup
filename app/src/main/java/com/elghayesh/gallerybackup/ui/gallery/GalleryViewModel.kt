@@ -21,6 +21,7 @@ import com.elghayesh.gallerybackup.data.settings.FolderCover
 import com.elghayesh.gallerybackup.data.settings.FolderGroupSetting
 import com.elghayesh.gallerybackup.data.settings.FolderSortSetting
 import com.elghayesh.gallerybackup.data.settings.GalleryPreferencesRepository
+import com.elghayesh.gallerybackup.data.settings.LockMethod
 import com.elghayesh.gallerybackup.data.settings.SortCriterion
 import com.elghayesh.gallerybackup.data.settings.ThemeMode
 import com.elghayesh.gallerybackup.data.settings.ViewType
@@ -202,6 +203,47 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setLockHiddenItems(value: Boolean) {
         viewModelScope.launch { prefs.setLockHiddenItems(value) }
+    }
+
+    val lockMethod: StateFlow<LockMethod> =
+        prefs.lockMethod.stateIn(viewModelScope, SharingStarted.Eagerly, LockMethod.BIOMETRIC)
+    val hasLockPassword: StateFlow<Boolean> =
+        prefs.hasLockPassword.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    fun setLockMethod(method: LockMethod) {
+        viewModelScope.launch { prefs.setLockMethod(method) }
+    }
+
+    suspend fun setLockPassword(password: String) = prefs.setLockPassword(password)
+
+    suspend fun verifyLockPassword(password: String): Boolean = prefs.verifyLockPassword(password)
+
+    /** One in-flight authentication request at a time -- [AuthPromptHost] (mounted once near the
+     * app's root) watches this and shows either a biometric prompt or a password dialog depending
+     * on [lockMethod], resolving it via [resolveAuth]. Centralizing this here (rather than each
+     * call site invoking biometrics directly) is what lets every lock (app-wide, per-folder,
+     * hidden items) honor whichever method the user actually chose in Settings. */
+    data class PendingAuth(val title: String)
+
+    private val _pendingAuth = MutableStateFlow<PendingAuth?>(null)
+    val pendingAuth: StateFlow<PendingAuth?> = _pendingAuth.asStateFlow()
+    private var pendingAuthResult: CompletableDeferred<Boolean>? = null
+
+    suspend fun requestAuth(title: String): Boolean {
+        // Only one prompt makes sense on screen at a time -- a second concurrent call (unlikely,
+        // but e.g. two rapid taps triggering two lock checks) fails the first outright rather than
+        // leaving it to hang forever waiting on a UI slot a newer request just took over.
+        pendingAuthResult?.complete(false)
+        val deferred = CompletableDeferred<Boolean>()
+        pendingAuthResult = deferred
+        _pendingAuth.value = PendingAuth(title)
+        return deferred.await()
+    }
+
+    fun resolveAuth(success: Boolean) {
+        _pendingAuth.value = null
+        pendingAuthResult?.complete(success)
+        pendingAuthResult = null
     }
 
     /** [root] with hidden/trashed content removed, plus any still-empty user-created folders added in. */

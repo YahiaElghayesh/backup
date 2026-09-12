@@ -56,6 +56,7 @@ import com.elghayesh.gallerybackup.data.media.MediaItem
 import com.elghayesh.gallerybackup.data.media.allItemsRecursive
 import com.elghayesh.gallerybackup.data.media.findNode
 import com.elghayesh.gallerybackup.security.AppLockGateScreen
+import com.elghayesh.gallerybackup.security.AuthPromptHost
 import com.elghayesh.gallerybackup.ui.collage.CollageScreen
 import com.elghayesh.gallerybackup.ui.edit.PhotoEditScreen
 import com.elghayesh.gallerybackup.ui.edit.VideoTrimScreen
@@ -209,8 +210,14 @@ class MainActivity : FragmentActivity() {
                         onDispose { lifecycle.removeObserver(observer) }
                     }
 
+                    // Mounted unconditionally (not just while the gate itself is showing) --
+                    // folder-lock and hidden-items-lock checks from deep inside AppNavHost call
+                    // GalleryViewModel.requestAuth too, and need this host available to actually
+                    // resolve them regardless of whether the app-wide gate is up.
+                    AuthPromptHost(galleryViewModel)
+
                     if (appLockEnabled && !isUnlocked) {
-                        AppLockGateScreen(onUnlocked = { isUnlocked = true })
+                        AppLockGateScreen(viewModel = galleryViewModel, onUnlocked = { isUnlocked = true })
                     } else if (hasPermission) {
                         AppNavHost(galleryViewModel, backupViewModel)
                     } else {

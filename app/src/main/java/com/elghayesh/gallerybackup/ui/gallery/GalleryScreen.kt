@@ -201,19 +201,20 @@ fun GalleryScreen(
     val lockHiddenItems by viewModel.lockHiddenItems.collectAsState()
     val hiddenItemsUnlockedThisSession by viewModel.hiddenItemsUnlockedThisSession.collectAsState()
     val lockScope = rememberCoroutineScope()
-    val activity = context as? androidx.fragment.app.FragmentActivity
 
     // Opening a locked folder (or turning on "Show hidden items" while hidden items are locked)
-    // requires biometric/PIN authentication first, once per app session -- see
+    // requires authentication first, once per app session -- see
     // GalleryViewModel.unlockedFolderPaths/hiddenItemsUnlockedThisSession's own doc comments for
-    // why that's session-scoped rather than persisted.
+    // why that's session-scoped rather than persisted. requestAuth (rather than calling
+    // biometrics directly) is what makes this honor whichever LockMethod -- biometric or the
+    // in-app password -- the user actually chose in Settings.
     fun requestOpenFolder(folderPath: String) {
-        if (folderPath !in lockedFolders || folderPath in unlockedFolderPaths || activity == null) {
+        if (folderPath !in lockedFolders || folderPath in unlockedFolderPaths) {
             onOpenFolder(folderPath)
             return
         }
         lockScope.launch {
-            if (com.elghayesh.gallerybackup.security.requestAppLockAuthentication(activity, "Unlock folder")) {
+            if (viewModel.requestAuth("Unlock folder")) {
                 viewModel.markFolderUnlocked(folderPath)
                 onOpenFolder(folderPath)
             }
@@ -225,14 +226,25 @@ fun GalleryScreen(
             viewModel.setShowHidden(false)
             return
         }
-        if (!lockHiddenItems || hiddenItemsUnlockedThisSession || activity == null) {
+        if (!lockHiddenItems || hiddenItemsUnlockedThisSession) {
             viewModel.setShowHidden(true)
             return
         }
         lockScope.launch {
-            if (com.elghayesh.gallerybackup.security.requestAppLockAuthentication(activity, "Unlock hidden items")) {
+            if (viewModel.requestAuth("Unlock hidden items")) {
                 viewModel.markHiddenItemsUnlocked()
                 viewModel.setShowHidden(true)
+            }
+        }
+    }
+
+    /** Locking or unlocking a folder from its overflow menu both require confirming the current
+     * credential first -- otherwise removing a lock via "Unlock folder" would need no
+     * authentication at all, defeating the point of locking it in the first place. */
+    fun requestSetFoldersLocked(paths: List<String>, locked: Boolean) {
+        lockScope.launch {
+            if (viewModel.requestAuth(if (locked) "Lock folder" else "Unlock folder")) {
+                paths.forEach { viewModel.setFolderLocked(it, locked) }
             }
         }
     }
@@ -569,7 +581,7 @@ fun GalleryScreen(
                                 val allSelectedLocked = selectedFolderNodes.all { it.path in lockedFolders }
                                 add(
                                     (if (allSelectedLocked) "Unlock folder" else "Lock folder") to {
-                                        selectedFolderNodes.forEach { viewModel.setFolderLocked(it.path, !allSelectedLocked) }
+                                        requestSetFoldersLocked(selectedFolderNodes.map { it.path }, !allSelectedLocked)
                                     },
                                 )
                             }

@@ -1,5 +1,6 @@
 package com.elghayesh.gallerybackup.ui.collage
 
+import androidx.activity.compose.BackHandler
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
@@ -122,22 +123,10 @@ private fun gridLayout(n: Int): List<CollageCell> {
     }
 }
 
-private fun featuredLayout(n: Int): List<CollageCell> {
-    if (n <= 1) return listOf(CollageCell(0, 0f, 0f, 1f, 1f))
-    val rest = n - 1
-    val restH = 1f / rest
-    val cells = mutableListOf(CollageCell(0, 0f, 0f, 0.62f, 1f))
-    for (i in 0 until rest) {
-        cells += CollageCell(i + 1, 0.62f, i * restH, 0.38f, restH)
-    }
-    return cells
-}
-
 private enum class CollagePreset(val label: String, val build: (Int) -> List<CollageCell>) {
     GRID("Grid", ::gridLayout),
     ROW("Row", ::rowLayout),
     COLUMN("Column", ::columnLayout),
-    FEATURED("Featured", ::featuredLayout),
 }
 
 /** [ratio] null means "Free" -- the canvas's own width:height comes from independently adjustable
@@ -199,6 +188,13 @@ fun CollageScreen(
     var backgroundColorSeed by remember { mutableStateOf(AccentColor.WHITE.seed) }
     var isSaving by remember { mutableStateOf(false) }
     var showDeleteOriginalsPrompt by remember { mutableStateOf(false) }
+
+    // Without this, system back closed the whole collage editor immediately even with a photo
+    // selected -- one back press now deselects it first, matching the same graduated behavior
+    // added to the photo editor.
+    BackHandler {
+        if (selectedItemIndex != null) selectedItemIndex = null else onDone()
+    }
 
     val bitmaps = remember { mutableStateMapOf<Long, Bitmap>() }
     LaunchedEffect(photos) {
@@ -295,10 +291,10 @@ fun CollageScreen(
             )
         },
         bottomBar = {
-            Column(Modifier.background(panelBg).padding(vertical = 8.dp)) {
+            Column(Modifier.background(panelBg).padding(vertical = 12.dp)) {
                 Row(
                     Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     CollagePreset.entries.forEach { preset ->
                         CollagePill(
@@ -308,10 +304,10 @@ fun CollageScreen(
                         )
                     }
                 }
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(12.dp))
                 Row(
                     Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     CanvasAspectPreset.entries.forEach { a ->
                         CollagePill(label = a.label, selected = canvasAspectPreset == a, onClick = { canvasAspectPreset = a })
@@ -395,8 +391,8 @@ fun CollageScreen(
                         modifier = Modifier.padding(horizontal = 12.dp),
                     )
                     Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         val step = 0.04f
@@ -477,30 +473,6 @@ fun CollageScreen(
                             }
                         }
                     }
-                }
-                // Rendered last (and so always on top, regardless of cell overlap/order) --
-                // hoisted out of the loop above rather than interleaved with each cell's own box,
-                // so the handle for a cell that's underneath another one is never covered by it.
-                val selectedCell = cells.find { it.itemIndex == selectedItemIndex }
-                if (selectedCell != null) {
-                    Box(
-                        Modifier
-                            .offset {
-                                IntOffset(
-                                    ((selectedCell.xNorm + selectedCell.wNorm) * containerWidthPx - 20.dp.toPx()).roundToInt(),
-                                    ((selectedCell.yNorm + selectedCell.hNorm) * containerHeightPx - 20.dp.toPx()).roundToInt(),
-                                )
-                            }
-                            .size(40.dp)
-                            .pointerInputMove(
-                                onStart = {},
-                                onDrag = { dx, dy ->
-                                    resizeCell(selectedCell.itemIndex, dx / containerWidthPx, dy / containerHeightPx)
-                                },
-                            )
-                            .background(Color.White, CircleShape)
-                            .border(2.dp, Color.Black, CircleShape),
-                    )
                 }
             }
         }

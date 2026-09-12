@@ -10,6 +10,7 @@ import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -25,7 +26,6 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -45,7 +45,6 @@ import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Undo
-import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -71,7 +70,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -97,7 +95,6 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.elghayesh.gallerybackup.data.media.MediaItem
-import com.elghayesh.gallerybackup.data.settings.AccentColor
 import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -117,35 +114,8 @@ private enum class CropAspect(val label: String, val ratio: Float) {
 private enum class EditTab(val label: String, val icon: ImageVector) {
     TRANSFORM("Transform", Icons.Filled.Crop),
     ADJUST("Adjust", Icons.Filled.Tune),
-    CANVAS("Canvas", Icons.Filled.Wallpaper),
     STICKER("Sticker", Icons.Filled.TextFields),
 }
-
-private enum class CanvasAspect(val label: String, val ratio: Float) {
-    SQUARE("1:1", 1f),
-    FOUR_THREE("4:3", 4f / 3f),
-    THREE_FOUR("3:4", 3f / 4f),
-    SIXTEEN_NINE("16:9", 16f / 9f),
-    NINE_SIXTEEN("9:16", 9f / 16f),
-}
-
-/**
- * "Canvas" mode: place the fully-edited photo (after crop, color adjustments, focus and stickers
- * -- see how [saveEditedPhoto] applies this as one last step on top of everything else) onto a
- * solid-color background at [aspect]'s own proportions, sized and positioned anywhere within it
- * rather than always filling the frame edge-to-edge. [photoScale] is relative to the photo fitting
- * entirely within the canvas (1f) -- above 1f enlarges it past that (letting it spill off the
- * canvas edge, cropped there), below 1f shrinks it to show more background around it.
- * [photoOffsetXNorm]/[photoOffsetYNorm] are -1..1 fractions of the canvas's own half-width/height,
- * both 0 meaning centered.
- */
-private data class CanvasLayer(
-    val aspect: CanvasAspect = CanvasAspect.SQUARE,
-    val backgroundColorSeed: Long = 0xFF1C1C1CL,
-    val photoScale: Float = 1f,
-    val photoOffsetXNorm: Float = 0f,
-    val photoOffsetYNorm: Float = 0f,
-)
 
 /** A crop rectangle normalized to 0..1 of the working bitmap's current width/height. */
 private data class NormRect(val left: Float, val top: Float, val right: Float, val bottom: Float) {
@@ -162,8 +132,8 @@ private data class NormPoint(val x: Float, val y: Float)
  * axis-aligned rectangle -- used by "Free corners": an arbitrarily-shaped (not just rectangular)
  * crop. On save, the photo is placed at its own natural proportions (never stretched/warped) into
  * the quad's own bounding box, masked to the quad's shape -- so the quad's interior shows the
- * photo and the space between the quad and its bounding box shows the chosen background color,
- * see [cropQuadOntoBackground]. */
+ * photo and the space between the quad and its bounding box is left transparent, see
+ * [cropQuadTransparent]. */
 private data class CropQuad(
     val topLeft: NormPoint,
     val topRight: NormPoint,
@@ -205,9 +175,6 @@ private data class EditState(
     /** Non-null while "Free corners" mode is active -- overrides [cropRect] for both the
      * on-screen overlay and the actual save, see [CropQuad]'s own doc comment. */
     val cropQuad: CropQuad? = null,
-    /** Fills the area inside the quad's bounding box but outside the quad shape itself, on save --
-     * only meaningful while [cropQuad] is non-null. */
-    val cropQuadBackgroundColorSeed: Long = AccentColor.WHITE.seed,
     val brightness: Float = 0f,
     val contrast: Float = 0f,
     val saturation: Float = 0f,
@@ -216,8 +183,6 @@ private data class EditState(
     val shadows: Float = 0f,
     val focus: FocusSpot = FocusSpot(),
     val stickers: List<TextSticker> = emptyList(),
-    /** Non-null while "Canvas" mode is active -- see [CanvasLayer]'s own doc comment. */
-    val canvas: CanvasLayer? = null,
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -278,6 +243,18 @@ fun PhotoEditScreen(
         if (redoStack.isEmpty()) return
         undoStack.add(current)
         current = redoStack.removeAt(redoStack.lastIndex)
+    }
+
+    // Without this, system back (button or gesture) always closed the whole editor immediately,
+    // no matter what was open inside it -- a text-sticker dialog mid-edit, or a tool tab other
+    // than Transform. One back press now only steps out one level at a time (closes the sticker
+    // dialog, or returns to Transform from another tab) before a further press actually leaves.
+    BackHandler {
+        when {
+            editingStickerId != null -> editingStickerId = null
+            tab != EditTab.TRANSFORM -> tab = EditTab.TRANSFORM
+            else -> onDone()
+        }
     }
 
     LaunchedEffect(item.uri) {
@@ -392,10 +369,10 @@ fun PhotoEditScreen(
         bottomBar = {
             Column(Modifier.background(Color.Black)) {
                 when (tab) {
-                    EditTab.TRANSFORM -> Column(Modifier.background(panelBg).padding(vertical = 8.dp)) {
+                    EditTab.TRANSFORM -> Column(Modifier.background(panelBg).padding(vertical = 12.dp)) {
                         Row(
                             Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(14.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             IconButton(
@@ -444,36 +421,13 @@ fun PhotoEditScreen(
                             }
                         }
                         if (current.cropQuad != null) {
-                            Spacer(Modifier.height(12.dp))
+                            Spacer(Modifier.height(8.dp))
                             Text(
-                                "Background color",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = Color.White.copy(alpha = 0.7f),
+                                "The area outside your selection will be transparent.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color.White.copy(alpha = 0.6f),
                                 modifier = Modifier.padding(horizontal = 12.dp),
                             )
-                            Spacer(Modifier.height(6.dp))
-                            Row(
-                                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            ) {
-                                AccentColor.entries.forEach { color ->
-                                    val isSelected = current.cropQuadBackgroundColorSeed == color.seed
-                                    Box(
-                                        Modifier
-                                            .size(32.dp)
-                                            .clip(CircleShape)
-                                            .background(Color(color.seed))
-                                            .border(
-                                                width = if (isSelected) 3.dp else 0.dp,
-                                                color = Color.White,
-                                                shape = CircleShape,
-                                            )
-                                            .clickable {
-                                                commit(current.copy(cropQuadBackgroundColorSeed = color.seed))
-                                            },
-                                    )
-                                }
-                            }
                         }
                     }
                     EditTab.ADJUST -> Column {
@@ -518,73 +472,6 @@ fun PhotoEditScreen(
                             onChangeFinished = { endLiveMutation() },
                         )
                     }
-                    EditTab.CANVAS -> Column(Modifier.background(panelBg).padding(vertical = 8.dp)) {
-                        Row(
-                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            DarkPill(label = "Off", selected = current.canvas == null, onClick = { commit(current.copy(canvas = null)) })
-                            CanvasAspect.entries.forEach { a ->
-                                DarkPill(
-                                    label = a.label,
-                                    selected = current.canvas?.aspect == a,
-                                    onClick = { commit(current.copy(canvas = (current.canvas ?: CanvasLayer()).copy(aspect = a))) },
-                                )
-                            }
-                        }
-                        current.canvas?.let { canvasLayer ->
-                            Spacer(Modifier.height(12.dp))
-                            Text(
-                                "Background color",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = Color.White.copy(alpha = 0.7f),
-                                modifier = Modifier.padding(horizontal = 12.dp),
-                            )
-                            Spacer(Modifier.height(6.dp))
-                            Row(
-                                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            ) {
-                                AccentColor.entries.forEach { color ->
-                                    val isSelected = canvasLayer.backgroundColorSeed == color.seed
-                                    Box(
-                                        Modifier
-                                            .size(32.dp)
-                                            .clip(CircleShape)
-                                            .background(Color(color.seed))
-                                            .border(
-                                                width = if (isSelected) 3.dp else 0.dp,
-                                                color = Color.White,
-                                                shape = CircleShape,
-                                            )
-                                            .clickable {
-                                                commit(current.copy(canvas = canvasLayer.copy(backgroundColorSeed = color.seed)))
-                                            },
-                                    )
-                                }
-                            }
-                            Spacer(Modifier.height(12.dp))
-                            Text(
-                                "Photo size -- ${(canvasLayer.photoScale * 100).roundToInt()}%",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = Color.White.copy(alpha = 0.7f),
-                                modifier = Modifier.padding(horizontal = 12.dp),
-                            )
-                            Slider(
-                                value = canvasLayer.photoScale,
-                                onValueChange = { mutateLive(current.copy(canvas = canvasLayer.copy(photoScale = it))) },
-                                onValueChangeFinished = { endLiveMutation() },
-                                valueRange = 0.2f..3f,
-                                modifier = Modifier.padding(horizontal = 12.dp),
-                            )
-                            Text(
-                                "Drag the photo on the canvas to reposition it.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Color.White.copy(alpha = 0.6f),
-                                modifier = Modifier.padding(horizontal = 12.dp),
-                            )
-                        }
-                    }
                     EditTab.STICKER -> Column(Modifier.background(panelBg).fillMaxWidth().padding(16.dp)) {
                         TextButton(onClick = { editingStickerId = nextStickerId; nextStickerId += 1 }) {
                             Icon(Icons.Filled.Add, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
@@ -599,7 +486,7 @@ fun PhotoEditScreen(
                     }
                 }
                 Row(
-                    Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                    Modifier.fillMaxWidth().padding(vertical = 10.dp),
                     horizontalArrangement = Arrangement.SpaceEvenly,
                 ) {
                     EditTab.entries.forEach { t ->
@@ -620,42 +507,6 @@ fun PhotoEditScreen(
                         null
                     } else {
                         ColorFilter.colorMatrix(androidx.compose.ui.graphics.ColorMatrix(composeMatrix.array))
-                    }
-                    val canvasLayer = current.canvas
-                    if (canvasLayer != null) {
-                        // Canvas mode replaces the normal crop/focus/sticker-overlaid preview
-                        // entirely -- those still apply to the underlying photo (see
-                        // saveEditedPhoto, which composites the fully-edited photo onto the
-                        // canvas as one last step), just aren't interactively editable while
-                        // viewing this composited preview. Previously passed the raw, uncropped
-                        // `bitmap` here -- so switching to Canvas after a crop (rectangular or
-                        // Free corners) made it look like the crop had been discarded and the
-                        // full original photo was back, even though saveEditedPhoto was already
-                        // compositing the correctly-cropped version all along. Applying the same
-                        // applyCrop used at save time keeps this preview honest.
-                        val croppedForCanvas = remember(bitmap, current.cropRect, current.cropQuad, current.cropQuadBackgroundColorSeed) {
-                            applyCrop(bitmap, current)
-                        }
-                        CanvasPreview(
-                            bitmap = croppedForCanvas,
-                            canvasLayer = canvasLayer,
-                            density = density,
-                            colorFilter = colorFilter,
-                            interactive = tab == EditTab.CANVAS,
-                            onDrag = { dxNorm, dyNorm ->
-                                val latest = current.canvas ?: canvasLayer
-                                mutateLive(
-                                    current.copy(
-                                        canvas = latest.copy(
-                                            photoOffsetXNorm = (latest.photoOffsetXNorm + dxNorm).coerceIn(-1.5f, 1.5f),
-                                            photoOffsetYNorm = (latest.photoOffsetYNorm + dyNorm).coerceIn(-1.5f, 1.5f),
-                                        ),
-                                    ),
-                                )
-                            },
-                            onDragEnd = { endLiveMutation() },
-                        )
-                        return@BoxWithConstraints
                     }
                     // Sized explicitly to fit within BOTH available dimensions (not just
                     // Modifier.aspectRatio() off of the full width) -- for a photo tall/narrow
@@ -762,6 +613,10 @@ fun PhotoEditScreen(
                                             val latestQuad = current.cropQuad ?: quad
                                             mutateLive(current.copy(cropQuad = updatedCropQuad(latestQuad, corner, dxNorm, dyNorm)))
                                         },
+                                        onMoveDrag = { dxNorm, dyNorm ->
+                                            val latestQuad = current.cropQuad ?: quad
+                                            mutateLive(current.copy(cropQuad = translatedQuad(latestQuad, dxNorm, dyNorm)))
+                                        },
                                         onDragEnd = { endLiveMutation() },
                                     )
                                 } else {
@@ -775,6 +630,9 @@ fun PhotoEditScreen(
                                                 rect = applyAspectLock(rect, current.cropAspect.ratio, bitmap.width, bitmap.height)
                                             }
                                             mutateLive(current.copy(cropRect = rect))
+                                        },
+                                        onMoveDrag = { dxNorm, dyNorm ->
+                                            mutateLive(current.copy(cropRect = translatedRect(current.cropRect, dxNorm, dyNorm)))
                                         },
                                         onDragEnd = { endLiveMutation() },
                                     )
@@ -974,6 +832,7 @@ private fun CropOverlay(
     boxSize: IntSize,
     density: androidx.compose.ui.unit.Density,
     onCornerDrag: (CropCorner, Float, Float) -> Unit,
+    onMoveDrag: (Float, Float) -> Unit,
     onDragEnd: () -> Unit,
 ) {
     Canvas(modifier = Modifier.fillMaxSize()) {
@@ -1018,6 +877,28 @@ private fun CropOverlay(
         drawCornerBracket(left, bottom, 1f, -1f)
         drawCornerBracket(right, bottom, -1f, -1f)
     }
+    // A finger placed anywhere INSIDE the crop rect (not on a corner handle) drags the whole
+    // selection around over the photo, instead of only being able to resize it from a corner --
+    // composed before the corner handles below, so a touch that lands on an actual corner circle
+    // still hits that (smaller, on-top) handle first rather than this larger region underneath it.
+    Box(
+        Modifier
+            .offset {
+                IntOffset((rect.left * boxSize.width).roundToInt(), (rect.top * boxSize.height).roundToInt())
+            }
+            .size(
+                width = with(density) { ((rect.right - rect.left) * boxSize.width).toDp() },
+                height = with(density) { ((rect.bottom - rect.top) * boxSize.height).toDp() },
+            )
+            .pointerInput(boxSize) {
+                detectDragImmediate(onDragEnd = { onDragEnd() }) { change, dragAmount ->
+                    change.consume()
+                    if (boxSize.width > 0 && boxSize.height > 0) {
+                        onMoveDrag(dragAmount.x / boxSize.width, dragAmount.y / boxSize.height)
+                    }
+                }
+            },
+    )
     Box(
         Modifier
             .normOffset(rect.left, rect.top, boxSize, density, centerOnPointDp = 40.dp)
@@ -1084,7 +965,7 @@ private fun CropOverlay(
  * The "Free corners" crop overlay: draws the quad's own outline (a general quadrilateral, not
  * necessarily a rectangle) and one independently-draggable handle per corner -- unlike
  * [CropOverlay]'s corners, moving one here never affects the others. Lets an arbitrarily-shaped
- * (not just rectangular) region be cropped out -- see [CropQuad] and [cropQuadOntoBackground].
+ * (not just rectangular) region be cropped out -- see [CropQuad] and [cropQuadTransparent].
  */
 @Composable
 private fun PerspectiveCropOverlay(
@@ -1092,6 +973,7 @@ private fun PerspectiveCropOverlay(
     boxSize: IntSize,
     density: androidx.compose.ui.unit.Density,
     onCornerDrag: (QuadCorner, Float, Float) -> Unit,
+    onMoveDrag: (Float, Float) -> Unit,
     onDragEnd: () -> Unit,
 ) {
     Canvas(modifier = Modifier.fillMaxSize()) {
@@ -1138,6 +1020,35 @@ private fun PerspectiveCropOverlay(
         bracketToward(br, tr)
         bracketToward(br, bl)
     }
+    // Same "drag anywhere inside to move the whole selection" region as CropOverlay -- for a
+    // general (non-rectangular) quad this uses its axis-aligned bounding box rather than the
+    // exact quad shape, a reasonable approximation that's far simpler than hit-testing the
+    // quad's own path, and composed before the corner handles so a touch on an actual corner
+    // still reaches that (smaller, on-top) handle first.
+    run {
+        val xs = listOf(quad.topLeft.x, quad.topRight.x, quad.bottomLeft.x, quad.bottomRight.x)
+        val ys = listOf(quad.topLeft.y, quad.topRight.y, quad.bottomLeft.y, quad.bottomRight.y)
+        val minX = xs.min()
+        val minY = ys.min()
+        val maxX = xs.max()
+        val maxY = ys.max()
+        Box(
+            Modifier
+                .offset { IntOffset((minX * boxSize.width).roundToInt(), (minY * boxSize.height).roundToInt()) }
+                .size(
+                    width = with(density) { ((maxX - minX) * boxSize.width).toDp() },
+                    height = with(density) { ((maxY - minY) * boxSize.height).toDp() },
+                )
+                .pointerInput(boxSize) {
+                    detectDragImmediate(onDragEnd = { onDragEnd() }) { change, dragAmount ->
+                        change.consume()
+                        if (boxSize.width > 0 && boxSize.height > 0) {
+                            onMoveDrag(dragAmount.x / boxSize.width, dragAmount.y / boxSize.height)
+                        }
+                    }
+                },
+        )
+    }
     listOf(
         QuadCorner.TOP_LEFT to quad.topLeft,
         QuadCorner.TOP_RIGHT to quad.topRight,
@@ -1172,6 +1083,19 @@ private fun updatedCropQuad(quad: CropQuad, corner: QuadCorner, dxNorm: Float, d
     }
 }
 
+/** Shifts every corner of [quad] by the same amount -- moving the whole selection over the photo
+ * rather than resizing it -- clamped so the quad's own bounding box never leaves the 0..1 image
+ * bounds (each axis independently, so sliding it right, say, doesn't get vetoed by it already
+ * being at its top edge). */
+private fun translatedQuad(quad: CropQuad, dxNorm: Float, dyNorm: Float): CropQuad {
+    val xs = listOf(quad.topLeft.x, quad.topRight.x, quad.bottomLeft.x, quad.bottomRight.x)
+    val ys = listOf(quad.topLeft.y, quad.topRight.y, quad.bottomLeft.y, quad.bottomRight.y)
+    val clampedDx = dxNorm.coerceIn(-xs.min(), 1f - xs.max())
+    val clampedDy = dyNorm.coerceIn(-ys.min(), 1f - ys.max())
+    fun moved(p: NormPoint) = NormPoint(p.x + clampedDx, p.y + clampedDy)
+    return CropQuad(moved(quad.topLeft), moved(quad.topRight), moved(quad.bottomLeft), moved(quad.bottomRight))
+}
+
 /** The quad's axis-aligned bounding box -- used as an approximation of "the crop rect" for
  * positioning stickers/focus relative to a perspective-warped output (see [saveEditedPhoto]),
  * since those overlays aren't themselves warped through the same projective transform. */
@@ -1184,13 +1108,13 @@ private fun boundingRectOf(quad: CropQuad): NormRect {
 /**
  * Crops [quad] (its 4 corners, normalized 0..1 within [source]) out of [source] at its own
  * natural resolution -- never stretched or perspective-warped, unlike a straighten/keystone-style
- * quad crop -- by taking the quad's axis-aligned bounding box as the output canvas, filling it
- * with [backgroundColorSeed], then drawing [source] (shifted so it lines up) clipped to the
- * quad's own shape. The result: the quad's interior shows the photo at its real proportions, and
- * whatever's between the quad and its bounding box (e.g. the corners of a diamond-ish quad) shows
- * the chosen background color instead.
+ * quad crop -- by taking the quad's axis-aligned bounding box as the output canvas, leaving it
+ * fully transparent, then drawing [source] (shifted so it lines up) clipped to the quad's own
+ * shape. The result: the quad's interior shows the photo at its real proportions, and whatever's
+ * between the quad and its bounding box (e.g. the corners of a diamond-ish quad) is transparent.
+ * The output bitmap keeps this alpha channel -- see [saveEditedPhoto]'s PNG-vs-JPEG choice.
  */
-private fun cropQuadOntoBackground(source: Bitmap, quad: CropQuad, backgroundColorSeed: Long): Bitmap {
+private fun cropQuadTransparent(source: Bitmap, quad: CropQuad): Bitmap {
     val w = source.width.toFloat()
     val h = source.height.toFloat()
     val tl = Offset(quad.topLeft.x * w, quad.topLeft.y * h)
@@ -1205,9 +1129,10 @@ private fun cropQuadOntoBackground(source: Bitmap, quad: CropQuad, backgroundCol
     val outW = (maxX - minX).roundToInt().coerceAtLeast(1)
     val outH = (maxY - minY).roundToInt().coerceAtLeast(1)
 
+    // A freshly created ARGB_8888 bitmap starts out fully transparent (all-zero) already -- no
+    // drawColor() call needed, unlike the old background-color version of this function.
     val output = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
     val canvas = android.graphics.Canvas(output)
-    canvas.drawColor(backgroundColorSeed.toInt())
 
     val path = android.graphics.Path().apply {
         moveTo(tl.x - minX, tl.y - minY)
@@ -1244,6 +1169,16 @@ private fun updatedCropRect(rect: NormRect, corner: CropCorner, dxNorm: Float, d
             bottom = (rect.bottom + dyNorm).coerceIn(rect.top + minSize, 1f),
         )
     }
+}
+
+/** Shifts the whole rect by the same amount on both axes -- moving the selection over the photo
+ * rather than resizing it -- clamped so it never leaves the 0..1 image bounds. */
+private fun translatedRect(rect: NormRect, dxNorm: Float, dyNorm: Float): NormRect {
+    val width = rect.right - rect.left
+    val height = rect.bottom - rect.top
+    val newLeft = (rect.left + dxNorm).coerceIn(0f, 1f - width)
+    val newTop = (rect.top + dyNorm).coerceIn(0f, 1f - height)
+    return NormRect(newLeft, newTop, newLeft + width, newTop + height)
 }
 
 /** Re-derives an aspect-locked rect centered on [rect]'s current center, sized to fit within it. */
@@ -1316,67 +1251,6 @@ private fun FocusHandle(
             }
             .border(2.dp, Color.White, CircleShape),
     )
-}
-
-/**
- * "Canvas" mode's preview: [bitmap] shown at [canvasLayer]'s own size/position on a
- * [canvasLayer]'s background-colored box shaped to its aspect ratio, matching exactly what
- * [compositeOntoCanvas] produces on save. [interactive] (true only while the Canvas tab itself is
- * active) enables dragging the photo directly to reposition it; on other tabs this same preview
- * still renders (so switching to Adjust/Sticker/etc. doesn't suddenly show the un-composited
- * photo) but the drag is disabled there to avoid fighting with those tabs' own gestures.
- */
-@Composable
-private fun CanvasPreview(
-    bitmap: Bitmap,
-    canvasLayer: CanvasLayer,
-    density: androidx.compose.ui.unit.Density,
-    colorFilter: ColorFilter?,
-    interactive: Boolean,
-    onDrag: (dxNorm: Float, dyNorm: Float) -> Unit,
-    onDragEnd: () -> Unit,
-) {
-    BoxWithConstraints(
-        Modifier
-            .fillMaxWidth()
-            .aspectRatio(canvasLayer.aspect.ratio)
-            .background(Color(canvasLayer.backgroundColorSeed))
-            .clipToBounds(),
-        contentAlignment = Alignment.Center,
-    ) {
-        val containerWidthPx = with(density) { maxWidth.toPx() }.coerceAtLeast(1f)
-        val containerHeightPx = with(density) { maxHeight.toPx() }.coerceAtLeast(1f)
-        val baseScale = minOf(containerWidthPx / bitmap.width, containerHeightPx / bitmap.height)
-        val scale = baseScale * canvasLayer.photoScale
-        val photoWidthDp = with(density) { (bitmap.width * scale).toDp() }
-        val photoHeightDp = with(density) { (bitmap.height * scale).toDp() }
-        Image(
-            bitmap = bitmap.asImageBitmap(),
-            contentDescription = null,
-            contentScale = ContentScale.FillBounds,
-            colorFilter = colorFilter,
-            modifier = Modifier
-                .size(photoWidthDp, photoHeightDp)
-                .offset {
-                    IntOffset(
-                        (canvasLayer.photoOffsetXNorm * containerWidthPx / 2f).roundToInt(),
-                        (canvasLayer.photoOffsetYNorm * containerHeightPx / 2f).roundToInt(),
-                    )
-                }
-                .then(
-                    if (interactive) {
-                        Modifier.pointerInput(Unit) {
-                            detectDragImmediate(onDragEnd = { onDragEnd() }) { change, dragAmount ->
-                                change.consume()
-                                onDrag(dragAmount.x / (containerWidthPx / 2f), dragAmount.y / (containerHeightPx / 2f))
-                            }
-                        }
-                    } else {
-                        Modifier
-                    },
-                ),
-        )
-    }
 }
 
 @Composable
@@ -1459,14 +1333,11 @@ private fun cropRectFor(bitmapW: Int, bitmapH: Int, rect: NormRect): Rect {
     return Rect(left, top, right, bottom)
 }
 
-/** The crop step alone (quad mask-onto-background, or a plain rectangle crop) -- shared between
- * [saveEditedPhoto] and the live Canvas-tab preview, so what Canvas mode previews placing onto its
- * background is exactly the same cropped photo the save will actually use, not the original
- * uncropped bitmap. */
+/** The crop step alone (quad mask-onto-transparent, or a plain rectangle crop). */
 private fun applyCrop(bitmap: Bitmap, state: EditState): Bitmap {
     val quad = state.cropQuad
     return if (quad != null) {
-        cropQuadOntoBackground(bitmap, quad, state.cropQuadBackgroundColorSeed)
+        cropQuadTransparent(bitmap, quad)
     } else {
         val cropRect = cropRectFor(bitmap.width, bitmap.height, state.cropRect)
         Bitmap.createBitmap(bitmap, cropRect.left, cropRect.top, cropRect.width(), cropRect.height())
@@ -1517,17 +1388,18 @@ private suspend fun saveEditedPhoto(
         }
     }
 
-    // Canvas mode composites the fully-edited photo above (crop, color adjustments, focus,
-    // stickers -- everything above this line, unchanged) onto a solid-color background at its
-    // own aspect ratio, as one last step -- see CanvasLayer's own doc comment.
-    val finalBitmap = state.canvas?.let { compositeOntoCanvas(output, it) } ?: output
-
+    // A quad crop can leave part of the output transparent (see cropQuadTransparent) -- JPEG has
+    // no alpha channel at all, so saving one through it would flatten that transparency to solid
+    // black. PNG (lossless, alpha-capable) is used instead whenever that's possible; a plain
+    // rectangle crop is always fully opaque, so JPEG still applies there as before.
+    val hasTransparency = state.cropQuad != null
     val resolver = context.contentResolver
     val baseName = original.displayName.substringBeforeLast('.', original.displayName)
-    val fileName = if (replace) "$baseName.jpg" else "${baseName}_edited_${System.currentTimeMillis() / 1000}.jpg"
+    val extension = if (hasTransparency) "png" else "jpg"
+    val fileName = if (replace) "$baseName.$extension" else "${baseName}_edited_${System.currentTimeMillis() / 1000}.$extension"
     val values = ContentValues().apply {
         put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
-        put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+        put(MediaStore.Images.Media.MIME_TYPE, if (hasTransparency) "image/png" else "image/jpeg")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             put(
                 MediaStore.Images.Media.RELATIVE_PATH,
@@ -1538,49 +1410,12 @@ private suspend fun saveEditedPhoto(
     }
     val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
     if (uri != null) {
-        resolver.openOutputStream(uri)?.use { out -> finalBitmap.compress(Bitmap.CompressFormat.JPEG, 92, out) }
+        resolver.openOutputStream(uri)?.use { out ->
+            output.compress(if (hasTransparency) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG, 92, out)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val doneValues = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
             resolver.update(uri, doneValues, null, null)
         }
     }
-}
-
-/**
- * Places [photo] (the fully-edited image) onto a solid-[CanvasLayer.backgroundColorSeed] canvas
- * shaped to [CanvasLayer.aspect], sized so the photo's longer side keeps its original resolution
- * (rather than shrinking to fit a fixed output size), at [CanvasLayer.photoScale] and
- * [CanvasLayer.photoOffsetXNorm]/[CanvasLayer.photoOffsetYNorm] -- exactly mirroring
- * CanvasPreview's own on-screen layout math, so what was previewed while editing is what gets
- * saved.
- */
-private fun compositeOntoCanvas(photo: Bitmap, canvasLayer: CanvasLayer): Bitmap {
-    val ratio = canvasLayer.aspect.ratio
-    val longSide = maxOf(photo.width, photo.height).coerceAtLeast(1)
-    val canvasW: Int
-    val canvasH: Int
-    if (ratio >= 1f) {
-        canvasW = longSide
-        canvasH = (longSide / ratio).roundToInt().coerceAtLeast(1)
-    } else {
-        canvasH = longSide
-        canvasW = (longSide * ratio).roundToInt().coerceAtLeast(1)
-    }
-
-    val result = Bitmap.createBitmap(canvasW, canvasH, Bitmap.Config.ARGB_8888)
-    val canvas = android.graphics.Canvas(result)
-    canvas.drawColor(canvasLayer.backgroundColorSeed.toInt())
-
-    val baseScale = minOf(canvasW.toFloat() / photo.width, canvasH.toFloat() / photo.height)
-    val scale = baseScale * canvasLayer.photoScale
-    val drawW = photo.width * scale
-    val drawH = photo.height * scale
-    val cx = canvasW / 2f + canvasLayer.photoOffsetXNorm * canvasW / 2f
-    val cy = canvasH / 2f + canvasLayer.photoOffsetYNorm * canvasH / 2f
-    val matrix = Matrix().apply {
-        postScale(scale, scale)
-        postTranslate(cx - drawW / 2f, cy - drawH / 2f)
-    }
-    canvas.drawBitmap(photo, matrix, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
-    return result
 }
