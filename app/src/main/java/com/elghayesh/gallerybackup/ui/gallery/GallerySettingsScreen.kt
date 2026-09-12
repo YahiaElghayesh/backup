@@ -1,5 +1,6 @@
 package com.elghayesh.gallerybackup.ui.gallery
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -62,6 +63,12 @@ fun GallerySettingsScreen(
     var openSection by remember { mutableStateOf<SettingsSection?>(null) }
     val isCheckingForUpdate by UpdateCheckCoordinator.isChecking.collectAsState()
     val lastCheckFoundUpdate by UpdateCheckCoordinator.lastCheckFoundUpdate.collectAsState()
+
+    // Without this, system/gesture back while a sub-section is open falls straight through to the
+    // nav graph's own back handling (this screen never consumes it), popping the whole Settings
+    // destination instead of just closing the sub-section -- one back press exiting Settings
+    // entirely instead of returning to its own top-level menu.
+    BackHandler(enabled = openSection != null) { openSection = null }
 
     when (openSection) {
         SettingsSection.APPEARANCE -> AppearanceSettingsScreen(viewModel, onBack = { openSection = null })

@@ -45,25 +45,24 @@ enum class SortCriterion(val label: String) {
 data class FolderSortSetting(val criterion: SortCriterion, val ascending: Boolean, val randomSeed: Long = 0L)
 
 /** One of a handful of preset accent colors -- deliberately not a full color picker, to keep this
- * simple. Deliberately muted/desaturated rather than the bright, saturated tones a picker would
- * default to -- easier to stare at across a whole grid of folder covers. */
+ * simple. Evenly spaced around the hue wheel (every 30 degrees) at one consistent saturation and
+ * lightness, rather than a larger set of muted/desaturated tones -- the previous palette had
+ * several colors (e.g. INDIGO/NAVY/SLATE/GRAY, or RED/MAROON/PINK) close enough in hue and
+ * lightness to be hard to tell apart across a grid of folder covers; evenly spacing fewer, more
+ * saturated hues keeps every entry clearly distinct from its neighbors instead. */
 enum class AccentColor(val seed: Long) {
-    BLUE(0xFF3B6FA0),
-    TEAL(0xFF3F7C74),
-    PURPLE(0xFF7C5295),
-    ORANGE(0xFFC1652E),
-    GREEN(0xFF4F7A52),
-    PINK(0xFFB05C7A),
-    RED(0xFFB0413E),
-    INDIGO(0xFF4A5586),
-    BROWN(0xFF7B5E4A),
-    SLATE(0xFF5C6B73),
-    OLIVE(0xFF6E7B4F),
-    MUSTARD(0xFFB08D3F),
-    MAROON(0xFF7A3B4A),
-    NAVY(0xFF34495E),
-    PLUM(0xFF6B4C6E),
-    GRAY(0xFF5A5F66),
+    RED(0xFFC52626),
+    ORANGE(0xFFC57526),
+    GOLD(0xFFC5C526),
+    LIME(0xFF75C526),
+    GREEN(0xFF26C526),
+    TEAL(0xFF26C575),
+    CYAN(0xFF26C5C5),
+    BLUE(0xFF2675C5),
+    INDIGO(0xFF2626C5),
+    VIOLET(0xFF7526C5),
+    MAGENTA(0xFFC526C5),
+    ROSE(0xFFC52675),
     WHITE(0xFFF2F1EF),
     BLACK(0xFF1C1C1C),
 }

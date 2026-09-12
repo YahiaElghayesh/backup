@@ -601,26 +601,35 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Renames [folder] by copying every item under it (recursively) into a sibling path with
-     * [newName] swapped in for its last segment, then trashing the originals. Guarded by
-     * [renameMutex] for the same reason as [renameMediaItem] -- a re-entrant call while one is
-     * already in flight (a fast double-tap on the rename dialog's confirm button) is a silent
-     * no-op instead of both copying the same recursive item list concurrently.
+     * Renames [folder] to [newName]. Tries a real, atomic on-disk directory rename first (see
+     * [MediaRepository.renameFolderInPlace]) -- no copying, no MediaStore trash-consent step, and
+     * no way to end up with both the old and new folder existing at once. Only falls back to the
+     * old copy-every-item-then-trash-the-originals approach when that's not possible (All files
+     * access not granted) -- that approach's own copy step runs unconditionally before the
+     * trash-consent step, so a denied/dismissed consent dialog could previously leave the
+     * original folder fully intact AND a full duplicate under the new name, which is exactly the
+     * "renamed folder" duplicating instead of renaming that was reported.
+     *
+     * Guarded by [renameMutex] for the same reason as [renameMediaItem] -- a re-entrant call while
+     * one is already in flight (a fast double-tap on the rename dialog's confirm button) is a
+     * silent no-op instead of running the rename twice concurrently.
      */
     fun renameFolder(folder: FolderNode, newName: String) {
         viewModelScope.launch {
             if (!renameMutex.tryLock()) return@launch
             try {
-                val context: Context = getApplication()
                 val lastSlash = folder.path.lastIndexOf('/')
                 val parentPath = if (lastSlash < 0) "" else folder.path.substring(0, lastSlash)
                 val newFolderPath = if (parentPath.isEmpty()) newName else "$parentPath/$newName"
 
-                val copiedItems = folder.allItemsRecursive().filter { item ->
-                    val target = remapFolderPath(item.folderPath, folder.path, newFolderPath)
-                    copyMediaTo(context, item, target) != null
+                if (!repository.renameFolderInPlace(folder.path, newName)) {
+                    val context: Context = getApplication()
+                    val copiedItems = folder.allItemsRecursive().filter { item ->
+                        val target = remapFolderPath(item.folderPath, folder.path, newFolderPath)
+                        copyMediaTo(context, item, target) != null
+                    }
+                    trashOriginals(copiedItems)
                 }
-                trashOriginals(copiedItems)
 
                 folderCovers.value[folder.path]?.let { cover ->
                     prefs.setFolderCover(folder.path, null)

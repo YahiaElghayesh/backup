@@ -96,9 +96,9 @@ import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 private enum class CropAspect(val label: String, val ratio: Float) {
     FREE("Free", 0f),
@@ -371,6 +371,23 @@ fun PhotoEditScreen(
                             ) {
                                 Icon(Icons.Filled.RotateRight, contentDescription = "Rotate", tint = Color.White)
                             }
+                            // Placed right after Rotate, before the aspect pills -- appending it
+                            // at the end of this row (as it was before) put it past however many
+                            // aspect pills fit on screen, off the visible edge until scrolled to,
+                            // easy to miss entirely.
+                            DarkPill(
+                                label = "Free corners",
+                                selected = current.cropQuad != null,
+                                onClick = {
+                                    commit(
+                                        if (current.cropQuad != null) {
+                                            current.copy(cropQuad = null)
+                                        } else {
+                                            current.copy(cropQuad = CropQuad.fromRect(current.cropRect))
+                                        },
+                                    )
+                                },
+                            )
                             CropAspect.entries.forEach { a ->
                                 DarkPill(
                                     label = a.label,
@@ -386,19 +403,6 @@ fun PhotoEditScreen(
                                     },
                                 )
                             }
-                            DarkPill(
-                                label = "Free corners",
-                                selected = current.cropQuad != null,
-                                onClick = {
-                                    commit(
-                                        if (current.cropQuad != null) {
-                                            current.copy(cropQuad = null)
-                                        } else {
-                                            current.copy(cropQuad = CropQuad.fromRect(current.cropRect))
-                                        },
-                                    )
-                                },
-                            )
                         }
                     }
                     EditTab.ADJUST -> Column {
@@ -625,15 +629,12 @@ private fun DarkPill(label: String, selected: Boolean, onClick: () -> Unit) {
 }
 
 /**
- * The Snapseed-style fine-tune control: no visible slider bar over the photo. Swipe horizontally
- * to move between parameters (shown as a row of dots, also directly tappable), swipe vertically
- * to change the current one's value, read the live number in the middle. The gesture commits to
- * whichever direction the first few pixels of movement suggest and stays in that mode for the
- * rest of the drag, so a slightly diagonal swipe doesn't flicker between switching parameters and
- * changing a value. (Horizontal-switches/vertical-changes, not the other way round, because the
- * dots this switches between are themselves laid out in a horizontal row -- a horizontal swipe
- * changing the value instead reads as the gesture doing the opposite of what it looks like it
- * should.)
+ * The fine-tune control for Adjust: a horizontally scrollable row of clearly labeled chips picks
+ * which parameter is active (tap one directly -- unambiguous about which is which, unlike an
+ * earlier version of this control that used a row of small unlabeled dots, which were both hard
+ * to hit and gave no indication of which parameter each one even was), then drag up/down
+ * anywhere on the number below to change that parameter's value, reading the live number as you
+ * drag.
  */
 @Composable
 private fun GestureAdjustPanel(
@@ -646,88 +647,62 @@ private fun GestureAdjustPanel(
     onChange: (index: Int, value: Float) -> Unit,
     onChangeFinished: () -> Unit,
 ) {
-    var panelWidthPx by remember { mutableStateOf(1f) }
+    var dragAreaHeightPx by remember { mutableStateOf(1f) }
     val label = labels.getOrElse(selectedIndex) { "" }
     val value = values.getOrElse(selectedIndex) { 0f }
-    // pointerInput below is keyed only on (selectedIndex, labels.size), not on `values` itself --
-    // restarting it on every value tick would abort an in-progress drag. That means its coroutine
-    // can outlive several recompositions, so `values` must be read through rememberUpdatedState:
-    // otherwise a second drag on the same parameter (no index switch in between) would compute its
-    // starting point from whatever `values` was when the coroutine last (re)launched, not the value
-    // the first drag actually left it at.
+    // pointerInput below is keyed only on selectedIndex, not on `values` itself -- restarting it
+    // on every value tick would abort an in-progress drag. That means its coroutine can outlive
+    // several recompositions, so `values` must be read through rememberUpdatedState: otherwise a
+    // second drag on the same parameter (no index switch in between) would compute its starting
+    // point from whatever `values` was when the coroutine last (re)launched, not the value the
+    // first drag actually left it at.
     val latestValues = rememberUpdatedState(values)
 
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .background(background)
-            .onSizeChanged { panelWidthPx = it.width.toFloat().coerceAtLeast(1f) }
-            .pointerInput(selectedIndex, labels.size) {
-                var mode = 0 // 0 = undecided, 1 = switching parameter (horizontal), 2 = changing its value (vertical)
-                var accDx = 0f
-                var accDy = 0f
-                var startValue = 0f
-                detectDragGestures(
-                    onDragStart = {
-                        mode = 0
-                        accDx = 0f
-                        accDy = 0f
-                        startValue = latestValues.value.getOrElse(selectedIndex) { 0f }
-                    },
-                    onDragEnd = {
-                        if (mode == 1) {
-                            if (accDx < -32f && selectedIndex > 0) onSelect(selectedIndex - 1)
-                            else if (accDx > 32f && selectedIndex < labels.lastIndex) onSelect(selectedIndex + 1)
-                        } else if (mode == 2) {
-                            onChangeFinished()
-                        }
-                    },
-                    onDragCancel = { if (mode == 2) onChangeFinished() },
-                ) { change, dragAmount ->
-                    change.consume()
-                    accDx += dragAmount.x
-                    accDy += dragAmount.y
-                    if (mode == 0 && (abs(accDx) > 12f || abs(accDy) > 12f)) {
-                        mode = if (abs(accDx) > abs(accDy)) 1 else 2
-                    }
-                    if (mode == 2) {
+    Column(Modifier.fillMaxWidth().background(background).padding(vertical = 14.dp)) {
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            labels.indices.forEach { i -> DarkPill(label = labels[i], selected = i == selectedIndex, onClick = { onSelect(i) }) }
+        }
+        Spacer(Modifier.height(10.dp))
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .onSizeChanged { dragAreaHeightPx = it.height.toFloat().coerceAtLeast(1f) }
+                .pointerInput(selectedIndex) {
+                    var accDy = 0f
+                    var startValue = 0f
+                    detectDragGestures(
+                        onDragStart = {
+                            accDy = 0f
+                            startValue = latestValues.value.getOrElse(selectedIndex) { 0f }
+                        },
+                        onDragEnd = { onChangeFinished() },
+                        onDragCancel = { onChangeFinished() },
+                    ) { change, dragAmount ->
+                        change.consume()
+                        accDy += dragAmount.y
                         val range = ranges.getOrElse(selectedIndex) { -100f..100f }
                         val span = range.endInclusive - range.start
-                        // Dragging UP increases the value (like a vertical slider) -- dragAmount.y is
-                        // positive moving down, hence the negation.
-                        val delta = -accDy / panelWidthPx * span
+                        // Dragging UP increases the value (like a vertical slider) -- dragAmount.y
+                        // is positive moving down, hence the negation. Scaled against this drag
+                        // area's own height (not the full panel width) since it's now a purely
+                        // vertical gesture with nothing horizontal to compare it to.
+                        val delta = -accDy / (dragAreaHeightPx * 3f) * span
                         onChange(selectedIndex, (startValue + delta).coerceIn(range.start, range.endInclusive))
                     }
                 }
-            }
-            .padding(vertical = 14.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Text(label, color = Color.White.copy(alpha = 0.8f), style = MaterialTheme.typography.labelLarge)
-        Text(
-            value.roundToInt().toString(),
-            color = Color.White,
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.Bold,
-        )
-        Spacer(Modifier.height(6.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-            labels.indices.forEach { i ->
-                // A generous tappable area around each small dot -- jumping straight to a
-                // parameter by tapping its dot, rather than only via the swipe gesture above, in
-                // case that gesture's direction doesn't read as obvious to a given user.
-                Box(
-                    Modifier.size(20.dp).clip(CircleShape).clickable { onSelect(i) },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Box(
-                        Modifier
-                            .size(6.dp)
-                            .clip(CircleShape)
-                            .background(if (i == selectedIndex) Color.White else Color.White.copy(alpha = 0.3f)),
-                    )
-                }
-            }
+                .padding(vertical = 6.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(label, color = Color.White.copy(alpha = 0.8f), style = MaterialTheme.typography.labelLarge)
+            Text(
+                value.roundToInt().toString(),
+                color = Color.White,
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+            )
         }
     }
 }
@@ -928,6 +903,29 @@ private fun PerspectiveCropOverlay(
             close()
         }
         drawPath(path, color = Color.White, style = Stroke(width = 2.dp.toPx()))
+        // Corner brackets, drawn INWARD along the quad's own two edges meeting at each corner --
+        // guaranteed to stay inside the quad regardless of its shape, unlike the draggable circle
+        // handles below (centered exactly ON the corner point), which are barely visible whenever
+        // a corner sits right at the image's own edge -- the starting state before any corner has
+        // been dragged, since a fresh "Free corners" quad starts out matching the full rectangle.
+        // Same fix as CropOverlay's own identical bracket for the axis-aligned rectangle case.
+        val bracketLen = 22.dp.toPx()
+        fun DrawScope.bracketToward(from: Offset, toward: Offset) {
+            val dx = toward.x - from.x
+            val dy = toward.y - from.y
+            val len = sqrt(dx * dx + dy * dy)
+            if (len < 1f) return
+            val end = Offset(from.x + dx / len * minOf(bracketLen, len), from.y + dy / len * minOf(bracketLen, len))
+            drawLine(Color.White, from, end, strokeWidth = 4.dp.toPx())
+        }
+        bracketToward(tl, tr)
+        bracketToward(tl, bl)
+        bracketToward(tr, tl)
+        bracketToward(tr, br)
+        bracketToward(bl, tl)
+        bracketToward(bl, br)
+        bracketToward(br, tr)
+        bracketToward(br, bl)
     }
     listOf(
         QuadCorner.TOP_LEFT to quad.topLeft,
