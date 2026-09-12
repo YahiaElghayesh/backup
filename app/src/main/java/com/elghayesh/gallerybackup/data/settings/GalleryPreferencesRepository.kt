@@ -45,24 +45,27 @@ enum class SortCriterion(val label: String) {
 data class FolderSortSetting(val criterion: SortCriterion, val ascending: Boolean, val randomSeed: Long = 0L)
 
 /** One of a handful of preset accent colors -- deliberately not a full color picker, to keep this
- * simple. Evenly spaced around the hue wheel (every 30 degrees) at one consistent saturation and
- * lightness, rather than a larger set of muted/desaturated tones -- the previous palette had
- * several colors (e.g. INDIGO/NAVY/SLATE/GRAY, or RED/MAROON/PINK) close enough in hue and
- * lightness to be hard to tell apart across a grid of folder covers; evenly spacing fewer, more
- * saturated hues keeps every entry clearly distinct from its neighbors instead. */
+ * simple. A previous version of this palette spaced 12 hues perfectly evenly (every 30 degrees) --
+ * that math is exactly what caused the next problem: green occupies a much WIDER perceptual band
+ * than other hues, so a uniform wheel unavoidably put 3-4 entries (roughly 60-150 degrees: an
+ * amber/gold, a lime, a green, and a teal) all reading as "shades of green" at a glance. This
+ * palette instead deliberately gives green only ONE slot and spreads the other 11 across the
+ * remaining hue range, so no two entries are perceptually crowded together -- and at a somewhat
+ * lower saturation/lightness than a naive wheel would default to, so the set doesn't read as
+ * neon/garish, just clearly distinct. */
 enum class AccentColor(val seed: Long) {
-    RED(0xFFC52626),
-    ORANGE(0xFFC57526),
-    GOLD(0xFFC5C526),
-    LIME(0xFF75C526),
-    GREEN(0xFF26C526),
-    TEAL(0xFF26C575),
-    CYAN(0xFF26C5C5),
-    BLUE(0xFF2675C5),
-    INDIGO(0xFF2626C5),
-    VIOLET(0xFF7526C5),
-    MAGENTA(0xFFC526C5),
-    ROSE(0xFFC52675),
+    RED(0xFFA1492B),
+    ORANGE(0xFFA17F2B),
+    GREEN(0xFF52A12B),
+    TEAL(0xFF2BA13F),
+    CYAN(0xFF2BA174),
+    SKY(0xFF2B98A1),
+    BLUE(0xFF2B62A1),
+    INDIGO(0xFF2B2DA1),
+    VIOLET(0xFF5F2BA1),
+    MAGENTA(0xFF952BA1),
+    PINK(0xFFA12B78),
+    ROSE(0xFFA12B42),
     WHITE(0xFFF2F1EF),
     BLACK(0xFF1C1C1C),
 }
