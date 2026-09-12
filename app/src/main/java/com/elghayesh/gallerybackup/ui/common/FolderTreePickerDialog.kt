@@ -1,5 +1,6 @@
 package com.elghayesh.gallerybackup.ui.common
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
@@ -67,6 +68,16 @@ fun FolderTreePickerDialog(
     var showCreateFolderDialog by remember { mutableStateOf(false) }
     val node = root?.findNode(currentPath)
 
+    // The on-screen arrow already goes up one folder level (or dismisses at the root) via its own
+    // onClick below -- but this dialog's system/gesture back button is a separate code path that,
+    // without this, falls straight through to the Dialog's own default onDismissRequest, cancelling
+    // the whole move/copy instead of just stepping back inside the picker. The BackHandler call
+    // itself has to live inside the Dialog(...) content lambda below (not here) to register
+    // against that window's own back dispatcher rather than the screen behind it.
+    val goBack = {
+        if (currentPath.isEmpty()) onDismiss() else currentPath = currentPath.substringBeforeLast('/', "")
+    }
+
     val folderViewType by viewModel.folderViewType.collectAsState()
     val folderGridColumns by viewModel.folderGridColumns.collectAsState()
     val folderRowSize by viewModel.folderRowSize.collectAsState()
@@ -105,21 +116,14 @@ fun FolderTreePickerDialog(
     }
 
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        BackHandler(onBack = goBack)
         Surface(modifier = Modifier.fillMaxSize()) {
             Scaffold(
                 topBar = {
                     TopAppBar(
                         title = { Text(if (currentPath.isEmpty()) title else currentPath.substringAfterLast('/')) },
                         navigationIcon = {
-                            IconButton(
-                                onClick = {
-                                    if (currentPath.isEmpty()) {
-                                        onDismiss()
-                                    } else {
-                                        currentPath = currentPath.substringBeforeLast('/', "")
-                                    }
-                                },
-                            ) {
+                            IconButton(onClick = goBack) {
                                 Icon(
                                     if (currentPath.isEmpty()) Icons.Filled.Close else Icons.Filled.ArrowBack,
                                     contentDescription = "Back",
