@@ -49,7 +49,9 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.elghayesh.gallerybackup.data.media.allItemsRecursive
 import com.elghayesh.gallerybackup.data.media.findNode
+import com.elghayesh.gallerybackup.ui.collage.CollageScreen
 import com.elghayesh.gallerybackup.ui.edit.PhotoEditScreen
 import com.elghayesh.gallerybackup.ui.edit.VideoTrimScreen
 import com.elghayesh.gallerybackup.ui.gallery.FolderVisibilityExplorerScreen
@@ -269,6 +271,7 @@ private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: Back
                 onEditVideo = { folderPath, index ->
                     navController.navigateSafely("trimVideo/${URLEncoder.encode(folderPath, "UTF-8")}/$index")
                 },
+                onOpenCollage = { ids -> navController.navigateSafely("collage/${ids.joinToString(",")}") },
                 onNavigateUp = { navController.popBackStack() },
             )
         }
@@ -346,6 +349,21 @@ private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: Back
             if (item != null) {
                 PhotoEditScreen(item = item, viewModel = galleryViewModel, onDone = { navController.popBackStack() })
             }
+        }
+        composable(
+            route = "collage/{ids}",
+            arguments = listOf(navArgument("ids") { type = NavType.StringType }),
+        ) { backStackEntry ->
+            val ids = (backStackEntry.arguments?.getString("ids") ?: "").split(",").mapNotNull { it.toLongOrNull() }
+            val root by galleryViewModel.visibleRoot.collectAsState()
+            // Order matches the id list (selection order), not whatever order allItemsRecursive
+            // happens to walk the tree in.
+            val idOrder = ids.withIndex().associate { (index, id) -> id to index }
+            val items = root?.allItemsRecursive()
+                ?.filter { it.id in idOrder }
+                ?.sortedBy { idOrder[it.id] }
+                ?: emptyList()
+            CollageScreen(items = items, viewModel = galleryViewModel, onDone = { navController.popBackStack() })
         }
         composable(
             route = "trimVideo/{path}/{index}",

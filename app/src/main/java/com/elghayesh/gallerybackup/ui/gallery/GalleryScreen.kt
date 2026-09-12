@@ -159,6 +159,7 @@ fun GalleryScreen(
     onOpenTrash: () -> Unit,
     onEditPhoto: (path: String, index: Int) -> Unit,
     onEditVideo: (path: String, index: Int) -> Unit,
+    onOpenCollage: (ids: List<Long>) -> Unit,
     onNavigateUp: () -> Unit,
 ) {
     LaunchedEffect(Unit) { viewModel.loadIfNeeded() }
@@ -514,6 +515,9 @@ fun GalleryScreen(
                             )
                             if (totalSelectedCount == 1) {
                                 add("Rename" to { showRenameDialog = true })
+                            }
+                            if (selectedItems.count { !it.isVideo } >= 2 && selectedFolderNodes.isEmpty()) {
+                                add("Make collage" to { onOpenCollage(selectedItems.filter { !it.isVideo }.map { it.id }) })
                             }
                             if (selectedFolderNodes.isNotEmpty() && selectedItems.isEmpty()) {
                                 add(
