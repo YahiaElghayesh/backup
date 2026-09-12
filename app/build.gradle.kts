@@ -80,6 +80,11 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.3")
     implementation("androidx.activity:activity-compose:1.9.0")
     implementation("androidx.activity:activity-ktx:1.9.0")
+    implementation("androidx.fragment:fragment-ktx:1.8.2")
+    // Biometric/device-credential (PIN, pattern, password) app-lock authentication -- delegates
+    // entirely to whatever the device's own lock screen already trusts rather than MediaHub
+    // storing or checking a password of its own.
+    implementation("androidx.biometric:biometric:1.1.0")
 
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")

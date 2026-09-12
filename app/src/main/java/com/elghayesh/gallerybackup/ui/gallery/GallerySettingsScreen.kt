@@ -38,6 +38,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,9 +50,10 @@ import com.elghayesh.gallerybackup.data.settings.ThemeMode
 import com.elghayesh.gallerybackup.data.settings.ViewType
 import com.elghayesh.gallerybackup.data.update.UpdateCheckCoordinator
 import kotlin.math.roundToInt
+import kotlinx.coroutines.launch
 
 /** Which categorized sub-menu, if any, is currently open. Null means the top-level menu list. */
-private enum class SettingsSection { APPEARANCE, LAYOUT, RECYCLE_BIN }
+private enum class SettingsSection { APPEARANCE, LAYOUT, RECYCLE_BIN, SECURITY }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -74,6 +76,7 @@ fun GallerySettingsScreen(
         SettingsSection.APPEARANCE -> AppearanceSettingsScreen(viewModel, onBack = { openSection = null })
         SettingsSection.LAYOUT -> LayoutSettingsScreen(viewModel, onBack = { openSection = null })
         SettingsSection.RECYCLE_BIN -> RecycleBinSettingsScreen(viewModel, onBack = { openSection = null })
+        SettingsSection.SECURITY -> SecuritySettingsScreen(viewModel, onBack = { openSection = null })
         null -> Scaffold(
             topBar = {
                 TopAppBar(
@@ -108,6 +111,14 @@ fun GallerySettingsScreen(
                         title = "Recycle bin",
                         subtitle = "Empty the recycle bin, or change how long deleted items stay in it.",
                         onClick = { openSection = SettingsSection.RECYCLE_BIN },
+                    )
+                    HorizontalDivider()
+                }
+                item {
+                    SettingsMenuRow(
+                        title = "Security",
+                        subtitle = "Lock the app with biometrics or your device PIN, and lock hidden items.",
+                        onClick = { openSection = SettingsSection.SECURITY },
                     )
                     HorizontalDivider()
                 }
@@ -354,6 +365,100 @@ private fun RecycleBinSettingsScreen(viewModel: GalleryViewModel, onBack: () -> 
             OutlinedButton(onClick = { confirmEmpty = true }, enabled = trashedItems.isNotEmpty()) {
                 Text("Empty recycle bin")
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SecuritySettingsScreen(viewModel: GalleryViewModel, onBack: () -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val activity = context as? androidx.fragment.app.FragmentActivity
+    val scope = rememberCoroutineScope()
+    val appLockEnabled by viewModel.appLockEnabled.collectAsState()
+    val lockHiddenItems by viewModel.lockHiddenItems.collectAsState()
+    var showNoAuthSetUpDialog by remember { mutableStateOf(false) }
+
+    if (showNoAuthSetUpDialog) {
+        AlertDialog(
+            onDismissRequest = { showNoAuthSetUpDialog = false },
+            title = { Text("Set up a screen lock first") },
+            text = {
+                Text(
+                    "MediaHub locks itself using your device's own fingerprint/face unlock or " +
+                        "screen lock PIN/pattern/password -- set one of those up in your device's " +
+                        "system settings first, then come back here.",
+                )
+            },
+            confirmButton = { TextButton(onClick = { showNoAuthSetUpDialog = false }) { Text("OK") } },
+        )
+    }
+
+    fun requestEnableLock(onGranted: () -> Unit) {
+        if (activity == null || !com.elghayesh.gallerybackup.security.canUseAppLock(activity)) {
+            showNoAuthSetUpDialog = true
+            return
+        }
+        scope.launch {
+            if (com.elghayesh.gallerybackup.security.requestAppLockAuthentication(activity, "Confirm it's you")) {
+                onGranted()
+            }
+        }
+    }
+
+    SettingsSubScaffold(title = "Security", onBack = onBack) { modifier ->
+        Column(modifier.fillMaxWidth().padding(16.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Lock MediaHub", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Require your fingerprint/face or device PIN to open the app, every time " +
+                            "it comes back from the background.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = appLockEnabled,
+                    onCheckedChange = { checked ->
+                        if (checked) requestEnableLock { viewModel.setAppLockEnabled(true) }
+                        else viewModel.setAppLockEnabled(false)
+                    },
+                )
+            }
+            Spacer(Modifier.height(20.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(20.dp))
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Lock hidden items", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Require authentication before \"Show hidden items\" can be turned on -- " +
+                            "independent of the app lock above.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = lockHiddenItems,
+                    onCheckedChange = { checked ->
+                        if (checked) requestEnableLock { viewModel.setLockHiddenItems(true) }
+                        else viewModel.setLockHiddenItems(false)
+                    },
+                )
+            }
+            Spacer(Modifier.height(20.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(20.dp))
+            Text("Lock individual folders", style = MaterialTheme.typography.titleSmall)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Select one or more folders in the gallery and use \"Lock folder\" from the " +
+                    "overflow menu -- a locked folder needs authentication to open even while " +
+                    "the app itself is already unlocked.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

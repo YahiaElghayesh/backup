@@ -8,7 +8,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.IntentSenderRequest
@@ -33,6 +32,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -43,6 +43,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.navigation.NavController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -51,6 +54,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.elghayesh.gallerybackup.data.media.allItemsRecursive
 import com.elghayesh.gallerybackup.data.media.findNode
+import com.elghayesh.gallerybackup.security.AppLockGateScreen
 import com.elghayesh.gallerybackup.ui.collage.CollageScreen
 import com.elghayesh.gallerybackup.ui.edit.PhotoEditScreen
 import com.elghayesh.gallerybackup.ui.edit.VideoTrimScreen
@@ -71,7 +75,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import java.net.URLDecoder
 import java.net.URLEncoder
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
 
     private val galleryViewModel: GalleryViewModel by viewModels()
     private val backupViewModel: BackupViewModel by viewModels()
@@ -187,7 +191,26 @@ class MainActivity : ComponentActivity() {
                         if (!hasPermission) permissionLauncher.launch(requiredMediaPermissions())
                     }
 
-                    if (hasPermission) {
+                    val appLockEnabled by galleryViewModel.appLockEnabled.collectAsState()
+                    // Not tied to appLockEnabled's own initial value -- starts false regardless, so a
+                    // user WITHOUT app lock turned on never sees a spurious lock screen while this
+                    // setting is still loading from disk; once appLockEnabled itself loads in true,
+                    // this flips the gate on for real.
+                    var isUnlocked by remember { mutableStateOf(false) }
+                    DisposableEffect(Unit) {
+                        // Re-locks every time the app leaves the foreground, so returning to it
+                        // (not just a fresh cold start) asks again -- otherwise app lock would only
+                        // ever matter once, the very first launch after enabling it.
+                        val observer = LifecycleEventObserver { _, event ->
+                            if (event == Lifecycle.Event.ON_STOP) isUnlocked = false
+                        }
+                        lifecycle.addObserver(observer)
+                        onDispose { lifecycle.removeObserver(observer) }
+                    }
+
+                    if (appLockEnabled && !isUnlocked) {
+                        AppLockGateScreen(onUnlocked = { isUnlocked = true })
+                    } else if (hasPermission) {
                         AppNavHost(galleryViewModel, backupViewModel)
                     } else {
                         PermissionRationaleScreen(

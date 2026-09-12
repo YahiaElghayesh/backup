@@ -167,6 +167,42 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         prefs.pinContentToBottom.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val folderGroupSettings: StateFlow<Map<String, FolderGroupSetting>> =
         prefs.folderGroupSettings.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+    val appLockEnabled: StateFlow<Boolean> =
+        prefs.appLockEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val lockedFolders: StateFlow<Set<String>> =
+        prefs.lockedFolders.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
+    val lockHiddenItems: StateFlow<Boolean> =
+        prefs.lockHiddenItems.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /** Folders unlocked (biometric/PIN) so far THIS app session -- not persisted, so every folder
+     * needs re-unlocking again the next time the app itself is opened. */
+    private val _unlockedFolderPaths = MutableStateFlow<Set<String>>(emptySet())
+    val unlockedFolderPaths: StateFlow<Set<String>> = _unlockedFolderPaths.asStateFlow()
+
+    fun markFolderUnlocked(path: String) {
+        _unlockedFolderPaths.value = _unlockedFolderPaths.value + path
+    }
+
+    /** Whether hidden items have been unlocked (biometric/PIN) so far this app session -- see
+     * [unlockedFolderPaths]'s own doc comment for why this resets every fresh app session. */
+    private val _hiddenItemsUnlockedThisSession = MutableStateFlow(false)
+    val hiddenItemsUnlockedThisSession: StateFlow<Boolean> = _hiddenItemsUnlockedThisSession.asStateFlow()
+
+    fun markHiddenItemsUnlocked() {
+        _hiddenItemsUnlockedThisSession.value = true
+    }
+
+    fun setAppLockEnabled(enabled: Boolean) {
+        viewModelScope.launch { prefs.setAppLockEnabled(enabled) }
+    }
+
+    fun setFolderLocked(path: String, locked: Boolean) {
+        viewModelScope.launch { prefs.setFolderLocked(path, locked) }
+    }
+
+    fun setLockHiddenItems(value: Boolean) {
+        viewModelScope.launch { prefs.setLockHiddenItems(value) }
+    }
 
     /** [root] with hidden/trashed content removed, plus any still-empty user-created folders added in. */
     val visibleRoot: StateFlow<FolderNode?> = combine(

@@ -158,10 +158,11 @@ private enum class CropCorner { TOP_LEFT, TOP_RIGHT, BOTTOM_LEFT, BOTTOM_RIGHT }
 private data class NormPoint(val x: Float, val y: Float)
 
 /** A general quadrilateral crop -- each corner moved independently rather than kept as an
- * axis-aligned rectangle -- used by "Free corners" perspective correction: straightening a photo
- * shot at an angle (phone tilted), where a plain rectangular crop can't fix the resulting
- * keystone/skew. Applied on save via a true 4-point projective warp (Matrix.setPolyToPoly), not
- * just a rectangular crop -- see [warpPerspectiveQuad]. */
+ * axis-aligned rectangle -- used by "Free corners": an arbitrarily-shaped (not just rectangular)
+ * crop. On save, the photo is placed at its own natural proportions (never stretched/warped) into
+ * the quad's own bounding box, masked to the quad's shape -- so the quad's interior shows the
+ * photo and the space between the quad and its bounding box shows the chosen background color,
+ * see [cropQuadOntoBackground]. */
 private data class CropQuad(
     val topLeft: NormPoint,
     val topRight: NormPoint,
@@ -200,9 +201,12 @@ private data class FocusSpot(
 private data class EditState(
     val cropRect: NormRect = NormRect.FULL,
     val cropAspect: CropAspect = CropAspect.FREE,
-    /** Non-null while "Free corners" perspective mode is active -- overrides [cropRect] for both
-     * the on-screen overlay and the actual save, see [CropQuad]'s own doc comment. */
+    /** Non-null while "Free corners" mode is active -- overrides [cropRect] for both the
+     * on-screen overlay and the actual save, see [CropQuad]'s own doc comment. */
     val cropQuad: CropQuad? = null,
+    /** Fills the area inside the quad's bounding box but outside the quad shape itself, on save --
+     * only meaningful while [cropQuad] is non-null. */
+    val cropQuadBackgroundColorSeed: Long = AccentColor.WHITE.seed,
     val brightness: Float = 0f,
     val contrast: Float = 0f,
     val saturation: Float = 0f,
@@ -436,6 +440,38 @@ fun PhotoEditScreen(
                                         commit(current.copy(cropAspect = a, cropRect = rect, cropQuad = null))
                                     },
                                 )
+                            }
+                        }
+                        if (current.cropQuad != null) {
+                            Spacer(Modifier.height(12.dp))
+                            Text(
+                                "Background color",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = Color.White.copy(alpha = 0.7f),
+                                modifier = Modifier.padding(horizontal = 12.dp),
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            Row(
+                                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                AccentColor.entries.forEach { color ->
+                                    val isSelected = current.cropQuadBackgroundColorSeed == color.seed
+                                    Box(
+                                        Modifier
+                                            .size(32.dp)
+                                            .clip(CircleShape)
+                                            .background(Color(color.seed))
+                                            .border(
+                                                width = if (isSelected) 3.dp else 0.dp,
+                                                color = Color.White,
+                                                shape = CircleShape,
+                                            )
+                                            .clickable {
+                                                commit(current.copy(cropQuadBackgroundColorSeed = color.seed))
+                                            },
+                                    )
+                                }
                             }
                         }
                     }
@@ -1131,38 +1167,45 @@ private fun boundingRectOf(quad: CropQuad): NormRect {
 }
 
 /**
- * Warps the quadrilateral [quad] (its 4 corners, normalized 0..1 within [source]) onto a
- * straightened rectangle via a true projective transform -- Matrix.setPolyToPoly with 4 point
- * pairs performs actual perspective correction, not just an affine skew -- which is what corrects
- * a photo shot at an angle/with keystone distortion, unlike a plain axis-aligned crop. Output size
- * is derived from the quad's own average edge lengths in source pixels, so a wide, shallow quad
- * still maps to a roughly similarly-proportioned (now rectangular) output.
+ * Crops [quad] (its 4 corners, normalized 0..1 within [source]) out of [source] at its own
+ * natural resolution -- never stretched or perspective-warped, unlike a straighten/keystone-style
+ * quad crop -- by taking the quad's axis-aligned bounding box as the output canvas, filling it
+ * with [backgroundColorSeed], then drawing [source] (shifted so it lines up) clipped to the
+ * quad's own shape. The result: the quad's interior shows the photo at its real proportions, and
+ * whatever's between the quad and its bounding box (e.g. the corners of a diamond-ish quad) shows
+ * the chosen background color instead.
  */
-private fun warpPerspectiveQuad(source: Bitmap, quad: CropQuad): Bitmap {
+private fun cropQuadOntoBackground(source: Bitmap, quad: CropQuad, backgroundColorSeed: Long): Bitmap {
     val w = source.width.toFloat()
     val h = source.height.toFloat()
-    val tl = floatArrayOf(quad.topLeft.x * w, quad.topLeft.y * h)
-    val tr = floatArrayOf(quad.topRight.x * w, quad.topRight.y * h)
-    val bl = floatArrayOf(quad.bottomLeft.x * w, quad.bottomLeft.y * h)
-    val br = floatArrayOf(quad.bottomRight.x * w, quad.bottomRight.y * h)
+    val tl = Offset(quad.topLeft.x * w, quad.topLeft.y * h)
+    val tr = Offset(quad.topRight.x * w, quad.topRight.y * h)
+    val bl = Offset(quad.bottomLeft.x * w, quad.bottomLeft.y * h)
+    val br = Offset(quad.bottomRight.x * w, quad.bottomRight.y * h)
 
-    fun dist(a: FloatArray, b: FloatArray): Float {
-        val dx = a[0] - b[0]
-        val dy = a[1] - b[1]
-        return kotlin.math.sqrt(dx * dx + dy * dy)
-    }
-    val outW = (((dist(tl, tr) + dist(bl, br)) / 2f).roundToInt()).coerceAtLeast(1)
-    val outH = (((dist(tl, bl) + dist(tr, br)) / 2f).roundToInt()).coerceAtLeast(1)
-
-    val src = floatArrayOf(tl[0], tl[1], tr[0], tr[1], bl[0], bl[1], br[0], br[1])
-    val dst = floatArrayOf(0f, 0f, outW.toFloat(), 0f, 0f, outH.toFloat(), outW.toFloat(), outH.toFloat())
-    val matrix = Matrix()
-    matrix.setPolyToPoly(src, 0, dst, 0, 4)
+    val minX = minOf(tl.x, tr.x, bl.x, br.x)
+    val minY = minOf(tl.y, tr.y, bl.y, br.y)
+    val maxX = maxOf(tl.x, tr.x, bl.x, br.x)
+    val maxY = maxOf(tl.y, tr.y, bl.y, br.y)
+    val outW = (maxX - minX).roundToInt().coerceAtLeast(1)
+    val outH = (maxY - minY).roundToInt().coerceAtLeast(1)
 
     val output = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
     val canvas = android.graphics.Canvas(output)
+    canvas.drawColor(backgroundColorSeed.toInt())
+
+    val path = android.graphics.Path().apply {
+        moveTo(tl.x - minX, tl.y - minY)
+        lineTo(tr.x - minX, tr.y - minY)
+        lineTo(br.x - minX, br.y - minY)
+        lineTo(bl.x - minX, bl.y - minY)
+        close()
+    }
     val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-    canvas.drawBitmap(source, matrix, paint)
+    canvas.save()
+    canvas.clipPath(path)
+    canvas.drawBitmap(source, -minX, -minY, paint)
+    canvas.restore()
     return output
 }
 
@@ -1410,7 +1453,7 @@ private suspend fun saveEditedPhoto(
 ) = withContext(Dispatchers.IO) {
     val quad = state.cropQuad
     val cropped = if (quad != null) {
-        warpPerspectiveQuad(bitmap, quad)
+        cropQuadOntoBackground(bitmap, quad, state.cropQuadBackgroundColorSeed)
     } else {
         val cropRect = cropRectFor(bitmap.width, bitmap.height, state.cropRect)
         Bitmap.createBitmap(bitmap, cropRect.left, cropRect.top, cropRect.width(), cropRect.height())

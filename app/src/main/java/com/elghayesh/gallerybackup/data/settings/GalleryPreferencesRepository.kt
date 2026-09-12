@@ -153,6 +153,9 @@ class GalleryPreferencesRepository(private val context: Context) {
         val FAVORITE_MEDIA_IDS = stringSetPreferencesKey("favorite_media_ids")
         val PIN_CONTENT_TO_BOTTOM = booleanPreferencesKey("pin_content_to_bottom")
         val FOLDER_GROUP_SETTINGS_JSON = stringPreferencesKey("folder_group_settings_json")
+        val APP_LOCK_ENABLED = booleanPreferencesKey("app_lock_enabled")
+        val LOCKED_FOLDERS = stringSetPreferencesKey("locked_folders")
+        val LOCK_HIDDEN_ITEMS = booleanPreferencesKey("lock_hidden_items")
     }
 
     private fun legacyViewType(prefs: androidx.datastore.preferences.core.Preferences): ViewType? =
@@ -286,6 +289,36 @@ class GalleryPreferencesRepository(private val context: Context) {
      * ungrouped -- see [FolderGroupSetting]. */
     val folderGroupSettings: Flow<Map<String, FolderGroupSetting>> =
         context.galleryPrefsStore.data.map { parseFolderGroupSettings(it[Keys.FOLDER_GROUP_SETTINGS_JSON]) }
+
+    /** Requires device biometric/PIN authentication before the app's own content is shown at all,
+     * re-checked every time the app returns from the background. */
+    val appLockEnabled: Flow<Boolean> =
+        context.galleryPrefsStore.data.map { it[Keys.APP_LOCK_ENABLED] ?: false }
+
+    suspend fun setAppLockEnabled(enabled: Boolean) {
+        context.galleryPrefsStore.edit { it[Keys.APP_LOCK_ENABLED] = enabled }
+    }
+
+    /** Folders that additionally require authentication to open, independent of [appLockEnabled]
+     * (a folder can be locked with app-wide lock off, and vice versa). */
+    val lockedFolders: Flow<Set<String>> =
+        context.galleryPrefsStore.data.map { it[Keys.LOCKED_FOLDERS] ?: emptySet() }
+
+    suspend fun setFolderLocked(path: String, locked: Boolean) {
+        context.galleryPrefsStore.edit { prefs ->
+            val current = prefs[Keys.LOCKED_FOLDERS] ?: emptySet()
+            prefs[Keys.LOCKED_FOLDERS] = if (locked) current + path else current - path
+        }
+    }
+
+    /** Requires authentication before hidden items can be shown (i.e. before "Show hidden items"
+     * can be turned on), on top of whatever [appLockEnabled]/[lockedFolders] already require. */
+    val lockHiddenItems: Flow<Boolean> =
+        context.galleryPrefsStore.data.map { it[Keys.LOCK_HIDDEN_ITEMS] ?: false }
+
+    suspend fun setLockHiddenItems(value: Boolean) {
+        context.galleryPrefsStore.edit { it[Keys.LOCK_HIDDEN_ITEMS] = value }
+    }
 
     /** Sets [path]'s group-by choice, or clears it entirely when [setting]'s criterion is
      * [GroupCriterion.NONE] -- mirroring the previous simple on/off toggle's behavior of just

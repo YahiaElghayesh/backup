@@ -196,6 +196,47 @@ fun GalleryScreen(
     val dateDividersEnabled = groupSetting.criterion != GroupCriterion.NONE
     val node = visibleRoot?.findNode(path)
 
+    val lockedFolders by viewModel.lockedFolders.collectAsState()
+    val unlockedFolderPaths by viewModel.unlockedFolderPaths.collectAsState()
+    val lockHiddenItems by viewModel.lockHiddenItems.collectAsState()
+    val hiddenItemsUnlockedThisSession by viewModel.hiddenItemsUnlockedThisSession.collectAsState()
+    val lockScope = rememberCoroutineScope()
+    val activity = context as? androidx.fragment.app.FragmentActivity
+
+    // Opening a locked folder (or turning on "Show hidden items" while hidden items are locked)
+    // requires biometric/PIN authentication first, once per app session -- see
+    // GalleryViewModel.unlockedFolderPaths/hiddenItemsUnlockedThisSession's own doc comments for
+    // why that's session-scoped rather than persisted.
+    fun requestOpenFolder(folderPath: String) {
+        if (folderPath !in lockedFolders || folderPath in unlockedFolderPaths || activity == null) {
+            onOpenFolder(folderPath)
+            return
+        }
+        lockScope.launch {
+            if (com.elghayesh.gallerybackup.security.requestAppLockAuthentication(activity, "Unlock folder")) {
+                viewModel.markFolderUnlocked(folderPath)
+                onOpenFolder(folderPath)
+            }
+        }
+    }
+
+    fun requestShowHidden() {
+        if (showHidden) {
+            viewModel.setShowHidden(false)
+            return
+        }
+        if (!lockHiddenItems || hiddenItemsUnlockedThisSession || activity == null) {
+            viewModel.setShowHidden(true)
+            return
+        }
+        lockScope.launch {
+            if (com.elghayesh.gallerybackup.security.requestAppLockAuthentication(activity, "Unlock hidden items")) {
+                viewModel.markHiddenItemsUnlocked()
+                viewModel.setShowHidden(true)
+            }
+        }
+    }
+
     // A pinned folder is promoted out of its real parent's listing wherever that parent is shown
     // (so it isn't duplicated in two places) and surfaces instead as its own tile on the gallery's
     // home page. This applies uniformly at any depth via FolderNode.promotedChildren -- a folder's
@@ -430,7 +471,7 @@ fun GalleryScreen(
                                 )
                                 DropdownMenuItem(
                                     text = { Text(if (showHidden) "Hide hidden items" else "Show hidden items") },
-                                    onClick = { viewModel.setShowHidden(!showHidden); overflowExpanded = false },
+                                    onClick = { requestShowHidden(); overflowExpanded = false },
                                 )
                                 DropdownMenuItem(
                                     text = { Text("New folder here") },
@@ -523,6 +564,12 @@ fun GalleryScreen(
                                 add(
                                     (if (selectedFolderNodes.size == 1) "Set cover" else "Set covers") to {
                                         coverDialogFolders = selectedFolderNodes
+                                    },
+                                )
+                                val allSelectedLocked = selectedFolderNodes.all { it.path in lockedFolders }
+                                add(
+                                    (if (allSelectedLocked) "Unlock folder" else "Lock folder") to {
+                                        selectedFolderNodes.forEach { viewModel.setFolderLocked(it.path, !allSelectedLocked) }
                                     },
                                 )
                             }
@@ -636,7 +683,7 @@ fun GalleryScreen(
                                             if (isSelectionMode) {
                                                 viewModel.toggleFolderSelection(folder.path)
                                             } else {
-                                                onOpenFolder(folder.path)
+                                                requestOpenFolder(folder.path)
                                             }
                                         },
                                         onLongClick = {
@@ -734,7 +781,7 @@ fun GalleryScreen(
                                                         if (isSelectionMode) {
                                                             viewModel.toggleFolderSelection(folder.path)
                                                         } else {
-                                                            onOpenFolder(folder.path)
+                                                            requestOpenFolder(folder.path)
                                                         }
                                                     },
                                                     onLongClick = {
@@ -761,7 +808,7 @@ fun GalleryScreen(
                                             if (isSelectionMode) {
                                                 viewModel.toggleFolderSelection(folder.path)
                                             } else {
-                                                onOpenFolder(folder.path)
+                                                requestOpenFolder(folder.path)
                                             }
                                         },
                                         onLongClick = {

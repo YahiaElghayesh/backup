@@ -35,7 +35,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -64,6 +70,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
@@ -380,6 +387,30 @@ fun CollageScreen(
                         )
                     }
                 }
+                if (selectedItemIndex != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Selected photo",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color.White.copy(alpha = 0.7f),
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                    )
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        val step = 0.04f
+                        val selIndex = selectedItemIndex!!
+                        CollageIconButton(Icons.Filled.Remove, "Smaller") { resizeCell(selIndex, -step, -step) }
+                        CollageIconButton(Icons.Filled.Add, "Bigger") { resizeCell(selIndex, step, step) }
+                        Spacer(Modifier.weight(1f))
+                        CollageIconButton(Icons.Filled.KeyboardArrowLeft, "Move left") { moveCell(selIndex, -step, 0f) }
+                        CollageIconButton(Icons.Filled.KeyboardArrowUp, "Move up") { moveCell(selIndex, 0f, -step) }
+                        CollageIconButton(Icons.Filled.KeyboardArrowDown, "Move down") { moveCell(selIndex, 0f, step) }
+                        CollageIconButton(Icons.Filled.KeyboardArrowRight, "Move right") { moveCell(selIndex, step, 0f) }
+                    }
+                }
             }
         },
     ) { padding ->
@@ -507,6 +538,13 @@ private fun CollagePill(label: String, selected: Boolean, onClick: () -> Unit) {
             color = if (selected) Color.Black else Color.White,
             style = MaterialTheme.typography.labelLarge,
         )
+    }
+}
+
+@Composable
+private fun CollageIconButton(icon: ImageVector, contentDescription: String, onClick: () -> Unit) {
+    IconButton(onClick = onClick, modifier = Modifier.size(36.dp)) {
+        Icon(icon, contentDescription = contentDescription, tint = Color.White)
     }
 }
 
