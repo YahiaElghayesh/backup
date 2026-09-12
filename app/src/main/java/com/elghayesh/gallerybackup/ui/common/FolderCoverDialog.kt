@@ -49,6 +49,7 @@ import com.elghayesh.gallerybackup.data.media.FolderNode
 import com.elghayesh.gallerybackup.data.media.allItemsRecursive
 import com.elghayesh.gallerybackup.data.settings.AccentColor
 import com.elghayesh.gallerybackup.data.settings.FolderCover
+import com.elghayesh.gallerybackup.data.settings.ViewType
 import com.elghayesh.gallerybackup.ui.gallery.CoverText
 import com.elghayesh.gallerybackup.ui.gallery.contrastingTextColor
 import kotlin.math.roundToInt
@@ -71,6 +72,9 @@ private const val MAX_TEXT_SCALE = 3.5f
 fun FolderCoverDialog(
     folders: List<FolderNode>,
     current: FolderCover?,
+    folderViewType: ViewType,
+    thumbnailWidthDp: Int,
+    thumbnailHeightDp: Int,
     onConfirm: (Map<String, FolderCover?>) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -111,6 +115,9 @@ fun FolderCoverDialog(
                     bold = bold,
                     wrap = wrapText,
                     photoUri = selectedPhotoUri,
+                    folderViewType = folderViewType,
+                    thumbnailWidthDp = thumbnailWidthDp,
+                    thumbnailHeightDp = thumbnailHeightDp,
                 )
                 Spacer(Modifier.height(16.dp))
                 if (mode == CoverMode.TEXT) {
@@ -281,7 +288,12 @@ fun FolderCoverDialog(
 
 /** Shows exactly how the cover will actually render -- same background, same shrink-to-fit
  * [CoverText] logic and the same 5%-edge boundary the real tile/row use -- so the size slider
- * and color/bold choices have something concrete to react to instead of being picked blind. */
+ * and color/bold choices have something concrete to react to instead of being picked blind.
+ *
+ * Also matches the real folder tile/row's own SHAPE, not just its background and text: a grid
+ * tile is always square, but a list row's thumbnail can be any independently-set width/height
+ * (see FOLDER_THUMBNAIL_WIDTH/FOLDER_ROW_SIZE) -- previously this preview was hardcoded square
+ * regardless, which lied about the cover's real proportions whenever list view wasn't square. */
 @Composable
 private fun CoverPreview(
     mode: CoverMode,
@@ -291,13 +303,17 @@ private fun CoverPreview(
     bold: Boolean,
     wrap: Boolean,
     photoUri: String?,
+    folderViewType: ViewType,
+    thumbnailWidthDp: Int,
+    thumbnailHeightDp: Int,
 ) {
-    // Square, same as the real folder tile it's previewing -- a wide rectangle here would make
-    // the preview lie about the cover's actual proportions.
+    val shapeModifier = if (folderViewType == ViewType.GRID) {
+        Modifier.fillMaxWidth().aspectRatio(1f)
+    } else {
+        Modifier.size(width = thumbnailWidthDp.dp, height = thumbnailHeightDp.dp)
+    }
     Box(
-        Modifier
-            .fillMaxWidth()
-            .aspectRatio(1f)
+        shapeModifier
             .clip(RoundedCornerShape(12.dp))
             .background(if (mode == CoverMode.TEXT) Color(colorSeed) else MaterialTheme.colorScheme.surfaceVariant),
         contentAlignment = Alignment.Center,

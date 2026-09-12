@@ -328,6 +328,9 @@ fun GalleryScreen(
         FolderCoverDialog(
             folders = coverDialogFolders,
             current = if (coverDialogFolders.size == 1) folderCovers[coverDialogFolders.first().path] else null,
+            folderViewType = folderViewType,
+            thumbnailWidthDp = folderThumbnailWidth,
+            thumbnailHeightDp = folderRowSize,
             onConfirm = { perFolder ->
                 perFolder.forEach { (path, cover) -> viewModel.setFolderCover(path, cover) }
                 coverDialogFolders = emptyList()

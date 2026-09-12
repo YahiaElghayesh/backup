@@ -75,6 +75,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -786,11 +787,28 @@ private fun CropOverlay(
             val y = top + (bottom - top) * i / 3f
             drawLine(gridColor, Offset(left, y), Offset(right, y), strokeWidth = 1.dp.toPx())
         }
+        // Corner brackets, drawn INWARD from each corner along the crop rect's own edges --
+        // unlike the draggable circle handles below (centered exactly ON the corner point), these
+        // never extend past the rect's own bounds. That matters because the rect starts out
+        // covering the whole image (in Free mode, before the user has dragged anything), which
+        // puts every corner exactly on the image's own edge -- a handle centered there is half
+        // clipped by the screen/layout edge and barely visible. These brackets stay fully visible
+        // and clearly mark all four corners regardless.
+        val bracketLen = 18.dp.toPx()
+        val bracketStroke = 4.dp.toPx()
+        fun DrawScope.drawCornerBracket(cornerX: Float, cornerY: Float, dirX: Float, dirY: Float) {
+            drawLine(Color.White, Offset(cornerX, cornerY), Offset(cornerX + dirX * bracketLen, cornerY), strokeWidth = bracketStroke)
+            drawLine(Color.White, Offset(cornerX, cornerY), Offset(cornerX, cornerY + dirY * bracketLen), strokeWidth = bracketStroke)
+        }
+        drawCornerBracket(left, top, 1f, 1f)
+        drawCornerBracket(right, top, -1f, 1f)
+        drawCornerBracket(left, bottom, 1f, -1f)
+        drawCornerBracket(right, bottom, -1f, -1f)
     }
     Box(
         Modifier
-            .normOffset(rect.left, rect.top, boxSize, density, centerOnPointDp = 28.dp)
-            .size(28.dp)
+            .normOffset(rect.left, rect.top, boxSize, density, centerOnPointDp = 40.dp)
+            .size(40.dp)
             .pointerInput(boxSize) {
                 detectDragImmediate(onDragEnd = { onDragEnd() }) { change, dragAmount ->
                     change.consume()
@@ -804,8 +822,8 @@ private fun CropOverlay(
     )
     Box(
         Modifier
-            .normOffset(rect.right, rect.top, boxSize, density, centerOnPointDp = 28.dp)
-            .size(28.dp)
+            .normOffset(rect.right, rect.top, boxSize, density, centerOnPointDp = 40.dp)
+            .size(40.dp)
             .pointerInput(boxSize) {
                 detectDragImmediate(onDragEnd = { onDragEnd() }) { change, dragAmount ->
                     change.consume()
@@ -819,8 +837,8 @@ private fun CropOverlay(
     )
     Box(
         Modifier
-            .normOffset(rect.left, rect.bottom, boxSize, density, centerOnPointDp = 28.dp)
-            .size(28.dp)
+            .normOffset(rect.left, rect.bottom, boxSize, density, centerOnPointDp = 40.dp)
+            .size(40.dp)
             .pointerInput(boxSize) {
                 detectDragImmediate(onDragEnd = { onDragEnd() }) { change, dragAmount ->
                     change.consume()
@@ -834,8 +852,8 @@ private fun CropOverlay(
     )
     Box(
         Modifier
-            .normOffset(rect.right, rect.bottom, boxSize, density, centerOnPointDp = 28.dp)
-            .size(28.dp)
+            .normOffset(rect.right, rect.bottom, boxSize, density, centerOnPointDp = 40.dp)
+            .size(40.dp)
             .pointerInput(boxSize) {
                 detectDragImmediate(onDragEnd = { onDragEnd() }) { change, dragAmount ->
                     change.consume()
