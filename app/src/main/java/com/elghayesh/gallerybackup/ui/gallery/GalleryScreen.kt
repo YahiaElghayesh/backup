@@ -55,6 +55,7 @@ import androidx.compose.material.icons.filled.FolderOff
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomAppBar
@@ -254,6 +255,7 @@ fun GalleryScreen(
     var showRenameDialog by remember { mutableStateOf(false) }
     var showCreateFolderDialog by remember { mutableStateOf(false) }
     var coverDialogFolders by remember { mutableStateOf<List<FolderNode>>(emptyList()) }
+    var showSearch by remember { mutableStateOf(false) }
 
     val requestDelete = rememberDeleteRequester(viewModel)
     val gridState = rememberLazyGridState()
@@ -373,6 +375,15 @@ fun GalleryScreen(
         val allItemsForProperties = selectedItems + selectedFolderNodes.flatMap { it.allItemsRecursive() }
         PropertiesDialog(items = allItemsForProperties, onDismiss = { showProperties = false })
     }
+    if (showSearch) {
+        SearchDialog(
+            viewModel = viewModel,
+            root = visibleRoot,
+            onOpenFolder = { destination -> showSearch = false; onOpenFolder(destination) },
+            onOpenMedia = { destination, index -> showSearch = false; onOpenMedia(destination, index) },
+            onDismiss = { showSearch = false },
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -387,6 +398,9 @@ fun GalleryScreen(
                         }
                     },
                     actions = {
+                        IconButton(onClick = { showSearch = true }) {
+                            Icon(Icons.Filled.Search, contentDescription = "Search")
+                        }
                         IconButton(onClick = onOpenTrash) {
                             Icon(Icons.Filled.Delete, contentDescription = "Trash")
                         }
@@ -2015,7 +2029,7 @@ internal fun FolderListRow(
 }
 
 @Composable
-private fun MediaListRow(
+internal fun MediaListRow(
     item: MediaItem,
     isHidden: Boolean,
     isSelected: Boolean,

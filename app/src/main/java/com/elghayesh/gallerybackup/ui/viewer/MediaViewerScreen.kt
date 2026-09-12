@@ -74,6 +74,7 @@ import com.elghayesh.gallerybackup.ui.common.MediaActionBar
 import com.elghayesh.gallerybackup.ui.common.PropertiesDialog
 import com.elghayesh.gallerybackup.ui.common.RenameDialog
 import com.elghayesh.gallerybackup.ui.common.rememberDeleteRequester
+import com.elghayesh.gallerybackup.ui.common.setAsWallpaper
 import com.elghayesh.gallerybackup.ui.common.shareMedia
 import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
 import com.elghayesh.gallerybackup.ui.gallery.effectiveFolderSort
@@ -190,13 +191,16 @@ fun MediaViewerScreen(
                         onDelete = { requestDelete(listOf(item)) },
                         isFavorite = item.id in favoriteMediaIds,
                         onToggleFavorite = { viewModel.setMediaFavorite(item.id, item.id !in favoriteMediaIds) },
-                        overflowActions = listOf(
-                            (if (isHidden) "Unhide" else "Hide") to { viewModel.setMediaHidden(item.id, !isHidden) },
-                            "Rename" to { showRenameDialog = true },
-                            "Move to..." to { transferMode = ViewerTransferMode.MOVE },
-                            "Copy to..." to { transferMode = ViewerTransferMode.COPY },
-                            "Properties" to { showProperties = true },
-                        ),
+                        overflowActions = buildList {
+                            add((if (isHidden) "Unhide" else "Hide") to { viewModel.setMediaHidden(item.id, !isHidden) })
+                            add("Rename" to { showRenameDialog = true })
+                            add("Move to..." to { transferMode = ViewerTransferMode.MOVE })
+                            add("Copy to..." to { transferMode = ViewerTransferMode.COPY })
+                            if (!item.isVideo) {
+                                add("Set as wallpaper" to { setAsWallpaper(context, item) })
+                            }
+                            add("Properties" to { showProperties = true })
+                        },
                     )
                 }
             }

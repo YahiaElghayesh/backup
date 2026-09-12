@@ -171,6 +171,22 @@ fun FolderNode.promotedChildren(includedFolders: Set<String>): List<FolderNode> 
 fun FolderNode.allItemsRecursive(): List<MediaItem> =
     items + children.values.flatMap { it.allItemsRecursive() }
 
+/** Every folder in this tree (this one included) whose own [FolderNode.name] contains [query],
+ * case-insensitively -- used by the gallery's search feature to find folders by name regardless
+ * of where they sit in the tree. The synthetic root (empty [FolderNode.path]) is never itself a
+ * match candidate, since it has no real name a user could search for. */
+fun FolderNode.searchFolders(query: String): List<FolderNode> {
+    val matches = mutableListOf<FolderNode>()
+    if (path.isNotEmpty() && name.contains(query, ignoreCase = true)) matches.add(this)
+    children.values.forEach { matches.addAll(it.searchFolders(query)) }
+    return matches
+}
+
+/** Every [MediaItem] anywhere in this tree whose [MediaItem.displayName] contains [query],
+ * case-insensitively -- the media half of the gallery's search feature. */
+fun FolderNode.searchMedia(query: String): List<MediaItem> =
+    allItemsRecursive().filter { it.displayName.contains(query, ignoreCase = true) }
+
 /**
  * Returns a copy of this tree with an empty [FolderNode] added for each path in
  * [virtualPaths] that doesn't already exist -- lets a just-created, still-empty folder
