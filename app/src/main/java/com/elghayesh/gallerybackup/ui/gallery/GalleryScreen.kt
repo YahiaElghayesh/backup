@@ -167,6 +167,7 @@ fun GalleryScreen(
 
     val visibleRoot by viewModel.visibleRoot.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
+    val isUpdating by viewModel.isUpdating.collectAsState()
     val folderViewType by viewModel.folderViewType.collectAsState()
     val mediaViewType by viewModel.mediaViewType.collectAsState()
     val folderGridColumns by viewModel.folderGridColumns.collectAsState()
@@ -389,7 +390,17 @@ fun GalleryScreen(
         topBar = {
             if (!isSelectionMode) {
                 TopAppBar(
-                    title = { Text(breadcrumbTitle(path)) },
+                    title = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (isUpdating) {
+                                CircularProgressIndicator(
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(16.dp).padding(end = 8.dp),
+                                )
+                            }
+                            Text(breadcrumbTitle(path))
+                        }
+                    },
                     navigationIcon = {
                         if (path.isNotEmpty()) {
                             IconButton(onClick = onNavigateUp) {

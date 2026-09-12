@@ -100,6 +100,15 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
+    /** True for the whole duration of [refresh] -- the fast MediaStore scan AND the slower
+     * EXIF date-refinement and unindexed-file rescan passes that follow it -- unlike [isLoading],
+     * which deliberately flips back to false the moment the fast scan alone is done (see
+     * [refresh]'s own doc comment for why). Drives a small, persistent top-bar spinner so there's
+     * always some visible sign a background update is still happening, without reintroducing the
+     * "blocked on Scanning..." feel [isLoading] was narrowed to avoid. */
+    private val _isUpdating = MutableStateFlow(false)
+    val isUpdating: StateFlow<Boolean> = _isUpdating.asStateFlow()
+
     /** Every real folder on the device, MediaStore-indexed or not -- see [MediaRepository.listAllDeviceFolderPaths].
      * Loaded lazily by the folder pickers that need it, not on every gallery refresh. */
     private val _allDeviceFolderPaths = MutableStateFlow<Set<String>>(emptySet())
@@ -244,6 +253,7 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     fun refresh() {
         viewModelScope.launch {
             _isLoading.value = true
+            _isUpdating.value = true
             _rawRoot.value = repository.scanFolderTree()
             _isLoading.value = false
             _rawRoot.value?.let { current ->
@@ -252,6 +262,7 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
             if (repository.rescanUnindexedMedia()) {
                 _rawRoot.value = repository.scanFolderTree()
             }
+            _isUpdating.value = false
         }
     }
 

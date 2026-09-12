@@ -17,7 +17,7 @@ private val Context.galleryPrefsStore by preferencesDataStore(name = "gallery_ui
  * folderRowSize/mediaRowSize (height) and folderThumbnailWidth/mediaThumbnailWidth (width), so
  * either dimension can be shrunk down to a compact strip or stretched into a large banner-like
  * row. */
-private val THUMBNAIL_SIZE_RANGE_DP = 24..200
+private val THUMBNAIL_SIZE_RANGE_DP = 8..600
 
 enum class ViewType { GRID, LIST }
 
