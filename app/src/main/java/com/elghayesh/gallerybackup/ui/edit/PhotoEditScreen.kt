@@ -39,13 +39,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Crop
-import androidx.compose.material.icons.filled.FilterVintage
 import androidx.compose.material.icons.filled.Redo
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Undo
-import androidx.compose.material.icons.outlined.Lens
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -74,6 +72,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -109,24 +108,9 @@ private enum class CropAspect(val label: String, val ratio: Float) {
     SIXTEEN_NINE("16:9", 16f / 9f),
 }
 
-private enum class PhotoFilter(val label: String) {
-    NONE("None"),
-    VIVID("Vivid"),
-    FADE("Fade"),
-    NOIR("Noir"),
-    VINTAGE("Vintage"),
-    GRAYSCALE("Grayscale"),
-    SEPIA("Sepia"),
-    COOL("Cool"),
-    WARM("Warm"),
-    INVERT("Invert"),
-}
-
 private enum class EditTab(val label: String, val icon: ImageVector) {
     TRANSFORM("Transform", Icons.Filled.Crop),
-    FILTER("Filter", Icons.Filled.FilterVintage),
     ADJUST("Adjust", Icons.Filled.Tune),
-    FOCUS("Focus", Icons.Outlined.Lens),
     STICKER("Sticker", Icons.Filled.TextFields),
 }
 
@@ -138,6 +122,31 @@ private data class NormRect(val left: Float, val top: Float, val right: Float, v
 }
 
 private enum class CropCorner { TOP_LEFT, TOP_RIGHT, BOTTOM_LEFT, BOTTOM_RIGHT }
+
+private data class NormPoint(val x: Float, val y: Float)
+
+/** A general quadrilateral crop -- each corner moved independently rather than kept as an
+ * axis-aligned rectangle -- used by "Free corners" perspective correction: straightening a photo
+ * shot at an angle (phone tilted), where a plain rectangular crop can't fix the resulting
+ * keystone/skew. Applied on save via a true 4-point projective warp (Matrix.setPolyToPoly), not
+ * just a rectangular crop -- see [warpPerspectiveQuad]. */
+private data class CropQuad(
+    val topLeft: NormPoint,
+    val topRight: NormPoint,
+    val bottomLeft: NormPoint,
+    val bottomRight: NormPoint,
+) {
+    companion object {
+        fun fromRect(rect: NormRect) = CropQuad(
+            NormPoint(rect.left, rect.top),
+            NormPoint(rect.right, rect.top),
+            NormPoint(rect.left, rect.bottom),
+            NormPoint(rect.right, rect.bottom),
+        )
+    }
+}
+
+private enum class QuadCorner { TOP_LEFT, TOP_RIGHT, BOTTOM_LEFT, BOTTOM_RIGHT }
 
 private data class TextSticker(
     val id: Long,
@@ -159,13 +168,15 @@ private data class FocusSpot(
 private data class EditState(
     val cropRect: NormRect = NormRect.FULL,
     val cropAspect: CropAspect = CropAspect.FREE,
+    /** Non-null while "Free corners" perspective mode is active -- overrides [cropRect] for both
+     * the on-screen overlay and the actual save, see [CropQuad]'s own doc comment. */
+    val cropQuad: CropQuad? = null,
     val brightness: Float = 0f,
     val contrast: Float = 0f,
     val saturation: Float = 0f,
     val warmth: Float = 0f,
     val highlights: Float = 0f,
     val shadows: Float = 0f,
-    val filter: PhotoFilter = PhotoFilter.NONE,
     val focus: FocusSpot = FocusSpot(),
     val stickers: List<TextSticker> = emptyList(),
 )
@@ -195,7 +206,6 @@ fun PhotoEditScreen(
     var nextStickerId by remember { mutableStateOf(1L) }
     var showOriginal by remember { mutableStateOf(false) }
     var adjustParamIndex by remember { mutableStateOf(0) }
-    var focusParamIndex by remember { mutableStateOf(0) }
 
     fun commit(newState: EditState) {
         undoStack.add(current)
@@ -364,7 +374,7 @@ fun PhotoEditScreen(
                             CropAspect.entries.forEach { a ->
                                 DarkPill(
                                     label = a.label,
-                                    selected = current.cropAspect == a,
+                                    selected = current.cropQuad == null && current.cropAspect == a,
                                     onClick = {
                                         val bitmap = workingBitmap
                                         val rect = if (a == CropAspect.FREE || bitmap == null) {
@@ -372,65 +382,61 @@ fun PhotoEditScreen(
                                         } else {
                                             applyAspectLock(current.cropRect, a.ratio, bitmap.width, bitmap.height)
                                         }
-                                        commit(current.copy(cropAspect = a, cropRect = rect))
+                                        commit(current.copy(cropAspect = a, cropRect = rect, cropQuad = null))
                                     },
                                 )
                             }
-                        }
-                    }
-                    EditTab.FILTER -> Row(
-                        Modifier.background(panelBg).fillMaxWidth().horizontalScroll(rememberScrollState())
-                            .padding(horizontal = 12.dp, vertical = 12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        PhotoFilter.entries.forEach { f ->
-                            DarkPill(label = f.label, selected = current.filter == f, onClick = { commit(current.copy(filter = f)) })
-                        }
-                    }
-                    EditTab.ADJUST -> GestureAdjustPanel(
-                        background = panelBg,
-                        labels = listOf("Brightness", "Contrast", "Saturation", "Warmth", "Highlights", "Shadows"),
-                        values = listOf(
-                            current.brightness, current.contrast, current.saturation,
-                            current.warmth, current.highlights, current.shadows,
-                        ),
-                        ranges = List(6) { -100f..100f },
-                        selectedIndex = adjustParamIndex,
-                        onSelect = { adjustParamIndex = it },
-                        onChange = { index, value ->
-                            mutateLive(
-                                when (index) {
-                                    0 -> current.copy(brightness = value)
-                                    1 -> current.copy(contrast = value)
-                                    2 -> current.copy(saturation = value)
-                                    3 -> current.copy(warmth = value)
-                                    4 -> current.copy(highlights = value)
-                                    else -> current.copy(shadows = value)
+                            DarkPill(
+                                label = "Free corners",
+                                selected = current.cropQuad != null,
+                                onClick = {
+                                    commit(
+                                        if (current.cropQuad != null) {
+                                            current.copy(cropQuad = null)
+                                        } else {
+                                            current.copy(cropQuad = CropQuad.fromRect(current.cropRect))
+                                        },
+                                    )
                                 },
                             )
-                        },
-                        onChangeFinished = { endLiveMutation() },
-                    )
-                    EditTab.FOCUS -> Column {
-                        Text(
-                            "Drag the circle on the photo to move the spotlight once strength is above zero.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color.White.copy(alpha = 0.6f),
-                            modifier = Modifier.background(panelBg).fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                        )
+                        }
+                    }
+                    EditTab.ADJUST -> Column {
+                        if (current.focus.strength > 0f) {
+                            Text(
+                                "Drag the circle on the photo to move the spotlight.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color.White.copy(alpha = 0.6f),
+                                modifier = Modifier.background(panelBg).fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                            )
+                        }
                         GestureAdjustPanel(
                             background = panelBg,
-                            labels = listOf("Strength", "Spotlight size"),
-                            values = listOf(current.focus.strength, current.focus.radiusNorm * 100f),
-                            ranges = listOf(0f..100f, 10f..80f),
-                            selectedIndex = focusParamIndex,
-                            onSelect = { focusParamIndex = it },
+                            labels = listOf(
+                                "Brightness", "Contrast", "Saturation", "Warmth", "Highlights", "Shadows",
+                                "Focus strength", "Spotlight size",
+                            ),
+                            values = listOf(
+                                current.brightness, current.contrast, current.saturation,
+                                current.warmth, current.highlights, current.shadows,
+                                current.focus.strength, current.focus.radiusNorm * 100f,
+                            ),
+                            ranges = List(6) { -100f..100f } + listOf(0f..100f, 10f..80f),
+                            selectedIndex = adjustParamIndex,
+                            onSelect = { adjustParamIndex = it },
                             onChange = { index, value ->
                                 mutateLive(
-                                    if (index == 0) {
-                                        current.copy(focus = current.focus.copy(strength = value.coerceIn(0f, 100f)))
-                                    } else {
-                                        current.copy(focus = current.focus.copy(radiusNorm = (value / 100f).coerceIn(0.1f, 0.8f)))
+                                    when (index) {
+                                        0 -> current.copy(brightness = value)
+                                        1 -> current.copy(contrast = value)
+                                        2 -> current.copy(saturation = value)
+                                        3 -> current.copy(warmth = value)
+                                        4 -> current.copy(highlights = value)
+                                        5 -> current.copy(shadows = value)
+                                        6 -> current.copy(focus = current.focus.copy(strength = value.coerceIn(0f, 100f)))
+                                        else -> current.copy(
+                                            focus = current.focus.copy(radiusNorm = (value / 100f).coerceIn(0.1f, 0.8f)),
+                                        )
                                     },
                                 )
                             },
@@ -538,21 +544,34 @@ fun PhotoEditScreen(
                                 )
                             }
                             if (tab == EditTab.TRANSFORM) {
-                                CropOverlay(
-                                    rect = current.cropRect,
-                                    boxSize = boxSize,
-                                    density = density,
-                                    onCornerDrag = { corner, dxNorm, dyNorm ->
-                                        var rect = updatedCropRect(current.cropRect, corner, dxNorm, dyNorm)
-                                        if (current.cropAspect != CropAspect.FREE && bitmap.width > 0 && bitmap.height > 0) {
-                                            rect = applyAspectLock(rect, current.cropAspect.ratio, bitmap.width, bitmap.height)
-                                        }
-                                        mutateLive(current.copy(cropRect = rect))
-                                    },
-                                    onDragEnd = { endLiveMutation() },
-                                )
+                                val quad = current.cropQuad
+                                if (quad != null) {
+                                    PerspectiveCropOverlay(
+                                        quad = quad,
+                                        boxSize = boxSize,
+                                        density = density,
+                                        onCornerDrag = { corner, dxNorm, dyNorm ->
+                                            mutateLive(current.copy(cropQuad = updatedCropQuad(quad, corner, dxNorm, dyNorm)))
+                                        },
+                                        onDragEnd = { endLiveMutation() },
+                                    )
+                                } else {
+                                    CropOverlay(
+                                        rect = current.cropRect,
+                                        boxSize = boxSize,
+                                        density = density,
+                                        onCornerDrag = { corner, dxNorm, dyNorm ->
+                                            var rect = updatedCropRect(current.cropRect, corner, dxNorm, dyNorm)
+                                            if (current.cropAspect != CropAspect.FREE && bitmap.width > 0 && bitmap.height > 0) {
+                                                rect = applyAspectLock(rect, current.cropAspect.ratio, bitmap.width, bitmap.height)
+                                            }
+                                            mutateLive(current.copy(cropRect = rect))
+                                        },
+                                        onDragEnd = { endLiveMutation() },
+                                    )
+                                }
                             }
-                            if (tab == EditTab.FOCUS && current.focus.strength > 0f) {
+                            if (tab == EditTab.ADJUST && current.focus.strength > 0f) {
                                 FocusHandle(
                                     focus = current.focus,
                                     boxSize = boxSize,
@@ -606,11 +625,15 @@ private fun DarkPill(label: String, selected: Boolean, onClick: () -> Unit) {
 }
 
 /**
- * The Snapseed-style fine-tune control: no visible slider bar over the photo. Swipe vertically to
- * pick which parameter you're adjusting (shown as a row of dots), swipe horizontally to change its
- * value, read the live number in the middle. The gesture commits to whichever direction the first
- * few pixels of movement suggest and stays in that mode for the rest of the drag, so a slightly
- * diagonal swipe doesn't flicker between switching parameters and changing a value.
+ * The Snapseed-style fine-tune control: no visible slider bar over the photo. Swipe horizontally
+ * to move between parameters (shown as a row of dots, also directly tappable), swipe vertically
+ * to change the current one's value, read the live number in the middle. The gesture commits to
+ * whichever direction the first few pixels of movement suggest and stays in that mode for the
+ * rest of the drag, so a slightly diagonal swipe doesn't flicker between switching parameters and
+ * changing a value. (Horizontal-switches/vertical-changes, not the other way round, because the
+ * dots this switches between are themselves laid out in a horizontal row -- a horizontal swipe
+ * changing the value instead reads as the gesture doing the opposite of what it looks like it
+ * should.)
  */
 @Composable
 private fun GestureAdjustPanel(
@@ -640,7 +663,7 @@ private fun GestureAdjustPanel(
             .background(background)
             .onSizeChanged { panelWidthPx = it.width.toFloat().coerceAtLeast(1f) }
             .pointerInput(selectedIndex, labels.size) {
-                var mode = 0 // 0 = undecided, 1 = switching parameter, 2 = changing its value
+                var mode = 0 // 0 = undecided, 1 = switching parameter (horizontal), 2 = changing its value (vertical)
                 var accDx = 0f
                 var accDy = 0f
                 var startValue = 0f
@@ -653,8 +676,8 @@ private fun GestureAdjustPanel(
                     },
                     onDragEnd = {
                         if (mode == 1) {
-                            if (accDy < -32f && selectedIndex > 0) onSelect(selectedIndex - 1)
-                            else if (accDy > 32f && selectedIndex < labels.lastIndex) onSelect(selectedIndex + 1)
+                            if (accDx < -32f && selectedIndex > 0) onSelect(selectedIndex - 1)
+                            else if (accDx > 32f && selectedIndex < labels.lastIndex) onSelect(selectedIndex + 1)
                         } else if (mode == 2) {
                             onChangeFinished()
                         }
@@ -665,12 +688,14 @@ private fun GestureAdjustPanel(
                     accDx += dragAmount.x
                     accDy += dragAmount.y
                     if (mode == 0 && (abs(accDx) > 12f || abs(accDy) > 12f)) {
-                        mode = if (abs(accDx) > abs(accDy)) 2 else 1
+                        mode = if (abs(accDx) > abs(accDy)) 1 else 2
                     }
                     if (mode == 2) {
                         val range = ranges.getOrElse(selectedIndex) { -100f..100f }
                         val span = range.endInclusive - range.start
-                        val delta = accDx / panelWidthPx * span
+                        // Dragging UP increases the value (like a vertical slider) -- dragAmount.y is
+                        // positive moving down, hence the negation.
+                        val delta = -accDy / panelWidthPx * span
                         onChange(selectedIndex, (startValue + delta).coerceIn(range.start, range.endInclusive))
                     }
                 }
@@ -686,14 +711,22 @@ private fun GestureAdjustPanel(
             fontWeight = FontWeight.Bold,
         )
         Spacer(Modifier.height(6.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
             labels.indices.forEach { i ->
+                // A generous tappable area around each small dot -- jumping straight to a
+                // parameter by tapping its dot, rather than only via the swipe gesture above, in
+                // case that gesture's direction doesn't read as obvious to a given user.
                 Box(
-                    Modifier
-                        .size(6.dp)
-                        .clip(CircleShape)
-                        .background(if (i == selectedIndex) Color.White else Color.White.copy(alpha = 0.3f)),
-                )
+                    Modifier.size(20.dp).clip(CircleShape).clickable { onSelect(i) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Box(
+                        Modifier
+                            .size(6.dp)
+                            .clip(CircleShape)
+                            .background(if (i == selectedIndex) Color.White else Color.White.copy(alpha = 0.3f)),
+                    )
+                }
             }
         }
     }
@@ -867,6 +900,114 @@ private fun CropOverlay(
     )
 }
 
+/**
+ * The "Free corners" perspective-crop overlay: draws the quad's own outline (a general
+ * quadrilateral, not necessarily a rectangle) and one independently-draggable handle per corner --
+ * unlike [CropOverlay]'s corners, moving one here never affects the others. Used to correct a
+ * photo shot at an angle (see [CropQuad] and [warpPerspectiveQuad]).
+ */
+@Composable
+private fun PerspectiveCropOverlay(
+    quad: CropQuad,
+    boxSize: IntSize,
+    density: androidx.compose.ui.unit.Density,
+    onCornerDrag: (QuadCorner, Float, Float) -> Unit,
+    onDragEnd: () -> Unit,
+) {
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        fun toPx(p: NormPoint) = Offset(p.x * size.width, p.y * size.height)
+        val tl = toPx(quad.topLeft)
+        val tr = toPx(quad.topRight)
+        val bl = toPx(quad.bottomLeft)
+        val br = toPx(quad.bottomRight)
+        val path = Path().apply {
+            moveTo(tl.x, tl.y)
+            lineTo(tr.x, tr.y)
+            lineTo(br.x, br.y)
+            lineTo(bl.x, bl.y)
+            close()
+        }
+        drawPath(path, color = Color.White, style = Stroke(width = 2.dp.toPx()))
+    }
+    listOf(
+        QuadCorner.TOP_LEFT to quad.topLeft,
+        QuadCorner.TOP_RIGHT to quad.topRight,
+        QuadCorner.BOTTOM_LEFT to quad.bottomLeft,
+        QuadCorner.BOTTOM_RIGHT to quad.bottomRight,
+    ).forEach { (corner, point) ->
+        Box(
+            Modifier
+                .normOffset(point.x, point.y, boxSize, density, centerOnPointDp = 40.dp)
+                .size(40.dp)
+                .pointerInput(boxSize, corner) {
+                    detectDragImmediate(onDragEnd = { onDragEnd() }) { change, dragAmount ->
+                        change.consume()
+                        if (boxSize.width > 0 && boxSize.height > 0) {
+                            onCornerDrag(corner, dragAmount.x / boxSize.width, dragAmount.y / boxSize.height)
+                        }
+                    }
+                }
+                .background(Color.White, CircleShape)
+                .border(2.dp, Color.Black, CircleShape),
+        )
+    }
+}
+
+private fun updatedCropQuad(quad: CropQuad, corner: QuadCorner, dxNorm: Float, dyNorm: Float): CropQuad {
+    fun moved(p: NormPoint) = NormPoint((p.x + dxNorm).coerceIn(0f, 1f), (p.y + dyNorm).coerceIn(0f, 1f))
+    return when (corner) {
+        QuadCorner.TOP_LEFT -> quad.copy(topLeft = moved(quad.topLeft))
+        QuadCorner.TOP_RIGHT -> quad.copy(topRight = moved(quad.topRight))
+        QuadCorner.BOTTOM_LEFT -> quad.copy(bottomLeft = moved(quad.bottomLeft))
+        QuadCorner.BOTTOM_RIGHT -> quad.copy(bottomRight = moved(quad.bottomRight))
+    }
+}
+
+/** The quad's axis-aligned bounding box -- used as an approximation of "the crop rect" for
+ * positioning stickers/focus relative to a perspective-warped output (see [saveEditedPhoto]),
+ * since those overlays aren't themselves warped through the same projective transform. */
+private fun boundingRectOf(quad: CropQuad): NormRect {
+    val xs = listOf(quad.topLeft.x, quad.topRight.x, quad.bottomLeft.x, quad.bottomRight.x)
+    val ys = listOf(quad.topLeft.y, quad.topRight.y, quad.bottomLeft.y, quad.bottomRight.y)
+    return NormRect(xs.min(), ys.min(), xs.max(), ys.max())
+}
+
+/**
+ * Warps the quadrilateral [quad] (its 4 corners, normalized 0..1 within [source]) onto a
+ * straightened rectangle via a true projective transform -- Matrix.setPolyToPoly with 4 point
+ * pairs performs actual perspective correction, not just an affine skew -- which is what corrects
+ * a photo shot at an angle/with keystone distortion, unlike a plain axis-aligned crop. Output size
+ * is derived from the quad's own average edge lengths in source pixels, so a wide, shallow quad
+ * still maps to a roughly similarly-proportioned (now rectangular) output.
+ */
+private fun warpPerspectiveQuad(source: Bitmap, quad: CropQuad): Bitmap {
+    val w = source.width.toFloat()
+    val h = source.height.toFloat()
+    val tl = floatArrayOf(quad.topLeft.x * w, quad.topLeft.y * h)
+    val tr = floatArrayOf(quad.topRight.x * w, quad.topRight.y * h)
+    val bl = floatArrayOf(quad.bottomLeft.x * w, quad.bottomLeft.y * h)
+    val br = floatArrayOf(quad.bottomRight.x * w, quad.bottomRight.y * h)
+
+    fun dist(a: FloatArray, b: FloatArray): Float {
+        val dx = a[0] - b[0]
+        val dy = a[1] - b[1]
+        return kotlin.math.sqrt(dx * dx + dy * dy)
+    }
+    val outW = (((dist(tl, tr) + dist(bl, br)) / 2f).roundToInt()).coerceAtLeast(1)
+    val outH = (((dist(tl, bl) + dist(tr, br)) / 2f).roundToInt()).coerceAtLeast(1)
+
+    val src = floatArrayOf(tl[0], tl[1], tr[0], tr[1], bl[0], bl[1], br[0], br[1])
+    val dst = floatArrayOf(0f, 0f, outW.toFloat(), 0f, 0f, outH.toFloat(), outW.toFloat(), outH.toFloat())
+    val matrix = Matrix()
+    matrix.setPolyToPoly(src, 0, dst, 0, 4)
+
+    val output = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+    val canvas = android.graphics.Canvas(output)
+    val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    canvas.drawBitmap(source, matrix, paint)
+    return output
+}
+
 private fun updatedCropRect(rect: NormRect, corner: CropCorner, dxNorm: Float, dyNorm: Float): NormRect {
     val minSize = 0.08f
     return when (corner) {
@@ -1010,75 +1151,7 @@ private fun buildColorMatrix(state: EditState): android.graphics.ColorMatrix {
             ),
         ),
     )
-    filterMatrixOrNull(state.filter)?.let { result.postConcat(it) }
     return result
-}
-
-private fun filterMatrixOrNull(filter: PhotoFilter): android.graphics.ColorMatrix? = when (filter) {
-    PhotoFilter.NONE -> null
-    PhotoFilter.GRAYSCALE -> android.graphics.ColorMatrix().apply { setSaturation(0f) }
-    PhotoFilter.SEPIA -> android.graphics.ColorMatrix(
-        floatArrayOf(
-            0.393f, 0.769f, 0.189f, 0f, 0f,
-            0.349f, 0.686f, 0.168f, 0f, 0f,
-            0.272f, 0.534f, 0.131f, 0f, 0f,
-            0f, 0f, 0f, 1f, 0f,
-        ),
-    )
-    PhotoFilter.COOL -> android.graphics.ColorMatrix(
-        floatArrayOf(
-            1f, 0f, 0f, 0f, -10f,
-            0f, 1f, 0f, 0f, 0f,
-            0f, 0f, 1f, 0f, 20f,
-            0f, 0f, 0f, 1f, 0f,
-        ),
-    )
-    PhotoFilter.WARM -> android.graphics.ColorMatrix(
-        floatArrayOf(
-            1f, 0f, 0f, 0f, 20f,
-            0f, 1f, 0f, 0f, 10f,
-            0f, 0f, 1f, 0f, -10f,
-            0f, 0f, 0f, 1f, 0f,
-        ),
-    )
-    PhotoFilter.INVERT -> android.graphics.ColorMatrix(
-        floatArrayOf(
-            -1f, 0f, 0f, 0f, 255f,
-            0f, -1f, 0f, 0f, 255f,
-            0f, 0f, -1f, 0f, 255f,
-            0f, 0f, 0f, 1f, 0f,
-        ),
-    )
-    PhotoFilter.VIVID -> android.graphics.ColorMatrix().apply { setSaturation(1.5f) }
-    PhotoFilter.FADE -> android.graphics.ColorMatrix(
-        floatArrayOf(
-            0.9f, 0f, 0f, 0f, 25f,
-            0f, 0.9f, 0f, 0f, 25f,
-            0f, 0f, 0.9f, 0f, 25f,
-            0f, 0f, 0f, 1f, 0f,
-        ),
-    )
-    PhotoFilter.NOIR -> android.graphics.ColorMatrix().apply {
-        setSaturation(0f)
-        postConcat(
-            android.graphics.ColorMatrix(
-                floatArrayOf(
-                    1.3f, 0f, 0f, 0f, -25f,
-                    0f, 1.3f, 0f, 0f, -25f,
-                    0f, 0f, 1.3f, 0f, -25f,
-                    0f, 0f, 0f, 1f, 0f,
-                ),
-            ),
-        )
-    }
-    PhotoFilter.VINTAGE -> android.graphics.ColorMatrix(
-        floatArrayOf(
-            0.6f, 0.3f, 0.1f, 0f, 15f,
-            0.2f, 0.65f, 0.15f, 0f, 10f,
-            0.15f, 0.25f, 0.5f, 0f, 5f,
-            0f, 0f, 0f, 1f, 0f,
-        ),
-    )
 }
 
 private fun rotateBitmap90(bitmap: Bitmap): Bitmap {
@@ -1116,8 +1189,17 @@ private suspend fun saveEditedPhoto(
     original: MediaItem,
     replace: Boolean,
 ) = withContext(Dispatchers.IO) {
-    val cropRect = cropRectFor(bitmap.width, bitmap.height, state.cropRect)
-    val cropped = Bitmap.createBitmap(bitmap, cropRect.left, cropRect.top, cropRect.width(), cropRect.height())
+    val quad = state.cropQuad
+    val cropped = if (quad != null) {
+        warpPerspectiveQuad(bitmap, quad)
+    } else {
+        val cropRect = cropRectFor(bitmap.width, bitmap.height, state.cropRect)
+        Bitmap.createBitmap(bitmap, cropRect.left, cropRect.top, cropRect.width(), cropRect.height())
+    }
+    // Stickers/focus below are positioned relative to this rect -- exact for a plain rectangle
+    // crop, an approximation (the quad's own axis-aligned bounding box) for a perspective quad,
+    // since those overlays aren't themselves warped through the same projective transform.
+    val effectiveCropRect = quad?.let { boundingRectOf(it) } ?: state.cropRect
 
     val output = Bitmap.createBitmap(cropped.width, cropped.height, Bitmap.Config.ARGB_8888)
     val canvas = android.graphics.Canvas(output)
@@ -1125,8 +1207,8 @@ private suspend fun saveEditedPhoto(
     canvas.drawBitmap(cropped, 0f, 0f, paint)
 
     if (state.focus.strength > 0f) {
-        val cx = (state.focus.xNorm - state.cropRect.left) / (state.cropRect.right - state.cropRect.left) * output.width
-        val cy = (state.focus.yNorm - state.cropRect.top) / (state.cropRect.bottom - state.cropRect.top) * output.height
+        val cx = (state.focus.xNorm - effectiveCropRect.left) / (effectiveCropRect.right - effectiveCropRect.left) * output.width
+        val cy = (state.focus.yNorm - effectiveCropRect.top) / (effectiveCropRect.bottom - effectiveCropRect.top) * output.height
         val radius = state.focus.radiusNorm * min(output.width, output.height)
         val alpha = ((state.focus.strength / 100f).coerceIn(0f, 1f) * 0.7f * 255).toInt()
         val shader = android.graphics.RadialGradient(
@@ -1143,8 +1225,8 @@ private suspend fun saveEditedPhoto(
             textSize = output.width / 18f
         }
         for (sticker in state.stickers) {
-            val relX = (sticker.xNorm - state.cropRect.left) / (state.cropRect.right - state.cropRect.left)
-            val relY = (sticker.yNorm - state.cropRect.top) / (state.cropRect.bottom - state.cropRect.top)
+            val relX = (sticker.xNorm - effectiveCropRect.left) / (effectiveCropRect.right - effectiveCropRect.left)
+            val relY = (sticker.yNorm - effectiveCropRect.top) / (effectiveCropRect.bottom - effectiveCropRect.top)
             textPaint.color = sticker.colorArgb.toInt()
             canvas.drawText(sticker.text, relX * output.width, relY * output.height, textPaint)
         }
