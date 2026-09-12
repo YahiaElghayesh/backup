@@ -85,6 +85,7 @@ fun FolderTreePickerDialog(
     val includedFolders by viewModel.includedFolders.collectAsState()
     val folderSort by viewModel.folderSort.collectAsState()
     val folderSortOverrides by viewModel.folderSortOverrides.collectAsState()
+    val folderThumbnailWidth by viewModel.folderThumbnailWidth.collectAsState()
 
     // Same promotion (a pinned folder is hidden from its real parent's own listing, and -- at the
     // very top level -- surfaces instead as its own separate tile there) and sort order the
@@ -180,6 +181,7 @@ fun FolderTreePickerDialog(
                                 cover = folderCovers[folder.path],
                                 includedFolders = includedFolders,
                                 thumbnailSizeDp = folderRowSize,
+                                thumbnailWidthDp = folderThumbnailWidth,
                                 onClick = { currentPath = folder.path },
                                 onLongClick = {},
                             )

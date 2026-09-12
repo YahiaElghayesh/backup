@@ -125,6 +125,11 @@ class GalleryPreferencesRepository(private val context: Context) {
         val MEDIA_GRID_COLUMNS = intPreferencesKey("media_grid_columns")
         val FOLDER_ROW_SIZE = intPreferencesKey("folder_row_size")
         val MEDIA_ROW_SIZE = intPreferencesKey("media_row_size")
+        /** List-view thumbnail WIDTH (dp), independent of [FOLDER_ROW_SIZE]/[MEDIA_ROW_SIZE]
+         * (which is the thumbnail's height) -- together these let a list-row thumbnail be a
+         * rectangle instead of always a square. */
+        val FOLDER_THUMBNAIL_WIDTH = intPreferencesKey("folder_thumbnail_width")
+        val MEDIA_THUMBNAIL_WIDTH = intPreferencesKey("media_thumbnail_width")
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val ACCENT_COLOR = stringPreferencesKey("accent_color")
         val FOLDER_SORT_CRITERION = stringPreferencesKey("folder_sort_criterion")
@@ -169,14 +174,25 @@ class GalleryPreferencesRepository(private val context: Context) {
         (prefs[Keys.MEDIA_GRID_COLUMNS] ?: 3).coerceIn(2, 6)
     }
 
-    /** List-view row thumbnail size (dp) for folder rows -- independent of [mediaRowSize], the grid-view analog of [folderGridColumns]. */
+    /** List-view row thumbnail HEIGHT (dp) for folder rows -- independent of [mediaRowSize], the grid-view analog of [folderGridColumns]. */
     val folderRowSize: Flow<Int> = context.galleryPrefsStore.data.map { prefs ->
         (prefs[Keys.FOLDER_ROW_SIZE] ?: 48).coerceIn(40, 112)
     }
 
-    /** List-view row thumbnail size (dp) for photo/video rows -- independent of [folderRowSize]. */
+    /** List-view row thumbnail HEIGHT (dp) for photo/video rows -- independent of [folderRowSize]. */
     val mediaRowSize: Flow<Int> = context.galleryPrefsStore.data.map { prefs ->
         (prefs[Keys.MEDIA_ROW_SIZE] ?: 48).coerceIn(40, 112)
+    }
+
+    /** List-view row thumbnail WIDTH (dp) for folder rows -- independent of [folderRowSize] (its
+     * height), so the thumbnail can be a rectangle rather than always a square. */
+    val folderThumbnailWidth: Flow<Int> = context.galleryPrefsStore.data.map { prefs ->
+        (prefs[Keys.FOLDER_THUMBNAIL_WIDTH] ?: 48).coerceIn(40, 112)
+    }
+
+    /** List-view row thumbnail WIDTH (dp) for photo/video rows -- independent of [mediaRowSize] (its height). */
+    val mediaThumbnailWidth: Flow<Int> = context.galleryPrefsStore.data.map { prefs ->
+        (prefs[Keys.MEDIA_THUMBNAIL_WIDTH] ?: 48).coerceIn(40, 112)
     }
 
     val themeMode: Flow<ThemeMode> = context.galleryPrefsStore.data.map { prefs ->
@@ -298,6 +314,14 @@ class GalleryPreferencesRepository(private val context: Context) {
 
     suspend fun setMediaRowSize(sizeDp: Int) {
         context.galleryPrefsStore.edit { it[Keys.MEDIA_ROW_SIZE] = sizeDp.coerceIn(40, 112) }
+    }
+
+    suspend fun setFolderThumbnailWidth(widthDp: Int) {
+        context.galleryPrefsStore.edit { it[Keys.FOLDER_THUMBNAIL_WIDTH] = widthDp.coerceIn(40, 112) }
+    }
+
+    suspend fun setMediaThumbnailWidth(widthDp: Int) {
+        context.galleryPrefsStore.edit { it[Keys.MEDIA_THUMBNAIL_WIDTH] = widthDp.coerceIn(40, 112) }
     }
 
     suspend fun setThemeMode(mode: ThemeMode) {

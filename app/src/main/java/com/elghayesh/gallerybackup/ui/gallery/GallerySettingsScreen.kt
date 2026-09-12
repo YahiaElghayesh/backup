@@ -230,6 +230,8 @@ private fun LayoutSettingsScreen(viewModel: GalleryViewModel, onBack: () -> Unit
     val mediaGridColumns by viewModel.mediaGridColumns.collectAsState()
     val folderRowSize by viewModel.folderRowSize.collectAsState()
     val mediaRowSize by viewModel.mediaRowSize.collectAsState()
+    val folderThumbnailWidth by viewModel.folderThumbnailWidth.collectAsState()
+    val mediaThumbnailWidth by viewModel.mediaThumbnailWidth.collectAsState()
     val pinContentToBottom by viewModel.pinContentToBottom.collectAsState()
 
     SettingsSubScaffold(title = "Layout", onBack = onBack) { modifier ->
@@ -250,6 +252,8 @@ private fun LayoutSettingsScreen(viewModel: GalleryViewModel, onBack: () -> Unit
                         onGridColumnsChange = { viewModel.setFolderGridColumns(it) },
                         rowSize = folderRowSize,
                         onRowSizeChange = { viewModel.setFolderRowSize(it) },
+                        thumbnailWidth = folderThumbnailWidth,
+                        onThumbnailWidthChange = { viewModel.setFolderThumbnailWidth(it) },
                     )
                     Spacer(Modifier.height(20.dp))
                     HorizontalDivider()
@@ -262,6 +266,8 @@ private fun LayoutSettingsScreen(viewModel: GalleryViewModel, onBack: () -> Unit
                         onGridColumnsChange = { viewModel.setMediaGridColumns(it) },
                         rowSize = mediaRowSize,
                         onRowSizeChange = { viewModel.setMediaRowSize(it) },
+                        thumbnailWidth = mediaThumbnailWidth,
+                        onThumbnailWidthChange = { viewModel.setMediaThumbnailWidth(it) },
                     )
                 }
                 HorizontalDivider()
@@ -357,6 +363,8 @@ private fun LayoutTargetSettings(
     onGridColumnsChange: (Int) -> Unit,
     rowSize: Int,
     onRowSizeChange: (Int) -> Unit,
+    thumbnailWidth: Int,
+    onThumbnailWidthChange: (Int) -> Unit,
 ) {
     Text(label, style = MaterialTheme.typography.titleSmall)
     Spacer(Modifier.height(8.dp))
@@ -379,10 +387,18 @@ private fun LayoutTargetSettings(
             steps = 3,
         )
     } else {
-        Text("${rowSize}dp row size", style = MaterialTheme.typography.bodyMedium)
+        Text("${rowSize}dp thumbnail height", style = MaterialTheme.typography.bodyMedium)
         Slider(
             value = rowSize.toFloat(),
             onValueChange = { onRowSizeChange(it.roundToInt()) },
+            valueRange = 40f..112f,
+            steps = 8,
+        )
+        Spacer(Modifier.height(8.dp))
+        Text("${thumbnailWidth}dp thumbnail width", style = MaterialTheme.typography.bodyMedium)
+        Slider(
+            value = thumbnailWidth.toFloat(),
+            onValueChange = { onThumbnailWidthChange(it.roundToInt()) },
             valueRange = 40f..112f,
             steps = 8,
         )

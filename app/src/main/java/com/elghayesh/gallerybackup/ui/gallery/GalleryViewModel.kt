@@ -123,6 +123,10 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         prefs.folderRowSize.stateIn(viewModelScope, SharingStarted.Eagerly, 48)
     val mediaRowSize: StateFlow<Int> =
         prefs.mediaRowSize.stateIn(viewModelScope, SharingStarted.Eagerly, 48)
+    val folderThumbnailWidth: StateFlow<Int> =
+        prefs.folderThumbnailWidth.stateIn(viewModelScope, SharingStarted.Eagerly, 48)
+    val mediaThumbnailWidth: StateFlow<Int> =
+        prefs.mediaThumbnailWidth.stateIn(viewModelScope, SharingStarted.Eagerly, 48)
     val themeMode: StateFlow<ThemeMode> =
         prefs.themeMode.stateIn(viewModelScope, SharingStarted.Eagerly, ThemeMode.SYSTEM)
     val accentColor: StateFlow<AccentColor> =
@@ -261,6 +265,8 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     fun setMediaGridColumns(columns: Int) = viewModelScope.launch { prefs.setMediaGridColumns(columns) }
     fun setFolderRowSize(sizeDp: Int) = viewModelScope.launch { prefs.setFolderRowSize(sizeDp) }
     fun setMediaRowSize(sizeDp: Int) = viewModelScope.launch { prefs.setMediaRowSize(sizeDp) }
+    fun setFolderThumbnailWidth(widthDp: Int) = viewModelScope.launch { prefs.setFolderThumbnailWidth(widthDp) }
+    fun setMediaThumbnailWidth(widthDp: Int) = viewModelScope.launch { prefs.setMediaThumbnailWidth(widthDp) }
     fun setThemeMode(mode: ThemeMode) = viewModelScope.launch { prefs.setThemeMode(mode) }
     fun setAccentColor(color: AccentColor) = viewModelScope.launch { prefs.setAccentColor(color) }
     /** Applies [setting] either as [path]'s own override ([thisFolderOnly] true, from the sort
