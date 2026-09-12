@@ -77,6 +77,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathOperation
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -626,9 +627,17 @@ fun PhotoEditScreen(
                         // entirely -- those still apply to the underlying photo (see
                         // saveEditedPhoto, which composites the fully-edited photo onto the
                         // canvas as one last step), just aren't interactively editable while
-                        // viewing this composited preview.
+                        // viewing this composited preview. Previously passed the raw, uncropped
+                        // `bitmap` here -- so switching to Canvas after a crop (rectangular or
+                        // Free corners) made it look like the crop had been discarded and the
+                        // full original photo was back, even though saveEditedPhoto was already
+                        // compositing the correctly-cropped version all along. Applying the same
+                        // applyCrop used at save time keeps this preview honest.
+                        val croppedForCanvas = remember(bitmap, current.cropRect, current.cropQuad, current.cropQuadBackgroundColorSeed) {
+                            applyCrop(bitmap, current)
+                        }
                         CanvasPreview(
-                            bitmap = bitmap,
+                            bitmap = croppedForCanvas,
                             canvasLayer = canvasLayer,
                             density = density,
                             colorFilter = colorFilter,
@@ -1072,10 +1081,10 @@ private fun CropOverlay(
 }
 
 /**
- * The "Free corners" perspective-crop overlay: draws the quad's own outline (a general
- * quadrilateral, not necessarily a rectangle) and one independently-draggable handle per corner --
- * unlike [CropOverlay]'s corners, moving one here never affects the others. Used to correct a
- * photo shot at an angle (see [CropQuad] and [warpPerspectiveQuad]).
+ * The "Free corners" crop overlay: draws the quad's own outline (a general quadrilateral, not
+ * necessarily a rectangle) and one independently-draggable handle per corner -- unlike
+ * [CropOverlay]'s corners, moving one here never affects the others. Lets an arbitrarily-shaped
+ * (not just rectangular) region be cropped out -- see [CropQuad] and [cropQuadOntoBackground].
  */
 @Composable
 private fun PerspectiveCropOverlay(
@@ -1098,6 +1107,12 @@ private fun PerspectiveCropOverlay(
             lineTo(bl.x, bl.y)
             close()
         }
+        // Dims everything outside the quad -- previously this overlay only drew the outline
+        // itself with no scrim at all, which (especially against a busy or light-colored photo)
+        // made the quad's own edges hard to see and the selection hard to judge, unlike
+        // CropOverlay's rectangular crop, which already dims outside its own selection.
+        val outside = Path().apply { op(Path().apply { addRect(androidx.compose.ui.geometry.Rect(Offset.Zero, size)) }, path, PathOperation.Difference) }
+        drawPath(outside, color = Color.Black.copy(alpha = 0.55f))
         drawPath(path, color = Color.White, style = Stroke(width = 2.dp.toPx()))
         // Corner brackets, drawn INWARD along the quad's own two edges meeting at each corner --
         // guaranteed to stay inside the quad regardless of its shape, unlike the draggable circle
@@ -1444,6 +1459,20 @@ private fun cropRectFor(bitmapW: Int, bitmapH: Int, rect: NormRect): Rect {
     return Rect(left, top, right, bottom)
 }
 
+/** The crop step alone (quad mask-onto-background, or a plain rectangle crop) -- shared between
+ * [saveEditedPhoto] and the live Canvas-tab preview, so what Canvas mode previews placing onto its
+ * background is exactly the same cropped photo the save will actually use, not the original
+ * uncropped bitmap. */
+private fun applyCrop(bitmap: Bitmap, state: EditState): Bitmap {
+    val quad = state.cropQuad
+    return if (quad != null) {
+        cropQuadOntoBackground(bitmap, quad, state.cropQuadBackgroundColorSeed)
+    } else {
+        val cropRect = cropRectFor(bitmap.width, bitmap.height, state.cropRect)
+        Bitmap.createBitmap(bitmap, cropRect.left, cropRect.top, cropRect.width(), cropRect.height())
+    }
+}
+
 private suspend fun saveEditedPhoto(
     context: Context,
     bitmap: Bitmap,
@@ -1451,17 +1480,11 @@ private suspend fun saveEditedPhoto(
     original: MediaItem,
     replace: Boolean,
 ) = withContext(Dispatchers.IO) {
-    val quad = state.cropQuad
-    val cropped = if (quad != null) {
-        cropQuadOntoBackground(bitmap, quad, state.cropQuadBackgroundColorSeed)
-    } else {
-        val cropRect = cropRectFor(bitmap.width, bitmap.height, state.cropRect)
-        Bitmap.createBitmap(bitmap, cropRect.left, cropRect.top, cropRect.width(), cropRect.height())
-    }
+    val cropped = applyCrop(bitmap, state)
     // Stickers/focus below are positioned relative to this rect -- exact for a plain rectangle
     // crop, an approximation (the quad's own axis-aligned bounding box) for a perspective quad,
     // since those overlays aren't themselves warped through the same projective transform.
-    val effectiveCropRect = quad?.let { boundingRectOf(it) } ?: state.cropRect
+    val effectiveCropRect = state.cropQuad?.let { boundingRectOf(it) } ?: state.cropRect
 
     val output = Bitmap.createBitmap(cropped.width, cropped.height, Bitmap.Config.ARGB_8888)
     val canvas = android.graphics.Canvas(output)

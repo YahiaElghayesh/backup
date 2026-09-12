@@ -24,7 +24,6 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -414,11 +413,26 @@ fun CollageScreen(
             }
         },
     ) { padding ->
-        Box(Modifier.padding(padding).fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+        BoxWithConstraints(Modifier.padding(padding).fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+            // Contain-fit within BOTH available dimensions, not just width -- a lopsided Free
+            // ratio (e.g. 1:10, a tall narrow strip) sized off width alone would compute a height
+            // many times taller than the actual screen, and since this Box doesn't clip, that
+            // overflow just ran off both the top and bottom of the visible area with no way to
+            // see or scroll to the rest of the canvas at all.
+            val maxCanvasWidth = maxWidth * 0.94f
+            val maxCanvasHeight = maxHeight * 0.94f
+            val canvasWidthDp: androidx.compose.ui.unit.Dp
+            val canvasHeightDp: androidx.compose.ui.unit.Dp
+            if (maxCanvasWidth / canvasRatio <= maxCanvasHeight) {
+                canvasWidthDp = maxCanvasWidth
+                canvasHeightDp = maxCanvasWidth / canvasRatio
+            } else {
+                canvasHeightDp = maxCanvasHeight
+                canvasWidthDp = maxCanvasHeight * canvasRatio
+            }
             BoxWithConstraints(
                 Modifier
-                    .fillMaxWidth(0.94f)
-                    .aspectRatio(canvasRatio)
+                    .size(canvasWidthDp, canvasHeightDp)
                     .background(Color(backgroundColorSeed))
                     .clickable(indication = null, interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }) {
                         selectedItemIndex = null

@@ -52,6 +52,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.elghayesh.gallerybackup.data.media.MediaItem
 import com.elghayesh.gallerybackup.data.media.allItemsRecursive
 import com.elghayesh.gallerybackup.data.media.findNode
 import com.elghayesh.gallerybackup.security.AppLockGateScreen
@@ -368,9 +369,20 @@ private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: Back
             // Same effectiveFolderSort/sortedMedia as GalleryScreen -- see sortedMedia's own doc
             // comment for why a hardcoded newest-first here could open the wrong item.
             val order = effectiveFolderSort(path, folderSort, folderSortOverrides)
-            val item = sortedMedia(root?.findNode(path)?.items ?: emptyList(), order).getOrNull(index)
-            if (item != null) {
-                PhotoEditScreen(item = item, viewModel = galleryViewModel, onDone = { navController.popBackStack() })
+            // Resolved ONCE (the first time `root` has loaded) and then frozen -- previously this
+            // re-resolved item-by-index on every recomposition, so a background rescan that
+            // reordered or added/removed items while a photo was mid-edit (any refresh() call --
+            // e.g. the pull-to-refresh, a sync completing, or even this very edit's own save)
+            // could silently swap in a completely different photo at that same index, mid-edit,
+            // with no navigation action from the user at all.
+            var item by remember(path, index) { mutableStateOf<MediaItem?>(null) }
+            LaunchedEffect(root) {
+                if (item == null) {
+                    item = sortedMedia(root?.findNode(path)?.items ?: emptyList(), order).getOrNull(index)
+                }
+            }
+            item?.let { resolvedItem ->
+                PhotoEditScreen(item = resolvedItem, viewModel = galleryViewModel, onDone = { navController.popBackStack() })
             }
         }
         composable(
@@ -401,9 +413,15 @@ private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: Back
             val folderSort by galleryViewModel.folderSort.collectAsState()
             val folderSortOverrides by galleryViewModel.folderSortOverrides.collectAsState()
             val order = effectiveFolderSort(path, folderSort, folderSortOverrides)
-            val item = sortedMedia(root?.findNode(path)?.items ?: emptyList(), order).getOrNull(index)
-            if (item != null) {
-                VideoTrimScreen(item = item, viewModel = galleryViewModel, onDone = { navController.popBackStack() })
+            // Resolved once and frozen -- see the identical comment on the editPhoto route above.
+            var item by remember(path, index) { mutableStateOf<MediaItem?>(null) }
+            LaunchedEffect(root) {
+                if (item == null) {
+                    item = sortedMedia(root?.findNode(path)?.items ?: emptyList(), order).getOrNull(index)
+                }
+            }
+            item?.let { resolvedItem ->
+                VideoTrimScreen(item = resolvedItem, viewModel = galleryViewModel, onDone = { navController.popBackStack() })
             }
         }
     }
