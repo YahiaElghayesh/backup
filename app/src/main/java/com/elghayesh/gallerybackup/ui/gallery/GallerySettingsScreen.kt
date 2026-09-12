@@ -392,6 +392,9 @@ private fun LayoutTargetSettings(
             value = rowSize.toFloat(),
             onValueChange = { onRowSizeChange(it.roundToInt()) },
             valueRange = 8f..600f,
+            // 10 fixed sizes rather than a free scrollbar -- steps is the number of divisions
+            // BETWEEN the two endpoints, so 8 divisions = 10 selectable values total.
+            steps = 8,
         )
         Spacer(Modifier.height(8.dp))
         Text("${thumbnailWidth}dp thumbnail width", style = MaterialTheme.typography.bodyMedium)
@@ -399,6 +402,7 @@ private fun LayoutTargetSettings(
             value = thumbnailWidth.toFloat(),
             onValueChange = { onThumbnailWidthChange(it.roundToInt()) },
             valueRange = 8f..600f,
+            steps = 8,
         )
     }
 }
