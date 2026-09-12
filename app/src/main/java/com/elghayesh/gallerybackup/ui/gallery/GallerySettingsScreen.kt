@@ -391,16 +391,16 @@ private fun LayoutTargetSettings(
         Slider(
             value = rowSize.toFloat(),
             onValueChange = { onRowSizeChange(it.roundToInt()) },
-            valueRange = 40f..112f,
-            steps = 8,
+            valueRange = 24f..200f,
+            steps = 21,
         )
         Spacer(Modifier.height(8.dp))
         Text("${thumbnailWidth}dp thumbnail width", style = MaterialTheme.typography.bodyMedium)
         Slider(
             value = thumbnailWidth.toFloat(),
             onValueChange = { onThumbnailWidthChange(it.roundToInt()) },
-            valueRange = 40f..112f,
-            steps = 8,
+            valueRange = 24f..200f,
+            steps = 21,
         )
     }
 }
