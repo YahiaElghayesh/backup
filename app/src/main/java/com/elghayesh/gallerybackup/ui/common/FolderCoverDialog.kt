@@ -147,10 +147,10 @@ fun FolderCoverDialog(
                         value = sizeScale,
                         onValueChange = { sizeScale = it },
                         valueRange = MIN_TEXT_SCALE..MAX_TEXT_SCALE,
-                        // 5 fixed sizes rather than free sizing -- steps is the number of
-                        // divisions BETWEEN the two endpoints, so 3 divisions = 5 selectable
+                        // 8 fixed sizes rather than free sizing -- steps is the number of
+                        // divisions BETWEEN the two endpoints, so 6 divisions = 8 selectable
                         // values total.
-                        steps = 3,
+                        steps = 6,
                     )
                     Spacer(Modifier.height(8.dp))
                     CheckboxRow(checked = bold, onCheckedChange = { bold = it }, label = "Bold")
