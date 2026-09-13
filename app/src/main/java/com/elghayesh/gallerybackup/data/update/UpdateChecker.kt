@@ -10,7 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 
@@ -33,27 +33,79 @@ sealed class UpdateCheckResult {
 /**
  * There's no Play Store for this app, so it updates itself. Source lives in a private repo, but
  * releases publish to "app-releases" -- a small public repo (see the build workflow) shared
- * across several projects, holding nothing but built APKs. Because it's shared, this can't just
- * read /releases/latest (that would return whichever project published most recently, not
- * MediaHub's); instead it lists releases and picks the highest build number tagged
- * "mediahub-<n>" (the same number baked into this app's own versionCode -- see
- * app/build.gradle.kts), downloads its APK if newer than what's installed, and hands it to the
- * system package installer. The whole check is a plain unauthenticated read of a public repo --
- * no credential of any kind lives in this app.
+ * across several projects, holding nothing but built APKs, tagged "mediahub-<n>" where <n> is
+ * the same build number baked into this app's own versionCode (see app/build.gradle.kts).
+ *
+ * This used to fetch that repo's general release LIST (newest 50 by GitHub's own ordering) and
+ * pick the highest "mediahub-<n>" found in it. That's what caused every "check for updates" to
+ * report up to date even once real newer builds existed: this repo is shared with other
+ * projects that publish far more often, and (separately) every MediaHub release's `created_at`
+ * comes back identical regardless of when it was actually built -- together, that pushed
+ * MediaHub's own newest releases completely off a single page of that list. Confirmed live: a
+ * plain per_page=50 fetch of that list didn't contain any MediaHub release newer than build 99,
+ * even with build 105 long since published. Every "up to date" past that point was simply this
+ * app never being able to see its own latest release, not actually being current.
+ *
+ * Instead of depending on that list's ordering at all, this now looks up each candidate tag
+ * directly -- "mediahub-<n>" is a deterministic name this app already controls -- walking forward
+ * from the installed build number until a run of misses (an occasional skipped number is just a
+ * CI run that failed to publish) or a request cap makes it stop. A direct tag lookup is
+ * unaffected by how many other releases exist in the shared repo or how they're sorted.
  */
 class UpdateChecker(private val context: Context) {
 
     private val client = OkHttpClient()
 
+    /** How many tag misses in a row end the forward scan -- tolerates a handful of consecutive
+     * failed CI runs (which publish no release for that build number) without giving up on a
+     * real update just past them. */
+    private val maxConsecutiveMisses = 5
+
+    /** Hard cap on tag lookups per check, regardless of misses -- bounds worst-case request count
+     * (and therefore how much of GitHub's 60/hour unauthenticated rate limit one check can spend)
+     * if the installed build is very far behind the latest. Whatever was found before hitting
+     * this cap is still reported -- it just might not be the true latest in that rare case. */
+    private val maxProbes = 30
+
+    private sealed class TagLookup {
+        data class Found(val release: ReleaseInfo) : TagLookup()
+        data object NotFound : TagLookup()
+        data class Failed(val reason: String) : TagLookup()
+    }
+
     /** Runs the check and reports exactly what happened -- see [UpdateCheckResult]. */
     suspend fun checkForUpdate(): UpdateCheckResult = withContext(Dispatchers.IO) {
+        var best: ReleaseInfo? = null
+        var versionCode = installedVersionCode() + 1
+        var consecutiveMisses = 0
+        var probes = 0
+
+        while (consecutiveMisses < maxConsecutiveMisses && probes < maxProbes) {
+            when (val result = fetchReleaseByTag(versionCode)) {
+                is TagLookup.Found -> {
+                    best = result.release
+                    consecutiveMisses = 0
+                }
+                TagLookup.NotFound -> consecutiveMisses++
+                is TagLookup.Failed -> return@withContext UpdateCheckResult.Failed(result.reason)
+            }
+            versionCode++
+            probes++
+        }
+
+        best?.let { UpdateCheckResult.Available(it) } ?: UpdateCheckResult.UpToDate
+    }
+
+    private fun fetchReleaseByTag(versionCode: Int): TagLookup {
+        val tag = "mediahub-$versionCode"
         val request = Request.Builder()
-            .url("https://api.github.com/repos/YahiaElghayesh/app-releases/releases?per_page=50")
+            .url("https://api.github.com/repos/YahiaElghayesh/app-releases/releases/tags/$tag")
             .header("Accept", "application/vnd.github+json")
             .build()
 
         val body: String = try {
             client.newCall(request).execute().use { response ->
+                if (response.code == 404) return TagLookup.NotFound
                 if (!response.isSuccessful) {
                     // A 403 here is almost always GitHub's unauthenticated rate limit (60
                     // requests/hour per IP) -- worth calling out specifically since it's the one
@@ -64,42 +116,30 @@ class UpdateChecker(private val context: Context) {
                     } else {
                         "GitHub returned HTTP ${response.code}"
                     }
-                    return@withContext UpdateCheckResult.Failed(reason)
+                    return TagLookup.Failed(reason)
                 }
-                response.body?.string() ?: return@withContext UpdateCheckResult.Failed("Empty response from GitHub")
+                response.body?.string() ?: return TagLookup.Failed("Empty response from GitHub")
             }
         } catch (e: IOException) {
-            return@withContext UpdateCheckResult.Failed(e.message ?: "Network error reaching GitHub")
+            return TagLookup.Failed(e.message ?: "Network error reaching GitHub")
         }
 
-        val releases = try {
-            JSONArray(body)
+        val release = try {
+            JSONObject(body)
         } catch (e: Exception) {
-            return@withContext UpdateCheckResult.Failed("Couldn't parse GitHub's response")
+            return TagLookup.Failed("Couldn't parse GitHub's response")
         }
 
-        var best: ReleaseInfo? = null
-        for (i in 0 until releases.length()) {
-            val release = releases.optJSONObject(i) ?: continue
-            val tag = release.optString("tag_name")
-            if (!tag.startsWith("mediahub-")) continue
-            val versionCode = tag.removePrefix("mediahub-").toIntOrNull() ?: continue
-            if (best != null && versionCode <= best.versionCode) continue
-
-            val assets = release.optJSONArray("assets") ?: continue
-            var downloadUrl: String? = null
-            for (j in 0 until assets.length()) {
-                val asset = assets.optJSONObject(j) ?: continue
-                if (asset.optString("name") == "mediahub.apk") {
-                    downloadUrl = asset.optString("browser_download_url")
-                    break
-                }
+        val assets = release.optJSONArray("assets") ?: return TagLookup.NotFound
+        var downloadUrl: String? = null
+        for (j in 0 until assets.length()) {
+            val asset = assets.optJSONObject(j) ?: continue
+            if (asset.optString("name") == "mediahub.apk") {
+                downloadUrl = asset.optString("browser_download_url")
+                break
             }
-            downloadUrl?.let { best = ReleaseInfo(versionCode, tag, it) }
         }
-
-        val found = best ?: return@withContext UpdateCheckResult.Failed("No MediaHub release found in app-releases")
-        if (found.versionCode > installedVersionCode()) UpdateCheckResult.Available(found) else UpdateCheckResult.UpToDate
+        return downloadUrl?.let { TagLookup.Found(ReleaseInfo(versionCode, tag, it)) } ?: TagLookup.NotFound
     }
 
     private fun installedVersionCode(): Int {
