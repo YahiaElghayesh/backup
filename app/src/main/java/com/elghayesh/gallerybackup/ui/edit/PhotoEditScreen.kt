@@ -318,9 +318,8 @@ fun PhotoEditScreen(
         val hadPendingTransparency = current.cropMode == CropMode.FREE_CORNERS ||
             !current.perspectiveDepths.isIdentity ||
             current.straightenDegrees % 90f != 0f
-        val cropped = applyCrop(bitmap, current)
-        val baked = if (current.straightenDegrees != 0f) rotateBitmapArbitrary(cropped, current.straightenDegrees) else cropped
-        workingBitmap = baked
+        // applyCrop already straightens (first) then crops (then warps) -- see its own doc comment.
+        workingBitmap = applyCrop(bitmap, current)
         if (hadPendingTransparency) bitmapHasAlpha = true
         // Geometry (crop/quad/perspective/straighten) is now baked into the bitmap itself, so its
         // normalized coordinates are meaningless going forward -- reset exactly like Rotate 90
@@ -444,6 +443,17 @@ fun PhotoEditScreen(
 
     val panelBg = Color(0xFF1C1C1C)
 
+    // What's actually shown/measured against everywhere the crop tools need a reference frame --
+    // the working bitmap as-is normally, or a live rotated preview of it whenever a straighten is
+    // pending (see the main preview Box below for why this replaced rotating the whole preview
+    // Box, crop overlay included, as one rigid unit). Hoisted here (rather than only inside the
+    // preview's own BoxWithConstraints) so the aspect-ratio pills below, which also need to know
+    // this frame's actual proportions, see the same value.
+    val straightenedPreview: Bitmap? = remember(workingBitmap, current.straightenDegrees) {
+        val wb = workingBitmap
+        if (wb != null && current.straightenDegrees != 0f) straightenPreview(wb, current.straightenDegrees) else wb
+    }
+
     Scaffold(
         containerColor = Color.Black,
         topBar = {
@@ -494,11 +504,11 @@ fun PhotoEditScreen(
                                         label = a.label,
                                         selected = current.cropAspect == a,
                                         onClick = {
-                                            val bitmap = workingBitmap
-                                            val rect = if (a == CropAspect.FREE || bitmap == null) {
+                                            val reference = straightenedPreview
+                                            val rect = if (a == CropAspect.FREE || reference == null) {
                                                 NormRect.FULL
                                             } else {
-                                                applyAspectLock(current.cropRect, a.ratio, bitmap.width, bitmap.height)
+                                                applyAspectLock(current.cropRect, a.ratio, reference.width, reference.height)
                                             }
                                             commit(current.copy(cropAspect = a, cropRect = rect))
                                         },
@@ -784,6 +794,17 @@ fun PhotoEditScreen(
                     } else {
                         ColorFilter.colorMatrix(androidx.compose.ui.graphics.ColorMatrix(composeMatrix.array))
                     }
+                    // The crop box has to stay level on screen the whole time -- rotating it
+                    // together with the photo (as a single rigid Box, via graphicsLayer) never
+                    // actually straightens anything, since both tilt by the same amount and the
+                    // photo looks exactly as crooked relative to the box as before. Instead, this
+                    // shows a live ROTATED preview of the photo itself (canvas expanded so nothing
+                    // is clipped, same principle as the final bake/save) and lets the crop box sit
+                    // over it normally, un-rotated -- exactly like every other editor's straighten
+                    // tool: a level frame, with the photo turning underneath it. straightenedPreview
+                    // is hoisted above (shared with the aspect-ratio pills), downsampled for speed
+                    // since it recomputes on every slider tick during a drag.
+                    val displayBitmap = straightenedPreview ?: bitmap
                     // Sized explicitly to fit within BOTH available dimensions (not just
                     // Modifier.aspectRatio() off of the full width) -- for a photo tall/narrow
                     // enough that width-first sizing would make it taller than the space actually
@@ -791,7 +812,7 @@ fun PhotoEditScreen(
                     // could push part of the image, and the crop handles anchored to its edges,
                     // outside the visible screen entirely, which is exactly why some photos
                     // showed no visible/reachable crop corners while others did.
-                    val photoRatio = bitmap.width.toFloat() / bitmap.height.toFloat()
+                    val photoRatio = displayBitmap.width.toFloat() / displayBitmap.height.toFloat()
                     val photoWidthDp: androidx.compose.ui.unit.Dp
                     val photoHeightDp: androidx.compose.ui.unit.Dp
                     if (maxWidth / photoRatio <= maxHeight) {
@@ -805,14 +826,6 @@ fun PhotoEditScreen(
                         modifier = Modifier
                             .size(photoWidthDp, photoHeightDp)
                             .onSizeChanged { boxSize = it }
-                            // Rotates the photo AND every overlay drawn inside this same Box
-                            // (crop rect/quad, focus spot, stickers) together as one rigid unit --
-                            // so the crop selection always stays a plain rectangle/quad relative
-                            // to the tilted photo, the same way dragging a straighten slider works
-                            // in other photo editors, and Compose's hit-testing already accounts
-                            // for this transform, so dragging those overlays' handles keeps working
-                            // correctly without any change to their own (unrotated) coordinate math.
-                            .graphicsLayer(rotationZ = current.straightenDegrees)
                             // Press and hold anywhere on the photo to instantly preview the untouched
                             // original -- release to go back to the edited version. A plain tap
                             // (not on a sticker -- those consume the touch first via their own
@@ -832,27 +845,29 @@ fun PhotoEditScreen(
                         // result (recomputed live off a downsampled copy as the slider moves) --
                         // unlike a wireframe-only preview, this is the only way dragging the
                         // slider visibly does anything to the photo instead of just moving an
-                        // abstract outline that never touched a single pixel.
+                        // abstract outline that never touched a single pixel. Built from
+                        // displayBitmap (already straightened) with straightenDegrees zeroed out
+                        // in the state passed in, so applyCrop doesn't rotate it a second time.
                         val perspectivePreview = if (tab == EditTab.PERSPECTIVE && !showOriginal) {
-                            remember(bitmap, current.cropRect, current.cropQuad, current.cropMode, current.perspectiveDepths) {
-                                buildPerspectivePreview(bitmap, current)
+                            remember(displayBitmap, current.cropRect, current.cropQuad, current.cropMode, current.perspectiveDepths) {
+                                buildPerspectivePreview(displayBitmap, current.copy(straightenDegrees = 0f))
                             }
                         } else {
                             null
                         }
                         Image(
-                            bitmap = (perspectivePreview ?: bitmap).asImageBitmap(),
+                            bitmap = (perspectivePreview ?: displayBitmap).asImageBitmap(),
                             contentDescription = item.displayName,
                             contentScale = ContentScale.Fit,
                             colorFilter = colorFilter,
                             modifier = Modifier.fillMaxSize(),
                         )
-                        // Stickers/focus are positioned relative to the ORIGINAL, uncropped photo
+                        // Stickers/focus are positioned relative to displayBitmap, uncropped
                         // (boxSize is that Image's own rendered size) -- while the Perspective tab
-                        // is showing the warped/cropped preview above instead of that original,
-                        // overlaying them would float in the wrong place relative to it, so they're
-                        // hidden for that tab only (same principle as each tab already only showing
-                        // its own relevant overlay).
+                        // is showing the warped/cropped preview above instead of that, overlaying
+                        // them would float in the wrong place relative to it, so they're hidden
+                        // for that tab only (same principle as each tab already only showing its
+                        // own relevant overlay).
                         if (!showOriginal && tab != EditTab.PERSPECTIVE) {
                             if (current.focus.strength > 0f) {
                                 FocusOverlay(current.focus)
@@ -965,8 +980,8 @@ fun PhotoEditScreen(
                                         density = density,
                                         onCornerDrag = { corner, dxNorm, dyNorm ->
                                             var rect = updatedCropRect(current.cropRect, corner, dxNorm, dyNorm)
-                                            if (current.cropAspect != CropAspect.FREE && bitmap.width > 0 && bitmap.height > 0) {
-                                                rect = applyAspectLock(rect, current.cropAspect.ratio, bitmap.width, bitmap.height)
+                                            if (current.cropAspect != CropAspect.FREE && displayBitmap.width > 0 && displayBitmap.height > 0) {
+                                                rect = applyAspectLock(rect, current.cropAspect.ratio, displayBitmap.width, displayBitmap.height)
                                             }
                                             mutateLive(current.copy(cropRect = rect))
                                         },
@@ -1918,12 +1933,19 @@ private fun cropRectFor(bitmapW: Int, bitmapH: Int, rect: NormRect): Rect {
  * mode used, just fed a synthetic quad from depth sliders instead of a dragged one.
  */
 private fun applyCrop(bitmap: Bitmap, state: EditState): Bitmap {
+    // Straighten happens FIRST, not after cropping -- the crop rect/quad the user drew was always
+    // relative to what was actually on screen at the time, which (see the main preview's
+    // straightenedPreview) is the already-straightened, canvas-expanded frame, not the original
+    // un-rotated bitmap. Cropping that first and rotating afterward (the old order) is also just
+    // wrong on its own terms: it rotates the ALREADY-cropped rectangle in place, which crops
+    // corners off rather than ever straightening a tilted horizon within a level frame.
+    val straightened = if (state.straightenDegrees != 0f) rotateBitmapArbitrary(bitmap, state.straightenDegrees) else bitmap
     val cropped = if (state.cropMode == CropMode.FREE_CORNERS) {
         val quad = state.cropQuad ?: CropQuad.fromRect(state.cropRect)
-        cropQuadTransparent(bitmap, quad)
+        cropQuadTransparent(straightened, quad)
     } else {
-        val cropRect = cropRectFor(bitmap.width, bitmap.height, state.cropRect)
-        Bitmap.createBitmap(bitmap, cropRect.left, cropRect.top, cropRect.width(), cropRect.height())
+        val cropRect = cropRectFor(straightened.width, straightened.height, state.cropRect)
+        Bitmap.createBitmap(straightened, cropRect.left, cropRect.top, cropRect.width(), cropRect.height())
     }
     return if (!state.perspectiveDepths.isIdentity) {
         val unitSquare = CropQuad.fromRect(NormRect.FULL)
@@ -1931,6 +1953,25 @@ private fun applyCrop(bitmap: Bitmap, state: EditState): Bitmap {
     } else {
         cropped
     }
+}
+
+/** Downsamples [source] and rotates it by [degrees] (canvas expanded, same as [rotateBitmapArbitrary])
+ * for a fast live preview while dragging the straighten slider -- see the main preview's
+ * straightenedPreview for why the crop box needs this shown as the photo itself, rather than
+ * rotating the whole preview (crop box included) as a rigid unit. */
+private fun straightenPreview(source: Bitmap, degrees: Float, maxDimension: Int = 1000): Bitmap {
+    val scale = maxDimension.toFloat() / maxOf(source.width, source.height)
+    val downsampled = if (scale < 1f) {
+        Bitmap.createScaledBitmap(
+            source,
+            (source.width * scale).roundToInt().coerceAtLeast(1),
+            (source.height * scale).roundToInt().coerceAtLeast(1),
+            true,
+        )
+    } else {
+        source
+    }
+    return rotateBitmapArbitrary(downsampled, degrees)
 }
 
 /**
@@ -2019,12 +2060,11 @@ private suspend fun saveEditedPhoto(
         canvas.drawText(sticker.text, x, y, textPaint)
     }
 
-    // Straighten is applied last, on top of crop + adjustments + focus + stickers -- rotating the
-    // ALREADY-CROPPED result (rather than the original bitmap) reproduces exactly what the live
-    // preview shows, since that rotates the photo and its crop overlay together as one rigid
-    // unit (see PhotoEditScreen's own comment on the preview Box's graphicsLayer), meaning the
-    // crop selection's normalized coordinates were always relative to the un-rotated photo.
-    val finalBitmap = if (state.straightenDegrees != 0f) rotateBitmapArbitrary(output, state.straightenDegrees) else output
+    // Straighten is applied inside applyCrop, BEFORE cropping (see its own doc comment) -- the
+    // crop rect/quad the user drew was always relative to the already-straightened, canvas-
+    // expanded frame shown in the live preview, not the original un-rotated bitmap, so there's no
+    // separate rotation step needed here on top of the already-cropped result.
+    val finalBitmap = output
 
     // A quad crop can leave part of the output transparent (see cropQuadTransparent), and so can
     // an off-90-degree straighten (see rotateBitmapArbitrary) or a Perspective depth warp that
