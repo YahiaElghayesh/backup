@@ -132,47 +132,108 @@ class MediaRepository(private val context: Context) {
 
     /**
      * Renames the real on-disk folder at [folderPath] (relative to external storage root) to
-     * [newName] via a single atomic [File.renameTo] -- moving the whole subtree (every nested
-     * file and folder) in one OS call, with no per-item copying and no MediaStore trash-consent
-     * step. This matters because the previous approach (copy every item into a new path, then
-     * request MediaStore trash the originals) could leave BOTH the old and new folder behind, in
-     * full, if the user dismissed or the system denied that trash-consent dialog partway through
-     * -- the copy had already unconditionally completed by that point, with nothing to undo it.
-     * A real rename has no such window: it either fully succeeds or leaves the original
-     * completely untouched, never both existing at once.
+     * [newName], keeping it under the same parent. See [moveDirInPlace] for why this goes
+     * through a real [File.renameTo] rather than copy+trash.
      *
      * Requires All files access (MANAGE_EXTERNAL_STORAGE) -- returns false without touching
      * anything if it isn't granted or the rename otherwise fails, so the caller can fall back to
      * the old copy+trash approach for that rarer case.
      */
-    suspend fun renameFolderInPlace(folderPath: String, newName: String): Boolean = withContext(Dispatchers.IO) {
-        if (!hasAllFilesAccess()) return@withContext false
-        val root = Environment.getExternalStorageDirectory()
-        val oldDir = File(root, folderPath)
+    suspend fun renameFolderInPlace(folderPath: String, newName: String): Boolean {
         val parentPath = folderPath.substringBeforeLast('/', "")
         val newFolderPath = if (parentPath.isEmpty()) newName else "$parentPath/$newName"
-        val newDir = File(root, newFolderPath)
-        if (!oldDir.isDirectory || newDir.exists()) return@withContext false
-        if (!oldDir.renameTo(newDir)) return@withContext false
+        return moveDirInPlace(folderPath, newFolderPath)
+    }
 
-        // MediaStore's cached rows for every file that used to live under the old path are now
-        // stale (pointing at paths that no longer exist) until it re-scans -- explicitly scanning
-        // both the old path (so MediaStore notices the file's gone) and the new one (so it
-        // re-indexes at the new location) keeps the gallery in sync immediately, rather than
-        // waiting on Android's own background scanner to eventually notice.
-        val paths = mutableListOf(oldDir.absolutePath, newDir.absolutePath)
-        fun collect(dir: File) {
-            dir.listFiles()?.forEach { child ->
-                val oldChildPath = oldDir.absolutePath + child.absolutePath.removePrefix(newDir.absolutePath)
-                paths += oldChildPath
-                paths += child.absolutePath
-                if (child.isDirectory) collect(child)
-            }
+    /**
+     * Moves the real on-disk folder at [folderPath] to become a child of [destinationParentPath]
+     * (keeping its own name), via the same atomic [File.renameTo] as [renameFolderInPlace] --
+     * see [moveDirInPlace] for why. Requires All files access; returns false (touching nothing)
+     * if it isn't granted, the move otherwise fails, or a folder with the same name already
+     * exists at the destination, so the caller can fall back to copy+trash.
+     */
+    suspend fun moveFolderInPlace(folderPath: String, destinationParentPath: String): Boolean {
+        val name = folderPath.substringAfterLast('/')
+        val newFolderPath = if (destinationParentPath.isEmpty()) name else "$destinationParentPath/$name"
+        return moveDirInPlace(folderPath, newFolderPath)
+    }
+
+    /**
+     * Moves the single real on-disk file backing [item] into [destinationFolderPath] (relative
+     * to external storage root), via an atomic [File.renameTo] -- same rationale as
+     * [moveDirInPlace], applied to one file instead of a whole directory: this preserves the
+     * exact original bytes (and therefore EXIF) and its MediaStore row, rather than the old
+     * copy-then-trash approach's window where the copy could succeed at the wrong place (or not
+     * at all) while the original had already been trashed.
+     *
+     * Requires All files access -- returns false without touching anything if it isn't granted,
+     * the source file can't be found relative to external storage, a same-named file already
+     * exists at the destination, or the rename otherwise fails, so the caller can fall back to
+     * copy+trash for that item.
+     */
+    suspend fun moveMediaItemInPlace(item: MediaItem, destinationFolderPath: String): Boolean =
+        withContext(Dispatchers.IO) {
+            if (!hasAllFilesAccess()) return@withContext false
+            val root = Environment.getExternalStorageDirectory()
+            val oldFile = File(root, "${item.folderPath.trim('/')}/${item.displayName}")
+            if (!oldFile.isFile) return@withContext false
+            val newDir = File(root, destinationFolderPath.trim('/'))
+            val newFile = File(newDir, item.displayName)
+            if (newFile.exists()) return@withContext false
+            if (!newDir.isDirectory && !newDir.mkdirs()) return@withContext false
+            if (!oldFile.renameTo(newFile)) return@withContext false
+
+            rescanPaths(listOf(oldFile.absolutePath, newFile.absolutePath))
+            true
         }
-        collect(newDir)
 
-        // Same unbounded-wait risk as rescanUnindexedMedia's own scan above -- bounded for the
-        // same reason (see its doc comment).
+    /**
+     * Shared implementation behind [renameFolderInPlace] and [moveFolderInPlace]: relocates the
+     * real on-disk folder at [oldRelativePath] to [newRelativePath] (both relative to external
+     * storage root) via a single atomic [File.renameTo] -- moving the whole subtree (every
+     * nested file and folder) in one OS call, with no per-item copying and no MediaStore
+     * trash-consent step. This matters because the old approach (copy every item into a new
+     * path, then request MediaStore trash the originals) had a window where the copy had already
+     * unconditionally completed -- if the user dismissed or the system denied that trash-consent
+     * dialog partway through, or a copy silently landed somewhere other than intended, there was
+     * nothing left to undo it, up to and including the original being trashed with nothing
+     * actually present at the destination. A real rename has no such window: it either fully
+     * succeeds or leaves the original completely untouched, never a partial result.
+     */
+    private suspend fun moveDirInPlace(oldRelativePath: String, newRelativePath: String): Boolean =
+        withContext(Dispatchers.IO) {
+            if (!hasAllFilesAccess()) return@withContext false
+            val root = Environment.getExternalStorageDirectory()
+            val oldDir = File(root, oldRelativePath)
+            val newDir = File(root, newRelativePath)
+            if (!oldDir.isDirectory || newDir.exists()) return@withContext false
+            newDir.parentFile?.let { if (!it.isDirectory) it.mkdirs() }
+            if (!oldDir.renameTo(newDir)) return@withContext false
+
+            // MediaStore's cached rows for every file that used to live under the old path are
+            // now stale (pointing at paths that no longer exist) until it re-scans -- explicitly
+            // scanning both the old path (so MediaStore notices the file's gone) and the new one
+            // (so it re-indexes at the new location) keeps the gallery in sync immediately,
+            // rather than waiting on Android's own background scanner to eventually notice.
+            val paths = mutableListOf(oldDir.absolutePath, newDir.absolutePath)
+            fun collect(dir: File) {
+                dir.listFiles()?.forEach { child ->
+                    val oldChildPath = oldDir.absolutePath + child.absolutePath.removePrefix(newDir.absolutePath)
+                    paths += oldChildPath
+                    paths += child.absolutePath
+                    if (child.isDirectory) collect(child)
+                }
+            }
+            collect(newDir)
+            rescanPaths(paths)
+            true
+        }
+
+    /** Blocks (with the same bounded timeout as [rescanUnindexedMedia]) until MediaStore has
+     * re-scanned every path in [paths], so a caller's subsequent gallery refresh sees the result
+     * of a direct filesystem change immediately instead of waiting on Android's own background
+     * scanner to eventually notice. */
+    private suspend fun rescanPaths(paths: List<String>) {
         withTimeoutOrNull(15_000) {
             suspendCancellableCoroutine<Unit> { cont ->
                 var remaining = paths.size
@@ -182,7 +243,6 @@ class MediaRepository(private val context: Context) {
                 }
             }
         }
-        true
     }
 
     /** Absolute filesystem paths of every image/video MediaStore currently has indexed. */

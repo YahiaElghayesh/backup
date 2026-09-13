@@ -613,15 +613,23 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Copies [items] into [destinationFolderPath], then trashes the originals -- waiting for the
-     * trash to actually finish (including any system consent dialog) before refreshing, so the
-     * gallery's next state reflects the real end result instead of the moment in between where
-     * both the copy and the not-yet-trashed original exist at once.
+     * Moves [items] into [destinationFolderPath]. Tries a real, atomic on-disk file rename first
+     * for each item (see [MediaRepository.moveMediaItemInPlace]) -- the exact original file,
+     * bytes and EXIF untouched, with no copy and no MediaStore trash-consent step -- falling back
+     * to the old copy-then-trash-the-original approach only for whichever items that isn't
+     * possible for (no All files access, a same-named file already at the destination, ...).
+     * That fallback's own copy step runs unconditionally before the trash-consent step, so a
+     * denied/dismissed consent dialog -- or a copy that silently landed somewhere other than
+     * intended -- could previously leave the original trashed with nothing actually present at
+     * the destination, which is exactly the "moved" item vanishing instead of moving that was
+     * reported. Waits for any fallback trashing to actually finish (including any system consent
+     * dialog) before refreshing, so the gallery's next state reflects the real end result.
      */
     fun moveMediaItems(items: List<MediaItem>, destinationFolderPath: String) {
         viewModelScope.launch {
             val context: Context = getApplication()
-            val copiedItems = items.filter { copyMediaTo(context, it, destinationFolderPath) != null }
+            val remaining = items.filter { !repository.moveMediaItemInPlace(it, destinationFolderPath) }
+            val copiedItems = remaining.filter { copyMediaTo(context, it, destinationFolderPath) != null }
             trashOriginals(copiedItems)
             refresh()
             clearSelection()
@@ -674,8 +682,22 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Moves [folder] to become a child of [destinationParentPath]. Tries a real, atomic on-disk
+     * directory rename first (see [MediaRepository.moveFolderInPlace]) -- same rationale as
+     * [moveMediaItems]: no copying, no MediaStore trash-consent step, and no window where a
+     * denied consent dialog or a misplaced copy leaves the originals trashed with nothing at the
+     * destination. Only falls back to the old copy-every-item-then-trash-the-originals approach
+     * when that's not possible (no All files access, or a same-named folder already exists at
+     * the destination).
+     */
     fun moveFolder(folder: FolderNode, destinationParentPath: String) {
         viewModelScope.launch {
+            if (repository.moveFolderInPlace(folder.path, destinationParentPath)) {
+                refresh()
+                clearSelection()
+                return@launch
+            }
             val context: Context = getApplication()
             val newFolderPath = if (destinationParentPath.isEmpty()) folder.name else "$destinationParentPath/${folder.name}"
             val copiedItems = folder.allItemsRecursive().filter { item ->
