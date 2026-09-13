@@ -18,6 +18,19 @@ import java.io.IOException
 data class ReleaseInfo(val versionCode: Int, val tagName: String, val downloadUrl: String)
 
 /**
+ * Unlike a nullable [ReleaseInfo], this tells apart a check that ran successfully and found
+ * nothing newer ([UpToDate]) from one that never actually completed ([Failed]) -- e.g. no network,
+ * GitHub returned an error or got rate-limited, or its response couldn't be parsed. Collapsing
+ * those into one "no update" result (as this used to) meant a silent failure looked exactly like
+ * being genuinely up to date, with no way to tell which one actually happened.
+ */
+sealed class UpdateCheckResult {
+    data class Available(val release: ReleaseInfo) : UpdateCheckResult()
+    data object UpToDate : UpdateCheckResult()
+    data class Failed(val reason: String) : UpdateCheckResult()
+}
+
+/**
  * There's no Play Store for this app, so it updates itself. Source lives in a private repo, but
  * releases publish to "app-releases" -- a small public repo (see the build workflow) shared
  * across several projects, holding nothing but built APKs. Because it's shared, this can't just
@@ -32,22 +45,39 @@ class UpdateChecker(private val context: Context) {
 
     private val client = OkHttpClient()
 
-    /** Null if already up to date, the check failed (offline, etc.), or no release could be parsed. */
-    suspend fun checkForUpdate(): ReleaseInfo? = withContext(Dispatchers.IO) {
+    /** Runs the check and reports exactly what happened -- see [UpdateCheckResult]. */
+    suspend fun checkForUpdate(): UpdateCheckResult = withContext(Dispatchers.IO) {
         val request = Request.Builder()
             .url("https://api.github.com/repos/YahiaElghayesh/app-releases/releases?per_page=50")
             .header("Accept", "application/vnd.github+json")
             .build()
-        val body = try {
+
+        val body: String = try {
             client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return@withContext null
-                response.body?.string()
+                if (!response.isSuccessful) {
+                    // A 403 here is almost always GitHub's unauthenticated rate limit (60
+                    // requests/hour per IP) -- worth calling out specifically since it's the one
+                    // failure mode that looks like nothing is wrong (no crash, no obvious network
+                    // issue) yet silently blocks every check until the hour rolls over.
+                    val reason = if (response.code == 403) {
+                        "GitHub rate limit hit (HTTP 403) -- try again later"
+                    } else {
+                        "GitHub returned HTTP ${response.code}"
+                    }
+                    return@withContext UpdateCheckResult.Failed(reason)
+                }
+                response.body?.string() ?: return@withContext UpdateCheckResult.Failed("Empty response from GitHub")
             }
         } catch (e: IOException) {
-            null
-        } ?: return@withContext null
+            return@withContext UpdateCheckResult.Failed(e.message ?: "Network error reaching GitHub")
+        }
 
-        val releases = try { JSONArray(body) } catch (e: Exception) { return@withContext null }
+        val releases = try {
+            JSONArray(body)
+        } catch (e: Exception) {
+            return@withContext UpdateCheckResult.Failed("Couldn't parse GitHub's response")
+        }
+
         var best: ReleaseInfo? = null
         for (i in 0 until releases.length()) {
             val release = releases.optJSONObject(i) ?: continue
@@ -67,7 +97,9 @@ class UpdateChecker(private val context: Context) {
             }
             downloadUrl?.let { best = ReleaseInfo(versionCode, tag, it) }
         }
-        best?.takeIf { it.versionCode > installedVersionCode() }
+
+        val found = best ?: return@withContext UpdateCheckResult.Failed("No MediaHub release found in app-releases")
+        if (found.versionCode > installedVersionCode()) UpdateCheckResult.Available(found) else UpdateCheckResult.UpToDate
     }
 
     private fun installedVersionCode(): Int {

@@ -68,6 +68,7 @@ fun GallerySettingsScreen(
     var openSection by remember { mutableStateOf<SettingsSection?>(null) }
     val isCheckingForUpdate by UpdateCheckCoordinator.isChecking.collectAsState()
     val lastCheckFoundUpdate by UpdateCheckCoordinator.lastCheckFoundUpdate.collectAsState()
+    val lastCheckFailureReason by UpdateCheckCoordinator.lastCheckFailureReason.collectAsState()
 
     // Without this, system/gesture back while a sub-section is open falls straight through to the
     // nav graph's own back handling (this screen never consumes it), popping the whole Settings
@@ -160,6 +161,18 @@ fun GallerySettingsScreen(
                                 "You're on the latest version.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        // Distinct from "you're on the latest version" -- this means the check
+                        // never actually completed (no network, GitHub error, rate limit, etc.),
+                        // so it couldn't tell either way. Showing "up to date" for this instead, as
+                        // it used to, made a silent failure indistinguishable from a real answer.
+                        if (!isCheckingForUpdate && lastCheckFailureReason != null) {
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                "Couldn't check for updates: $lastCheckFailureReason",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
                             )
                         }
                     }

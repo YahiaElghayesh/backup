@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.dp
 import com.elghayesh.gallerybackup.data.update.ReleaseInfo
 import com.elghayesh.gallerybackup.data.update.UpdateChecker
 import com.elghayesh.gallerybackup.data.update.UpdateCheckCoordinator
+import com.elghayesh.gallerybackup.data.update.UpdateCheckResult
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -58,9 +59,14 @@ fun AppUpdateController() {
 
     suspend fun performCheck() {
         UpdateCheckCoordinator.onCheckStarted()
-        val update = checker.checkForUpdate()
-        if (update != null) availableUpdate = update
-        UpdateCheckCoordinator.onCheckFinished(foundUpdate = update != null)
+        when (val result = checker.checkForUpdate()) {
+            is UpdateCheckResult.Available -> {
+                availableUpdate = result.release
+                UpdateCheckCoordinator.onCheckFinished(foundUpdate = true)
+            }
+            UpdateCheckResult.UpToDate -> UpdateCheckCoordinator.onCheckFinished(foundUpdate = false)
+            is UpdateCheckResult.Failed -> UpdateCheckCoordinator.onCheckFailed(result.reason)
+        }
     }
 
     LaunchedEffect(Unit) { performCheck() }
