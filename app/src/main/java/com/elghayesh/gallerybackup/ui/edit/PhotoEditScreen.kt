@@ -44,11 +44,11 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.CropFree
+import androidx.compose.material.icons.filled.CropRotate
 import androidx.compose.material.icons.filled.Redo
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.TextFields
-import androidx.compose.material.icons.filled.ThreeDRotation
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material3.AlertDialog
@@ -125,7 +125,7 @@ private enum class CropAspect(val label: String, val ratio: Float) {
 private enum class EditTab(val label: String, val icon: ImageVector) {
     CROP("Crop", Icons.Filled.Crop),
     FREE_CORNERS("Free corners", Icons.Filled.CropFree),
-    PERSPECTIVE("Perspective", Icons.Filled.ThreeDRotation),
+    PERSPECTIVE("Perspective", Icons.Filled.CropRotate),
     ADJUST("Adjust", Icons.Filled.Tune),
     STICKER("Sticker", Icons.Filled.TextFields),
 }
