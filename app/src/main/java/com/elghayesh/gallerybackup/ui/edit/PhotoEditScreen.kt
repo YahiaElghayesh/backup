@@ -243,6 +243,13 @@ fun PhotoEditScreen(
     val density = androidx.compose.ui.platform.LocalDensity.current
 
     var workingBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    // Sticky once true -- set whenever a bake (see bakeGeometry) leaves real transparency in
+    // workingBitmap (a Free corners mask-crop, or a Perspective warp that pulls a corner beyond
+    // the frame). EditState's own transform fields only describe what's still PENDING, so once a
+    // transparent result is baked into the bitmap itself, this is the only remaining record that
+    // the final save must use PNG -- otherwise a later, fully-opaque pending edit would make
+    // saveEditedPhoto think JPEG is safe and flatten that already-baked transparency to black.
+    var bitmapHasAlpha by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(true) }
     var isSaving by remember { mutableStateOf(false) }
     var showSaveChoiceDialog by remember { mutableStateOf(false) }
@@ -283,6 +290,46 @@ fun PhotoEditScreen(
         undoStack.add(current)
         redoStack.clear()
         current = newState
+    }
+
+    // Crop/Free corners/Perspective were previously "pending until Save" like every other edit
+    // here -- but unlike Adjust/Sticker, NOTHING in the live preview showed their effect at all
+    // outside their own tab's overlay, so tapping that tab's Done (which just closes the panel)
+    // looked exactly like the edit had been discarded. This instead actually applies the crop
+    // shape + Perspective warp + straighten to workingBitmap right now, the same way the Rotate
+    // 90 button already mutates workingBitmap directly -- so Done visibly does something, and
+    // the photo shown afterward is the real result, not a promise redeemed only at Save.
+    fun bakeGeometry() {
+        val bitmap = workingBitmap ?: return
+        // Entering Free corners auto-seeds cropQuad to the full-rect equivalent (see the
+        // LaunchedEffect(tab) above) even before the user drags anything -- comparing cropQuad to
+        // null would miss that and wrongly treat "opened the tab, changed nothing" as a real
+        // pending crop, wiping stickers/adjust for no reason on every stray Done tap.
+        val nothingPending = current.cropRect == NormRect.FULL &&
+            (current.cropQuad == null || current.cropQuad == CropQuad.fromRect(NormRect.FULL)) &&
+            current.perspectiveDepths.isIdentity &&
+            current.straightenDegrees == 0f
+        if (nothingPending) return
+        val hadPendingTransparency = current.cropMode == CropMode.FREE_CORNERS ||
+            !current.perspectiveDepths.isIdentity ||
+            current.straightenDegrees % 90f != 0f
+        val cropped = applyCrop(bitmap, current)
+        val baked = if (current.straightenDegrees != 0f) rotateBitmapArbitrary(cropped, current.straightenDegrees) else cropped
+        workingBitmap = baked
+        if (hadPendingTransparency) bitmapHasAlpha = true
+        // Geometry (crop/quad/perspective/straighten) is now baked into the bitmap itself, so its
+        // normalized coordinates are meaningless going forward -- reset exactly like Rotate 90
+        // does. Color adjustments aren't tied to any coordinate space, so those alone carry over.
+        commit(
+            EditState(
+                brightness = current.brightness,
+                contrast = current.contrast,
+                saturation = current.saturation,
+                warmth = current.warmth,
+                highlights = current.highlights,
+                shadows = current.shadows,
+            ),
+        )
     }
 
     // Sliders and drags mutate `current` live (for immediate preview) on every tick, so by the
@@ -329,6 +376,7 @@ fun PhotoEditScreen(
         isLoading = true
         workingBitmap = loadDownsampledBitmap(context, item.uri, maxDimension = 2048)
         isLoading = false
+        bitmapHasAlpha = false
         current = EditState()
         undoStack.clear()
         redoStack.clear()
@@ -340,9 +388,10 @@ fun PhotoEditScreen(
     fun performSave(replace: Boolean) {
         val bitmap = workingBitmap ?: return
         val state = current
+        val hasBakedAlpha = bitmapHasAlpha
         isSaving = true
         scope.launch {
-            saveEditedPhoto(context, bitmap, state, item, replace)
+            saveEditedPhoto(context, bitmap, state, item, replace, hasBakedAlpha)
             if (replace) viewModel.deleteMediaItems(listOf(item), skipTrash = false)
             viewModel.refresh()
             isSaving = false
@@ -456,7 +505,7 @@ fun PhotoEditScreen(
                 tab?.let { t ->
                     when (t) {
                         EditTab.CROP -> Column(Modifier.background(panelBg).padding(vertical = 16.dp)) {
-                            ToolPanelHeader("Crop") { tab = null }
+                            ToolPanelHeader("Crop") { bakeGeometry(); tab = null }
                             Row(
                                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
                                 horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -496,7 +545,7 @@ fun PhotoEditScreen(
                             )
                         }
                         EditTab.FREE_CORNERS -> Column(Modifier.background(panelBg).padding(vertical = 16.dp)) {
-                            ToolPanelHeader("Free corners") { tab = null }
+                            ToolPanelHeader("Free corners") { bakeGeometry(); tab = null }
                             Text(
                                 "Drag a corner to reshape the selection. The area outside it will be transparent.",
                                 style = MaterialTheme.typography.bodySmall,
@@ -520,7 +569,7 @@ fun PhotoEditScreen(
                             )
                         }
                         EditTab.PERSPECTIVE -> Column(Modifier.background(panelBg).padding(vertical = 16.dp)) {
-                            ToolPanelHeader("Perspective") { tab = null }
+                            ToolPanelHeader("Perspective") { bakeGeometry(); tab = null }
                             Text(
                                 "Select a corner, then use the slider to pull it toward or away from the screen. " +
                                     "Reposition the corners themselves in Crop or Free corners first.",
@@ -530,19 +579,20 @@ fun PhotoEditScreen(
                             )
                             Spacer(Modifier.height(12.dp))
                             Row(
-                                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                                horizontalArrangement = Arrangement.SpaceEvenly,
                             ) {
                                 listOf(
-                                    QuadCorner.TOP_LEFT to "Top-left",
-                                    QuadCorner.TOP_RIGHT to "Top-right",
-                                    QuadCorner.BOTTOM_LEFT to "Bottom-left",
-                                    QuadCorner.BOTTOM_RIGHT to "Bottom-right",
+                                    QuadCorner.TOP_LEFT to "Top L",
+                                    QuadCorner.TOP_RIGHT to "Top R",
+                                    QuadCorner.BOTTOM_LEFT to "Bot L",
+                                    QuadCorner.BOTTOM_RIGHT to "Bot R",
                                 ).forEach { (corner, label) ->
                                     DarkPill(
                                         label = label,
                                         selected = selectedPerspectiveCorner == corner,
                                         onClick = { selectedPerspectiveCorner = corner },
+                                        compact = true,
                                     )
                                 }
                             }
@@ -706,14 +756,32 @@ fun PhotoEditScreen(
                                 )
                             },
                     ) {
+                        // While on the Perspective tab, the photo shown IS the actual warped
+                        // result (recomputed live off a downsampled copy as the slider moves) --
+                        // unlike a wireframe-only preview, this is the only way dragging the
+                        // slider visibly does anything to the photo instead of just moving an
+                        // abstract outline that never touched a single pixel.
+                        val perspectivePreview = if (tab == EditTab.PERSPECTIVE && !showOriginal) {
+                            remember(bitmap, current.cropRect, current.cropQuad, current.cropMode, current.perspectiveDepths) {
+                                buildPerspectivePreview(bitmap, current)
+                            }
+                        } else {
+                            null
+                        }
                         Image(
-                            bitmap = bitmap.asImageBitmap(),
+                            bitmap = (perspectivePreview ?: bitmap).asImageBitmap(),
                             contentDescription = item.displayName,
                             contentScale = ContentScale.Fit,
                             colorFilter = colorFilter,
                             modifier = Modifier.fillMaxSize(),
                         )
-                        if (!showOriginal) {
+                        // Stickers/focus are positioned relative to the ORIGINAL, uncropped photo
+                        // (boxSize is that Image's own rendered size) -- while the Perspective tab
+                        // is showing the warped/cropped preview above instead of that original,
+                        // overlaying them would float in the wrong place relative to it, so they're
+                        // hidden for that tab only (same principle as each tab already only showing
+                        // its own relevant overlay).
+                        if (!showOriginal && tab != EditTab.PERSPECTIVE) {
                             if (current.focus.strength > 0f) {
                                 FocusOverlay(current.focus)
                             }
@@ -804,20 +872,10 @@ fun PhotoEditScreen(
                                         onDragEnd = { endLiveMutation() },
                                     )
                                 }
-                                EditTab.PERSPECTIVE -> {
-                                    val baseQuad = if (current.cropMode == CropMode.FREE_CORNERS) {
-                                        current.cropQuad ?: CropQuad.fromRect(current.cropRect)
-                                    } else {
-                                        CropQuad.fromRect(current.cropRect)
-                                    }
-                                    PerspectiveDepthOverlay(
-                                        quad = depthAdjustedQuad(baseQuad, current.perspectiveDepths),
-                                        selectedCorner = selectedPerspectiveCorner,
-                                        boxSize = boxSize,
-                                        density = density,
-                                        onSelectCorner = { selectedPerspectiveCorner = it },
-                                    )
-                                }
+                                // No overlay for Perspective -- the Image above already shows the
+                                // live-warped result directly, so there's no separate wireframe to
+                                // draw on top of it (corner selection happens via the bottom
+                                // panel's Top L/Top R/Bot L/Bot R pills instead).
                                 else -> {}
                             }
                             if (tab == EditTab.ADJUST && current.focus.strength > 0f) {
@@ -857,18 +915,22 @@ private fun ToolDockButton(tab: EditTab, selected: Boolean, onClick: () -> Unit)
 }
 
 @Composable
-private fun DarkPill(label: String, selected: Boolean, onClick: () -> Unit) {
+/** [compact] shrinks padding/text so 4+ of these fit on one row on a phone-width screen without
+ * needing to scroll horizontally to reach the last one (used by the Perspective tab's 4 corner
+ * pills -- previously at full size they overflowed off-screen). */
+@Composable
+private fun DarkPill(label: String, selected: Boolean, onClick: () -> Unit, compact: Boolean = false) {
     Box(
         Modifier
             .clip(RoundedCornerShape(16.dp))
             .background(if (selected) Color.White else Color.White.copy(alpha = 0.12f))
             .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 8.dp),
+            .padding(horizontal = if (compact) 8.dp else 14.dp, vertical = if (compact) 6.dp else 8.dp),
     ) {
         Text(
             label,
             color = if (selected) Color.Black else Color.White,
-            style = MaterialTheme.typography.labelLarge,
+            style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.labelLarge,
         )
     }
 }
@@ -1363,69 +1425,11 @@ private fun FreeCornersOverlay(
     }
 }
 
-/**
- * The Perspective tab's overlay: a STATIC quad outline (already depth-adjusted for preview via
- * [depthAdjustedQuad]) with a tap target on each corner to select it -- unlike [FreeCornersOverlay]
- * or [CropOverlay], nothing here is draggable. Repositioning the corners in 2D happens in the Crop
- * or Free corners tab; this tab only ever changes a selected corner's depth (via a slider elsewhere
- * in the bottom panel), per the user's explicit correction that dragging corners in this tab must
- * not be possible at all.
- */
-@Composable
-private fun PerspectiveDepthOverlay(
-    quad: CropQuad,
-    selectedCorner: QuadCorner,
-    boxSize: IntSize,
-    density: androidx.compose.ui.unit.Density,
-    onSelectCorner: (QuadCorner) -> Unit,
-) {
-    Canvas(modifier = Modifier.fillMaxSize()) {
-        fun toPx(p: NormPoint) = Offset(p.x * size.width, p.y * size.height)
-        val tl = toPx(quad.topLeft)
-        val tr = toPx(quad.topRight)
-        val bl = toPx(quad.bottomLeft)
-        val br = toPx(quad.bottomRight)
-        val path = Path().apply {
-            moveTo(tl.x, tl.y)
-            lineTo(tr.x, tr.y)
-            lineTo(br.x, br.y)
-            lineTo(bl.x, bl.y)
-            close()
-        }
-        drawPath(path, color = Color.White, style = Stroke(width = 2.dp.toPx()))
-    }
-    listOf(
-        QuadCorner.TOP_LEFT to quad.topLeft,
-        QuadCorner.TOP_RIGHT to quad.topRight,
-        QuadCorner.BOTTOM_LEFT to quad.bottomLeft,
-        QuadCorner.BOTTOM_RIGHT to quad.bottomRight,
-    ).forEach { (corner, point) ->
-        val selected = corner == selectedCorner
-        Box(
-            Modifier
-                .normOffset(point.x, point.y, boxSize, density, centerOnPointDp = 40.dp)
-                .size(40.dp)
-                .clickable { onSelectCorner(corner) }
-                .background(Color.Transparent),
-            contentAlignment = Alignment.Center,
-        ) {
-            Box(
-                Modifier
-                    .size(if (selected) 26.dp else 20.dp)
-                    .background(if (selected) MaterialTheme.colorScheme.primary else Color.White, CircleShape)
-                    .border(2.dp, Color.Black, CircleShape),
-            )
-        }
-    }
-}
-
 /** Applies each of [depths]' per-corner "toward/away from the screen" values to [base]'s
  * corresponding corner, scaling it toward or away from the quad's own centroid -- positive depth
  * (toward the viewer) pushes a corner out beyond its original position, negative (away) pulls it
- * in toward the center. Used both for the Perspective tab's live preview (with [base] = whichever
- * of [CropMode.RECT]/[CropMode.FREE_CORNERS]'s own quad is active, in the original photo's
- * normalized space) and for the actual save-time warp (with [base] = the already-cropped bitmap's
- * own unit square) -- see [applyCrop] and [warpQuadToRect]. */
+ * in toward the center. [base] is always the already-cropped bitmap's own unit square here (see
+ * [applyCrop] and [buildPerspectivePreview]); the actual pixel warp is [warpQuadToRect]. */
 private fun depthAdjustedQuad(base: CropQuad, depths: PerspectiveDepths): CropQuad {
     val cx = (base.topLeft.x + base.topRight.x + base.bottomLeft.x + base.bottomRight.x) / 4f
     val cy = (base.topLeft.y + base.topRight.y + base.bottomLeft.y + base.bottomRight.y) / 4f
@@ -1860,12 +1864,35 @@ private fun applyCrop(bitmap: Bitmap, state: EditState): Bitmap {
     }
 }
 
+/**
+ * The Perspective tab's live preview: the exact same crop-then-warp pipeline as [applyCrop] (so
+ * what's shown while dragging the depth slider matches what Save actually produces), run against
+ * a downsampled copy of [source] instead of the full-resolution working bitmap so it stays fast
+ * enough to recompute on every slider tick. [maxDimension] is small since this is only ever shown
+ * scaled down to fit the screen anyway.
+ */
+private fun buildPerspectivePreview(source: Bitmap, state: EditState, maxDimension: Int = 640): Bitmap {
+    val scale = maxDimension.toFloat() / maxOf(source.width, source.height)
+    val downsampled = if (scale < 1f) {
+        Bitmap.createScaledBitmap(
+            source,
+            (source.width * scale).roundToInt().coerceAtLeast(1),
+            (source.height * scale).roundToInt().coerceAtLeast(1),
+            true,
+        )
+    } else {
+        source
+    }
+    return applyCrop(downsampled, state)
+}
+
 private suspend fun saveEditedPhoto(
     context: Context,
     bitmap: Bitmap,
     state: EditState,
     original: MediaItem,
     replace: Boolean,
+    hasBakedAlpha: Boolean,
 ) = withContext(Dispatchers.IO) {
     val cropped = applyCrop(bitmap, state)
     // Stickers/focus below are positioned relative to this rect -- exact for a plain rectangle
@@ -1934,10 +1961,13 @@ private suspend fun saveEditedPhoto(
     // an off-90-degree straighten (see rotateBitmapArbitrary) or a Perspective depth warp that
     // pulls a corner beyond the cropped bitmap's own edge (see applyCrop/depthAdjustedQuad) --
     // JPEG has no alpha channel at all, so saving one through it would flatten that transparency
-    // to solid black. PNG (lossless, alpha-capable) is used instead whenever any of these apply; a
-    // plain rectangle crop with no straighten or perspective is always fully opaque, so JPEG still
-    // applies there as before.
-    val hasTransparency = state.cropMode == CropMode.FREE_CORNERS ||
+    // to solid black. PNG (lossless, alpha-capable) is used instead whenever any of these apply,
+    // OR when a PRIOR Done bake already left real transparency in the incoming bitmap itself
+    // (hasBakedAlpha -- see PhotoEditScreen's bakeGeometry) even though the CURRENTLY pending
+    // state above is fully opaque. A plain rectangle crop with no straighten or perspective and no
+    // earlier bake is always fully opaque, so JPEG still applies there as before.
+    val hasTransparency = hasBakedAlpha ||
+        state.cropMode == CropMode.FREE_CORNERS ||
         !state.perspectiveDepths.isIdentity ||
         state.straightenDegrees % 90f != 0f
     val resolver = context.contentResolver
