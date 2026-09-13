@@ -8,6 +8,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.elghayesh.gallerybackup.data.drive.DriveAuthManager
 import com.elghayesh.gallerybackup.data.drive.DriveAuthResult
+import com.elghayesh.gallerybackup.data.media.MediaRepository
+import com.elghayesh.gallerybackup.data.media.allFolderPathsRecursive
 import com.elghayesh.gallerybackup.data.onedrive.OneDriveAuthManager
 import com.elghayesh.gallerybackup.data.onedrive.OneDriveAuthResult
 import com.elghayesh.gallerybackup.data.onedrive.OneDriveSettingsRepository
@@ -27,8 +29,10 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
     private val authManager = DriveAuthManager(app)
     private val oneDriveSettings = OneDriveSettingsRepository(app)
     private val oneDriveAuthManager = OneDriveAuthManager(app)
+    private val mediaRepository = MediaRepository(app)
 
     val selectedFolders: Flow<Set<String>> = settings.selectedFolders
+    val autoIncludeFutureFolders: Flow<Boolean> = settings.autoIncludeFutureFolders
     val wifiOnly: Flow<Boolean> = settings.wifiOnly
     val isConnected: Flow<Boolean> = settings.isConnected
     val lastSyncTime: Flow<Long?> = settings.lastSyncTime
@@ -53,6 +57,19 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
 
     fun toggleFolder(path: String, selected: Boolean) {
         viewModelScope.launch { settings.setFolderSelected(path, selected) }
+    }
+
+    /** Turning this on snapshots every folder that has media RIGHT NOW as the baseline the user is
+     * expected to have manually chosen from (see [SettingsRepository.autoIncludeFutureFolders]) --
+     * anything that gains media afterward gets backed up automatically without needing to revisit
+     * this screen. Requires a real (not downsampled) folder scan, since [selectedFolders] itself
+     * has no idea which folders currently have media -- only [com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel.root]
+     * does, and that's a different ViewModel not owned here. */
+    fun setAutoIncludeFutureFolders(enabled: Boolean) {
+        viewModelScope.launch {
+            val baseline = if (enabled) mediaRepository.scanFolderTree().allFolderPathsRecursive() else emptySet()
+            settings.setAutoIncludeFutureFolders(enabled, baseline)
+        }
     }
 
     fun setWifiOnly(enabled: Boolean) {

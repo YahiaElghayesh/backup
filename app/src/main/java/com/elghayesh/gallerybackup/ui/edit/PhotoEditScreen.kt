@@ -20,6 +20,8 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -38,12 +40,15 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Crop
+import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.Redo
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.TextFields
+import androidx.compose.material.icons.filled.ThreeDRotation
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material3.AlertDialog
@@ -93,11 +98,14 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.elghayesh.gallerybackup.data.media.MediaItem
+import com.elghayesh.gallerybackup.data.settings.AccentColor
 import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -115,7 +123,9 @@ private enum class CropAspect(val label: String, val ratio: Float) {
 }
 
 private enum class EditTab(val label: String, val icon: ImageVector) {
-    TRANSFORM("Transform", Icons.Filled.Crop),
+    CROP("Crop", Icons.Filled.Crop),
+    FREE_CORNERS("Free corners", Icons.Filled.CropFree),
+    PERSPECTIVE("Perspective", Icons.Filled.ThreeDRotation),
     ADJUST("Adjust", Icons.Filled.Tune),
     STICKER("Sticker", Icons.Filled.TextFields),
 }
@@ -131,15 +141,15 @@ private enum class CropCorner { TOP_LEFT, TOP_RIGHT, BOTTOM_LEFT, BOTTOM_RIGHT }
 
 private data class NormPoint(val x: Float, val y: Float)
 
-/** Which of the three mutually-exclusive crop shapes is active. [RECT] is the plain
- * axis-aligned/aspect-locked crop ([EditState.cropRect]); [FREE_CORNERS] and [PERSPECTIVE] both
- * use the same 4-independently-draggable-corner [CropQuad] interaction, just interpreted
- * differently on save -- [FREE_CORNERS] crops the photo (at its own natural proportions, never
- * stretched) into the quad's shape with transparency outside it (see [cropQuadTransparent]);
- * [PERSPECTIVE] instead warps the quad onto a plain rectangle via a true 4-point projective
- * transform (see [warpQuadToRect]), the classic "pull one corner to correct/add keystone" effect,
- * with the whole result opaque (no transparency, since the warp fills every pixel). */
-private enum class CropMode { RECT, FREE_CORNERS, PERSPECTIVE }
+/** Which of the two mutually-exclusive crop shapes is active -- set automatically to match
+ * whichever of the Crop/Free corners tabs the user is currently on (see the `LaunchedEffect(tab)`
+ * in [PhotoEditScreen]), not chosen via an explicit pill anymore. [RECT] is the plain
+ * axis-aligned/aspect-locked crop ([EditState.cropRect]). [FREE_CORNERS] uses the independently
+ * -draggable-corner [CropQuad] interaction, cropping the photo (at its own natural proportions,
+ * never stretched) into the quad's shape with transparency outside it (see [cropQuadTransparent]).
+ * Perspective is no longer a crop shape of its own -- see [PerspectiveDepths] and
+ * [depthAdjustedQuad] for how it now works as a separate post-crop warp instead. */
+private enum class CropMode { RECT, FREE_CORNERS }
 
 /** A general quadrilateral crop -- each corner moved independently rather than kept as an
  * axis-aligned rectangle. See [CropMode] for how [FREE_CORNERS] and [PERSPECTIVE] each use one of
@@ -168,7 +178,26 @@ private data class TextSticker(
     val xNorm: Float,
     val yNorm: Float,
     val colorArgb: Long,
+    /** Null means no background behind the text at all. */
+    val backgroundArgb: Long? = null,
+    val textSizeSp: Float = 22f,
+    /** Overall size multiplier for the whole sticker (text + background together), independent of
+     * [textSizeSp] -- lets the sticker be scaled as a unit as well as having its own font size tuned. */
+    val scale: Float = 1f,
 )
+
+/** Per-corner "how far this corner is pulled toward (positive) or pushed away from (negative) the
+ * viewer", -100..100, 0 = no perspective effect. Unlike the old drag-based Perspective crop mode,
+ * these never reposition a corner in 2D -- that's what the Crop/Free corners tabs are for -- they
+ * only feed [depthAdjustedQuad], which the actual warp ([warpQuadToRect]) is applied against. */
+private data class PerspectiveDepths(
+    val topLeft: Float = 0f,
+    val topRight: Float = 0f,
+    val bottomLeft: Float = 0f,
+    val bottomRight: Float = 0f,
+) {
+    val isIdentity: Boolean get() = topLeft == 0f && topRight == 0f && bottomLeft == 0f && bottomRight == 0f
+}
 
 /** A soft circular spotlight: everything outside [radiusNorm] of ([xNorm], [yNorm]) darkens by [strength]. */
 private data class FocusSpot(
@@ -183,8 +212,8 @@ private data class EditState(
     val cropRect: NormRect = NormRect.FULL,
     val cropAspect: CropAspect = CropAspect.FREE,
     val cropMode: CropMode = CropMode.RECT,
-    /** Non-null while [cropMode] is [CropMode.FREE_CORNERS] or [CropMode.PERSPECTIVE] -- overrides
-     * [cropRect] for both the on-screen overlay and the actual save. */
+    /** Non-null while [cropMode] is [CropMode.FREE_CORNERS] -- overrides [cropRect] for both the
+     * on-screen overlay and the actual save. */
     val cropQuad: CropQuad? = null,
     /** Continuous fine-rotation ("straighten"), in degrees -- applied as a final step after
      * cropping, unlike the discrete 90-degree rotate button which rotates the whole working
@@ -198,6 +227,8 @@ private data class EditState(
     val shadows: Float = 0f,
     val focus: FocusSpot = FocusSpot(),
     val stickers: List<TextSticker> = emptyList(),
+    /** Applied as a post-crop warp -- see [PerspectiveDepths] and [depthAdjustedQuad]. */
+    val perspectiveDepths: PerspectiveDepths = PerspectiveDepths(),
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -216,7 +247,10 @@ fun PhotoEditScreen(
     var isSaving by remember { mutableStateOf(false) }
     var showSaveChoiceDialog by remember { mutableStateOf(false) }
 
-    var tab by remember { mutableStateOf(EditTab.TRANSFORM) }
+    // Nullable -- null means no tool panel is open (every panel's "Done" button, or tapping the
+    // already-active tool's own dock icon, collapses back to this neutral state), distinct from
+    // always having exactly one of the 5 tools' panels open.
+    var tab by remember { mutableStateOf<EditTab?>(EditTab.CROP) }
     var current by remember { mutableStateOf(EditState()) }
     val undoStack = remember { mutableStateListOf<EditState>() }
     val redoStack = remember { mutableStateListOf<EditState>() }
@@ -225,6 +259,25 @@ fun PhotoEditScreen(
     var nextStickerId by remember { mutableStateOf(1L) }
     var showOriginal by remember { mutableStateOf(false) }
     var adjustParamIndex by remember { mutableStateOf(0) }
+    var selectedPerspectiveCorner by remember { mutableStateOf(QuadCorner.TOP_LEFT) }
+
+    // Which crop shape is "active" follows whichever of the Crop/Free corners tabs is currently
+    // open, rather than an explicit pill -- entering Free corners for the first time seeds its
+    // quad from the current rect crop, exactly like the old pill toggle used to.
+    LaunchedEffect(tab) {
+        when (tab) {
+            EditTab.CROP -> if (current.cropMode != CropMode.RECT) {
+                current = current.copy(cropMode = CropMode.RECT)
+            }
+            EditTab.FREE_CORNERS -> if (current.cropMode != CropMode.FREE_CORNERS || current.cropQuad == null) {
+                current = current.copy(
+                    cropMode = CropMode.FREE_CORNERS,
+                    cropQuad = current.cropQuad ?: CropQuad.fromRect(current.cropRect),
+                )
+            }
+            else -> {}
+        }
+    }
 
     fun commit(newState: EditState) {
         undoStack.add(current)
@@ -267,7 +320,7 @@ fun PhotoEditScreen(
     BackHandler {
         when {
             editingStickerId != null -> editingStickerId = null
-            tab != EditTab.TRANSFORM -> tab = EditTab.TRANSFORM
+            tab != null -> tab = null
             else -> onDone()
         }
     }
@@ -280,6 +333,8 @@ fun PhotoEditScreen(
         undoStack.clear()
         redoStack.clear()
         dragBaseline = null
+        tab = EditTab.CROP
+        selectedPerspectiveCorner = QuadCorner.TOP_LEFT
     }
 
     fun performSave(replace: Boolean) {
@@ -316,16 +371,31 @@ fun PhotoEditScreen(
     editingStickerId?.let { id ->
         val sticker = current.stickers.find { it.id == id }
         StickerTextDialog(
-            initialText = sticker?.text ?: "",
-            onConfirm = { text ->
+            initial = sticker,
+            onConfirm = { draft ->
                 val stickers = if (sticker != null) {
-                    if (text.isBlank()) {
+                    if (draft.text.isBlank()) {
                         current.stickers.filter { it.id != id }
                     } else {
-                        current.stickers.map { if (it.id == id) it.copy(text = text) else it }
+                        current.stickers.map {
+                            if (it.id == id) {
+                                it.copy(
+                                    text = draft.text,
+                                    colorArgb = draft.colorArgb,
+                                    backgroundArgb = draft.backgroundArgb,
+                                    textSizeSp = draft.textSizeSp,
+                                    scale = draft.scale,
+                                )
+                            } else {
+                                it
+                            }
+                        }
                     }
-                } else if (text.isNotBlank()) {
-                    current.stickers + TextSticker(id, text, 0.5f, 0.5f, 0xFFFFFFFFL)
+                } else if (draft.text.isNotBlank()) {
+                    current.stickers + TextSticker(
+                        id, draft.text, 0.5f, 0.5f,
+                        draft.colorArgb, draft.backgroundArgb, draft.textSizeSp, draft.scale,
+                    )
                 } else {
                     current.stickers
                 }
@@ -383,193 +453,193 @@ fun PhotoEditScreen(
         },
         bottomBar = {
             Column(Modifier.background(Color.Black)) {
-                when (tab) {
-                    EditTab.TRANSFORM -> Column(Modifier.background(panelBg).padding(vertical = 16.dp)) {
-                        SectionLabel("Crop shape", modifier = Modifier.padding(horizontal = 16.dp))
-                        Spacer(Modifier.height(8.dp))
-                        Row(
-                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            IconButton(
-                                enabled = workingBitmap != null,
-                                onClick = {
-                                    val bitmap = workingBitmap ?: return@IconButton
-                                    workingBitmap = rotateBitmap90(bitmap)
-                                    // A crop/sticker layout from before the rotation no longer lines up
-                                    // with the new orientation, so this starts a fresh layout on it.
-                                    commit(EditState())
-                                },
+                tab?.let { t ->
+                    when (t) {
+                        EditTab.CROP -> Column(Modifier.background(panelBg).padding(vertical = 16.dp)) {
+                            ToolPanelHeader("Crop") { tab = null }
+                            Row(
+                                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
                             ) {
-                                Icon(Icons.Filled.RotateRight, contentDescription = "Rotate 90°", tint = Color.White)
+                                CropAspect.entries.forEach { a ->
+                                    DarkPill(
+                                        label = a.label,
+                                        selected = current.cropAspect == a,
+                                        onClick = {
+                                            val bitmap = workingBitmap
+                                            val rect = if (a == CropAspect.FREE || bitmap == null) {
+                                                NormRect.FULL
+                                            } else {
+                                                applyAspectLock(current.cropRect, a.ratio, bitmap.width, bitmap.height)
+                                            }
+                                            commit(current.copy(cropAspect = a, cropRect = rect))
+                                        },
+                                    )
+                                }
                             }
-                            DarkPill(
-                                label = "Free corners",
-                                selected = current.cropMode == CropMode.FREE_CORNERS,
-                                onClick = {
-                                    commit(
-                                        if (current.cropMode == CropMode.FREE_CORNERS) {
-                                            current.copy(cropMode = CropMode.RECT, cropQuad = null)
-                                        } else {
-                                            current.copy(
-                                                cropMode = CropMode.FREE_CORNERS,
-                                                cropQuad = current.cropQuad ?: CropQuad.fromRect(current.cropRect),
-                                            )
-                                        },
-                                    )
-                                },
-                            )
-                            DarkPill(
-                                label = "Perspective",
-                                selected = current.cropMode == CropMode.PERSPECTIVE,
-                                onClick = {
-                                    commit(
-                                        if (current.cropMode == CropMode.PERSPECTIVE) {
-                                            current.copy(cropMode = CropMode.RECT, cropQuad = null)
-                                        } else {
-                                            current.copy(
-                                                cropMode = CropMode.PERSPECTIVE,
-                                                cropQuad = current.cropQuad ?: CropQuad.fromRect(current.cropRect),
-                                            )
-                                        },
-                                    )
-                                },
-                            )
-                        }
-                        // Only one of these three ever applies at a time, so only its own controls
-                        // show -- the aspect-ratio row is irrelevant noise while Free corners or
-                        // Perspective is active, and vice versa, rather than always showing every
-                        // control regardless of which shape is actually selected.
-                        when (current.cropMode) {
-                            CropMode.RECT -> {
-                                Spacer(Modifier.height(12.dp))
-                                Row(
-                                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                ) {
-                                    CropAspect.entries.forEach { a ->
-                                        DarkPill(
-                                            label = a.label,
-                                            selected = current.cropAspect == a,
-                                            onClick = {
-                                                val bitmap = workingBitmap
-                                                val rect = if (a == CropAspect.FREE || bitmap == null) {
-                                                    NormRect.FULL
-                                                } else {
-                                                    applyAspectLock(current.cropRect, a.ratio, bitmap.width, bitmap.height)
-                                                }
-                                                commit(current.copy(cropAspect = a, cropRect = rect))
-                                            },
-                                        )
+                            Spacer(Modifier.height(18.dp))
+                            HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = Color.White.copy(alpha = 0.12f))
+                            Spacer(Modifier.height(16.dp))
+                            RotateStraightenControls(
+                                straightenDegrees = current.straightenDegrees,
+                                onRotate90 = {
+                                    workingBitmap?.let { bmp ->
+                                        workingBitmap = rotateBitmap90(bmp)
+                                        // A crop/sticker layout from before the rotation no longer lines
+                                        // up with the new orientation, so this starts a fresh layout on it.
+                                        commit(EditState())
                                     }
-                                }
-                            }
-                            CropMode.FREE_CORNERS -> {
-                                Spacer(Modifier.height(10.dp))
-                                Text(
-                                    "The area outside your selection will be transparent.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = Color.White.copy(alpha = 0.6f),
-                                    modifier = Modifier.padding(horizontal = 16.dp),
-                                )
-                            }
-                            CropMode.PERSPECTIVE -> {
-                                Spacer(Modifier.height(10.dp))
-                                Text(
-                                    "Drag a corner toward or away from you to correct or add perspective.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = Color.White.copy(alpha = 0.6f),
-                                    modifier = Modifier.padding(horizontal = 16.dp),
-                                )
-                            }
-                        }
-                        Spacer(Modifier.height(18.dp))
-                        HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = Color.White.copy(alpha = 0.12f))
-                        Spacer(Modifier.height(16.dp))
-                        Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            SectionLabel("Straighten", modifier = Modifier.weight(1f))
-                            Text(
-                                "${current.straightenDegrees.roundToInt()}°",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = Color.White.copy(alpha = 0.7f),
+                                },
+                                onStraightenLive = { mutateLive(current.copy(straightenDegrees = it)) },
+                                onStraightenCommitFinished = { endLiveMutation() },
+                                onStraightenTyped = { commit(current.copy(straightenDegrees = it)) },
                             )
-                            if (current.straightenDegrees != 0f) {
-                                IconButton(onClick = { commit(current.copy(straightenDegrees = 0f)) }) {
-                                    Icon(
-                                        Icons.Filled.Refresh,
-                                        contentDescription = "Reset straighten",
-                                        tint = Color.White.copy(alpha = 0.7f),
-                                        modifier = Modifier.size(18.dp),
-                                    )
-                                }
-                            }
                         }
-                        Slider(
-                            value = current.straightenDegrees,
-                            onValueChange = { mutateLive(current.copy(straightenDegrees = it)) },
-                            onValueChangeFinished = { endLiveMutation() },
-                            valueRange = -45f..45f,
-                            modifier = Modifier.padding(horizontal = 12.dp),
-                        )
-                    }
-                    EditTab.ADJUST -> Column {
-                        if (current.focus.strength > 0f) {
+                        EditTab.FREE_CORNERS -> Column(Modifier.background(panelBg).padding(vertical = 16.dp)) {
+                            ToolPanelHeader("Free corners") { tab = null }
                             Text(
-                                "Drag the circle on the photo to move the spotlight.",
+                                "Drag a corner to reshape the selection. The area outside it will be transparent.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = Color.White.copy(alpha = 0.6f),
-                                modifier = Modifier.background(panelBg).fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                                modifier = Modifier.padding(horizontal = 16.dp),
+                            )
+                            Spacer(Modifier.height(18.dp))
+                            HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = Color.White.copy(alpha = 0.12f))
+                            Spacer(Modifier.height(16.dp))
+                            RotateStraightenControls(
+                                straightenDegrees = current.straightenDegrees,
+                                onRotate90 = {
+                                    workingBitmap?.let { bmp ->
+                                        workingBitmap = rotateBitmap90(bmp)
+                                        commit(EditState())
+                                    }
+                                },
+                                onStraightenLive = { mutateLive(current.copy(straightenDegrees = it)) },
+                                onStraightenCommitFinished = { endLiveMutation() },
+                                onStraightenTyped = { commit(current.copy(straightenDegrees = it)) },
                             )
                         }
-                        GestureAdjustPanel(
-                            background = panelBg,
-                            labels = listOf(
-                                "Brightness", "Contrast", "Saturation", "Warmth", "Highlights", "Shadows",
-                                "Focus strength", "Spotlight size",
-                            ),
-                            values = listOf(
-                                current.brightness, current.contrast, current.saturation,
-                                current.warmth, current.highlights, current.shadows,
-                                current.focus.strength, current.focus.radiusNorm * 100f,
-                            ),
-                            ranges = List(6) { -100f..100f } + listOf(0f..100f, 10f..80f),
-                            selectedIndex = adjustParamIndex,
-                            onSelect = { adjustParamIndex = it },
-                            onChange = { index, value ->
-                                mutateLive(
-                                    when (index) {
-                                        0 -> current.copy(brightness = value)
-                                        1 -> current.copy(contrast = value)
-                                        2 -> current.copy(saturation = value)
-                                        3 -> current.copy(warmth = value)
-                                        4 -> current.copy(highlights = value)
-                                        5 -> current.copy(shadows = value)
-                                        6 -> current.copy(focus = current.focus.copy(strength = value.coerceIn(0f, 100f)))
-                                        else -> current.copy(
-                                            focus = current.focus.copy(radiusNorm = (value / 100f).coerceIn(0.1f, 0.8f)),
-                                        )
-                                    },
+                        EditTab.PERSPECTIVE -> Column(Modifier.background(panelBg).padding(vertical = 16.dp)) {
+                            ToolPanelHeader("Perspective") { tab = null }
+                            Text(
+                                "Select a corner, then use the slider to pull it toward or away from the screen. " +
+                                    "Reposition the corners themselves in Crop or Free corners first.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color.White.copy(alpha = 0.6f),
+                                modifier = Modifier.padding(horizontal = 16.dp),
+                            )
+                            Spacer(Modifier.height(12.dp))
+                            Row(
+                                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                listOf(
+                                    QuadCorner.TOP_LEFT to "Top-left",
+                                    QuadCorner.TOP_RIGHT to "Top-right",
+                                    QuadCorner.BOTTOM_LEFT to "Bottom-left",
+                                    QuadCorner.BOTTOM_RIGHT to "Bottom-right",
+                                ).forEach { (corner, label) ->
+                                    DarkPill(
+                                        label = label,
+                                        selected = selectedPerspectiveCorner == corner,
+                                        onClick = { selectedPerspectiveCorner = corner },
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.height(16.dp))
+                            val depths = current.perspectiveDepths
+                            val selectedDepth = when (selectedPerspectiveCorner) {
+                                QuadCorner.TOP_LEFT -> depths.topLeft
+                                QuadCorner.TOP_RIGHT -> depths.topRight
+                                QuadCorner.BOTTOM_LEFT -> depths.bottomLeft
+                                QuadCorner.BOTTOM_RIGHT -> depths.bottomRight
+                            }
+                            fun withSelectedDepth(value: Float): PerspectiveDepths = when (selectedPerspectiveCorner) {
+                                QuadCorner.TOP_LEFT -> depths.copy(topLeft = value)
+                                QuadCorner.TOP_RIGHT -> depths.copy(topRight = value)
+                                QuadCorner.BOTTOM_LEFT -> depths.copy(bottomLeft = value)
+                                QuadCorner.BOTTOM_RIGHT -> depths.copy(bottomRight = value)
+                            }
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text("Away", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.6f))
+                                Slider(
+                                    value = selectedDepth,
+                                    onValueChange = { mutateLive(current.copy(perspectiveDepths = withSelectedDepth(it))) },
+                                    onValueChangeFinished = { endLiveMutation() },
+                                    valueRange = -100f..100f,
+                                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
                                 )
-                            },
-                            onChangeFinished = { endLiveMutation() },
-                        )
-                    }
-                    EditTab.STICKER -> Column(Modifier.background(panelBg).fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
-                        TextButton(onClick = { editingStickerId = nextStickerId; nextStickerId += 1 }) {
-                            Icon(Icons.Filled.Add, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                            Spacer(Modifier.width(4.dp))
-                            Text("Add text", color = MaterialTheme.colorScheme.primary)
+                                Text("Toward", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.6f))
+                            }
+                            if (!depths.isIdentity) {
+                                TextButton(
+                                    onClick = { commit(current.copy(perspectiveDepths = PerspectiveDepths())) },
+                                    modifier = Modifier.padding(horizontal = 8.dp),
+                                ) {
+                                    Text("Reset perspective")
+                                }
+                            }
                         }
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            "Drag a sticker to move it, or tap it to edit or remove it.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color.White.copy(alpha = 0.6f),
-                        )
+                        EditTab.ADJUST -> Column(Modifier.background(panelBg)) {
+                            ToolPanelHeader("Adjust", modifier = Modifier.padding(top = 16.dp)) { tab = null }
+                            if (current.focus.strength > 0f) {
+                                Text(
+                                    "Drag the circle on the photo to move the spotlight.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color.White.copy(alpha = 0.6f),
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                                )
+                            }
+                            GestureAdjustPanel(
+                                background = panelBg,
+                                labels = listOf(
+                                    "Brightness", "Contrast", "Saturation", "Warmth", "Highlights", "Shadows",
+                                    "Focus strength", "Spotlight size",
+                                ),
+                                values = listOf(
+                                    current.brightness, current.contrast, current.saturation,
+                                    current.warmth, current.highlights, current.shadows,
+                                    current.focus.strength, current.focus.radiusNorm * 100f,
+                                ),
+                                ranges = List(6) { -100f..100f } + listOf(0f..100f, 10f..80f),
+                                selectedIndex = adjustParamIndex,
+                                onSelect = { adjustParamIndex = it },
+                                onChange = { index, value ->
+                                    mutateLive(
+                                        when (index) {
+                                            0 -> current.copy(brightness = value)
+                                            1 -> current.copy(contrast = value)
+                                            2 -> current.copy(saturation = value)
+                                            3 -> current.copy(warmth = value)
+                                            4 -> current.copy(highlights = value)
+                                            5 -> current.copy(shadows = value)
+                                            6 -> current.copy(focus = current.focus.copy(strength = value.coerceIn(0f, 100f)))
+                                            else -> current.copy(
+                                                focus = current.focus.copy(radiusNorm = (value / 100f).coerceIn(0.1f, 0.8f)),
+                                            )
+                                        },
+                                    )
+                                },
+                                onChangeFinished = { endLiveMutation() },
+                            )
+                        }
+                        EditTab.STICKER -> Column(Modifier.background(panelBg).fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+                            ToolPanelHeader("Sticker") { tab = null }
+                            TextButton(onClick = { editingStickerId = nextStickerId; nextStickerId += 1 }) {
+                                Icon(Icons.Filled.Add, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                                Spacer(Modifier.width(4.dp))
+                                Text("Add text", color = MaterialTheme.colorScheme.primary)
+                            }
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "Drag a sticker to move it, or tap it to edit its text, size, and colors.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color.White.copy(alpha = 0.6f),
+                            )
+                        }
                     }
                 }
                 Row(
@@ -577,7 +647,7 @@ fun PhotoEditScreen(
                     horizontalArrangement = Arrangement.SpaceEvenly,
                 ) {
                     EditTab.entries.forEach { t ->
-                        ToolDockButton(tab = t, selected = tab == t, onClick = { tab = t })
+                        ToolDockButton(tab = t, selected = tab == t, onClick = { tab = if (tab == t) null else t })
                     }
                 }
             }
@@ -651,10 +721,11 @@ fun PhotoEditScreen(
                                 Text(
                                     sticker.text,
                                     color = Color(sticker.colorArgb),
-                                    fontSize = 22.sp,
+                                    fontSize = sticker.textSizeSp.sp,
                                     modifier = Modifier
                                         .align(Alignment.TopStart)
                                         .normOffset(sticker.xNorm, sticker.yNorm, boxSize, density)
+                                        .graphicsLayer(scaleX = sticker.scale, scaleY = sticker.scale)
                                         .pointerInput(sticker.id, boxSize) {
                                             detectDragImmediate(
                                                 onDragEnd = { endLiveMutation() },
@@ -680,21 +751,39 @@ fun PhotoEditScreen(
                                             )
                                         }
                                         .clickable { editingStickerId = sticker.id }
-                                        .background(Color.Black.copy(alpha = 0.25f))
+                                        .background(sticker.backgroundArgb?.let { Color(it) } ?: Color.Transparent)
                                         .padding(horizontal = 6.dp, vertical = 2.dp),
                                 )
                             }
-                            if (tab == EditTab.TRANSFORM) {
-                                val quad = current.cropQuad
-                                if (quad != null) {
-                                    PerspectiveCropOverlay(
+                            when (tab) {
+                                EditTab.CROP -> {
+                                    CropOverlay(
+                                        rect = current.cropRect,
+                                        boxSize = boxSize,
+                                        density = density,
+                                        onCornerDrag = { corner, dxNorm, dyNorm ->
+                                            var rect = updatedCropRect(current.cropRect, corner, dxNorm, dyNorm)
+                                            if (current.cropAspect != CropAspect.FREE && bitmap.width > 0 && bitmap.height > 0) {
+                                                rect = applyAspectLock(rect, current.cropAspect.ratio, bitmap.width, bitmap.height)
+                                            }
+                                            mutateLive(current.copy(cropRect = rect))
+                                        },
+                                        onMoveDrag = { dxNorm, dyNorm ->
+                                            mutateLive(current.copy(cropRect = translatedRect(current.cropRect, dxNorm, dyNorm)))
+                                        },
+                                        onDragEnd = { endLiveMutation() },
+                                    )
+                                }
+                                EditTab.FREE_CORNERS -> {
+                                    val quad = current.cropQuad ?: CropQuad.fromRect(current.cropRect)
+                                    FreeCornersOverlay(
                                         quad = quad,
                                         boxSize = boxSize,
                                         density = density,
                                         onCornerDrag = { corner, dxNorm, dyNorm ->
                                             // Reads current.cropQuad fresh (a property-delegate
                                             // getter, always up to date) rather than the `quad`
-                                            // local captured above -- PerspectiveCropOverlay's own
+                                            // local captured above -- FreeCornersOverlay's own
                                             // pointerInput coroutine, once launched, keeps calling
                                             // THIS SAME closure across many recompositions without
                                             // restarting (it's keyed on boxSize/corner, not on
@@ -714,24 +803,22 @@ fun PhotoEditScreen(
                                         },
                                         onDragEnd = { endLiveMutation() },
                                     )
-                                } else {
-                                    CropOverlay(
-                                        rect = current.cropRect,
+                                }
+                                EditTab.PERSPECTIVE -> {
+                                    val baseQuad = if (current.cropMode == CropMode.FREE_CORNERS) {
+                                        current.cropQuad ?: CropQuad.fromRect(current.cropRect)
+                                    } else {
+                                        CropQuad.fromRect(current.cropRect)
+                                    }
+                                    PerspectiveDepthOverlay(
+                                        quad = depthAdjustedQuad(baseQuad, current.perspectiveDepths),
+                                        selectedCorner = selectedPerspectiveCorner,
                                         boxSize = boxSize,
                                         density = density,
-                                        onCornerDrag = { corner, dxNorm, dyNorm ->
-                                            var rect = updatedCropRect(current.cropRect, corner, dxNorm, dyNorm)
-                                            if (current.cropAspect != CropAspect.FREE && bitmap.width > 0 && bitmap.height > 0) {
-                                                rect = applyAspectLock(rect, current.cropAspect.ratio, bitmap.width, bitmap.height)
-                                            }
-                                            mutateLive(current.copy(cropRect = rect))
-                                        },
-                                        onMoveDrag = { dxNorm, dyNorm ->
-                                            mutateLive(current.copy(cropRect = translatedRect(current.cropRect, dxNorm, dyNorm)))
-                                        },
-                                        onDragEnd = { endLiveMutation() },
+                                        onSelectCorner = { selectedPerspectiveCorner = it },
                                     )
                                 }
+                                else -> {}
                             }
                             if (tab == EditTab.ADJUST && current.focus.strength > 0f) {
                                 FocusHandle(
@@ -798,6 +885,100 @@ private fun SectionLabel(text: String, modifier: Modifier = Modifier) {
         fontWeight = FontWeight.Bold,
         modifier = modifier,
     )
+}
+
+/** Every tool's panel starts with its own name plus an explicit "Done" button -- confirming and
+ * collapsing that particular tool's controls, distinct from the top bar's overall "Save": tapping
+ * Done here just closes this panel (see [PhotoEditScreen]'s nullable `tab`) so the next tool can be
+ * opened without disturbing whatever was just changed in this one. */
+@Composable
+private fun ToolPanelHeader(title: String, modifier: Modifier = Modifier, onDone: () -> Unit) {
+    Row(
+        modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        SectionLabel(title)
+        TextButton(onClick = onDone) {
+            Icon(
+                Icons.Filled.Check,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(Modifier.width(4.dp))
+            Text("Done", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+        }
+    }
+    Spacer(Modifier.height(10.dp))
+}
+
+/** The 90°-rotate button plus the (full-range, typeable) straighten control -- duplicated
+ * identically in both the Crop and Free corners tabs (each keeps its own copy of this section, per
+ * the user's request that both be independently available rather than shared/hidden between the
+ * two tabs). */
+@Composable
+private fun RotateStraightenControls(
+    straightenDegrees: Float,
+    onRotate90: () -> Unit,
+    onStraightenLive: (Float) -> Unit,
+    onStraightenCommitFinished: () -> Unit,
+    onStraightenTyped: (Float) -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = onRotate90) {
+            Icon(Icons.Filled.RotateRight, contentDescription = "Rotate 90°", tint = Color.White)
+        }
+        Spacer(Modifier.width(4.dp))
+        SectionLabel("Straighten", modifier = Modifier.weight(1f))
+        if (straightenDegrees != 0f) {
+            IconButton(onClick = { onStraightenTyped(0f) }) {
+                Icon(
+                    Icons.Filled.Refresh,
+                    contentDescription = "Reset straighten",
+                    tint = Color.White.copy(alpha = 0.7f),
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+    }
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Slider(
+            value = straightenDegrees,
+            onValueChange = onStraightenLive,
+            onValueChangeFinished = onStraightenCommitFinished,
+            valueRange = -180f..180f,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(8.dp))
+        var text by remember { mutableStateOf(straightenDegrees.roundToInt().toString()) }
+        // Syncs from the slider/reset/rotate whenever they change the value out from under this
+        // field, but not on every recomposition -- otherwise a keystroke that hasn't yet rounded to
+        // a value different from what's already committed would get clobbered mid-type.
+        LaunchedEffect(straightenDegrees) {
+            val parsedRounded = text.toFloatOrNull()?.roundToInt()
+            if (parsedRounded != straightenDegrees.roundToInt()) {
+                text = straightenDegrees.roundToInt().toString()
+            }
+        }
+        OutlinedTextField(
+            value = text,
+            onValueChange = { new ->
+                text = new
+                new.toFloatOrNull()?.let { onStraightenTyped(it.coerceIn(-180f, 180f)) }
+            },
+            modifier = Modifier.width(76.dp),
+            singleLine = true,
+            textStyle = MaterialTheme.typography.labelLarge.copy(color = Color.White, textAlign = TextAlign.Center),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        )
+    }
 }
 
 /**
@@ -1077,7 +1258,7 @@ private fun CropOverlay(
  * (not just rectangular) region be cropped out -- see [CropQuad] and [cropQuadTransparent].
  */
 @Composable
-private fun PerspectiveCropOverlay(
+private fun FreeCornersOverlay(
     quad: CropQuad,
     boxSize: IntSize,
     density: androidx.compose.ui.unit.Density,
@@ -1180,6 +1361,84 @@ private fun PerspectiveCropOverlay(
                 .border(2.dp, Color.Black, CircleShape),
         )
     }
+}
+
+/**
+ * The Perspective tab's overlay: a STATIC quad outline (already depth-adjusted for preview via
+ * [depthAdjustedQuad]) with a tap target on each corner to select it -- unlike [FreeCornersOverlay]
+ * or [CropOverlay], nothing here is draggable. Repositioning the corners in 2D happens in the Crop
+ * or Free corners tab; this tab only ever changes a selected corner's depth (via a slider elsewhere
+ * in the bottom panel), per the user's explicit correction that dragging corners in this tab must
+ * not be possible at all.
+ */
+@Composable
+private fun PerspectiveDepthOverlay(
+    quad: CropQuad,
+    selectedCorner: QuadCorner,
+    boxSize: IntSize,
+    density: androidx.compose.ui.unit.Density,
+    onSelectCorner: (QuadCorner) -> Unit,
+) {
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        fun toPx(p: NormPoint) = Offset(p.x * size.width, p.y * size.height)
+        val tl = toPx(quad.topLeft)
+        val tr = toPx(quad.topRight)
+        val bl = toPx(quad.bottomLeft)
+        val br = toPx(quad.bottomRight)
+        val path = Path().apply {
+            moveTo(tl.x, tl.y)
+            lineTo(tr.x, tr.y)
+            lineTo(br.x, br.y)
+            lineTo(bl.x, bl.y)
+            close()
+        }
+        drawPath(path, color = Color.White, style = Stroke(width = 2.dp.toPx()))
+    }
+    listOf(
+        QuadCorner.TOP_LEFT to quad.topLeft,
+        QuadCorner.TOP_RIGHT to quad.topRight,
+        QuadCorner.BOTTOM_LEFT to quad.bottomLeft,
+        QuadCorner.BOTTOM_RIGHT to quad.bottomRight,
+    ).forEach { (corner, point) ->
+        val selected = corner == selectedCorner
+        Box(
+            Modifier
+                .normOffset(point.x, point.y, boxSize, density, centerOnPointDp = 40.dp)
+                .size(40.dp)
+                .clickable { onSelectCorner(corner) }
+                .background(Color.Transparent),
+            contentAlignment = Alignment.Center,
+        ) {
+            Box(
+                Modifier
+                    .size(if (selected) 26.dp else 20.dp)
+                    .background(if (selected) MaterialTheme.colorScheme.primary else Color.White, CircleShape)
+                    .border(2.dp, Color.Black, CircleShape),
+            )
+        }
+    }
+}
+
+/** Applies each of [depths]' per-corner "toward/away from the screen" values to [base]'s
+ * corresponding corner, scaling it toward or away from the quad's own centroid -- positive depth
+ * (toward the viewer) pushes a corner out beyond its original position, negative (away) pulls it
+ * in toward the center. Used both for the Perspective tab's live preview (with [base] = whichever
+ * of [CropMode.RECT]/[CropMode.FREE_CORNERS]'s own quad is active, in the original photo's
+ * normalized space) and for the actual save-time warp (with [base] = the already-cropped bitmap's
+ * own unit square) -- see [applyCrop] and [warpQuadToRect]. */
+private fun depthAdjustedQuad(base: CropQuad, depths: PerspectiveDepths): CropQuad {
+    val cx = (base.topLeft.x + base.topRight.x + base.bottomLeft.x + base.bottomRight.x) / 4f
+    val cy = (base.topLeft.y + base.topRight.y + base.bottomLeft.y + base.bottomRight.y) / 4f
+    fun pulled(p: NormPoint, depth: Float): NormPoint {
+        val factor = 1f + (depth / 100f) * 0.5f
+        return NormPoint(cx + (p.x - cx) * factor, cy + (p.y - cy) * factor)
+    }
+    return CropQuad(
+        topLeft = pulled(base.topLeft, depths.topLeft),
+        topRight = pulled(base.topRight, depths.topRight),
+        bottomLeft = pulled(base.bottomLeft, depths.bottomLeft),
+        bottomRight = pulled(base.bottomRight, depths.bottomRight),
+    )
 }
 
 private fun updatedCropQuad(quad: CropQuad, corner: QuadCorner, dxNorm: Float, dyNorm: Float): CropQuad {
@@ -1422,22 +1681,58 @@ private fun FocusHandle(
     )
 }
 
+/** Everything [StickerTextDialog] can hand back for one sticker in a single shot. */
+private data class StickerDraft(
+    val text: String,
+    val colorArgb: Long,
+    val backgroundArgb: Long?,
+    val textSizeSp: Float,
+    val scale: Float,
+)
+
 @Composable
 private fun StickerTextDialog(
-    initialText: String,
-    onConfirm: (String) -> Unit,
+    initial: TextSticker?,
+    onConfirm: (StickerDraft) -> Unit,
     onDelete: (() -> Unit)?,
     onDismiss: () -> Unit,
 ) {
-    var text by remember { mutableStateOf(initialText) }
+    var text by remember { mutableStateOf(initial?.text ?: "") }
+    var colorArgb by remember { mutableStateOf(initial?.colorArgb ?: 0xFFFFFFFFL) }
+    var backgroundArgb by remember { mutableStateOf(initial?.backgroundArgb) }
+    var textSizeSp by remember { mutableStateOf(initial?.textSizeSp ?: 22f) }
+    var scale by remember { mutableStateOf(initial?.scale ?: 1f) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Text sticker") },
         text = {
-            OutlinedTextField(value = text, onValueChange = { text = it }, label = { Text("Text") })
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    label = { Text("Text") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(14.dp))
+                Text("Text size: ${textSizeSp.roundToInt()}sp", style = MaterialTheme.typography.labelMedium)
+                Slider(value = textSizeSp, onValueChange = { textSizeSp = it }, valueRange = 12f..64f)
+                Spacer(Modifier.height(8.dp))
+                Text("Sticker size: ${String.format("%.1f", scale)}x", style = MaterialTheme.typography.labelMedium)
+                Slider(value = scale, onValueChange = { scale = it }, valueRange = 0.5f..3f)
+                Spacer(Modifier.height(8.dp))
+                Text("Text color", style = MaterialTheme.typography.labelMedium)
+                Spacer(Modifier.height(4.dp))
+                ColorSwatchRow(selectedArgb = colorArgb, onSelect = { it?.let { c -> colorArgb = c } })
+                Spacer(Modifier.height(8.dp))
+                Text("Background", style = MaterialTheme.typography.labelMedium)
+                Spacer(Modifier.height(4.dp))
+                ColorSwatchRow(selectedArgb = backgroundArgb, includeNone = true, onSelect = { backgroundArgb = it })
+            }
         },
         confirmButton = {
-            TextButton(onClick = { onConfirm(text) }) { Text("Done") }
+            TextButton(onClick = { onConfirm(StickerDraft(text, colorArgb, backgroundArgb, textSizeSp, scale)) }) {
+                Text("Done")
+            }
         },
         dismissButton = {
             Row {
@@ -1448,6 +1743,45 @@ private fun StickerTextDialog(
             }
         },
     )
+}
+
+/** A row of tappable color swatches -- [AccentColor]'s hand-picked palette, one per family, reused
+ * here for the sticker's text/background color pickers. [includeNone] prepends a transparent
+ * "no color" swatch (only meaningful for the background picker, where null means no background at
+ * all); [selectedArgb] null with [includeNone] false simply means nothing currently matches. */
+@Composable
+private fun ColorSwatchRow(selectedArgb: Long?, includeNone: Boolean = false, onSelect: (Long?) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        if (includeNone) {
+            Box(
+                Modifier
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .background(Color.Transparent)
+                    .border(1.dp, Color.Gray, CircleShape)
+                    .clickable { onSelect(null) },
+                contentAlignment = Alignment.Center,
+            ) {
+                if (selectedArgb == null) {
+                    Icon(Icons.Filled.Close, contentDescription = "None", tint = Color.Gray, modifier = Modifier.size(16.dp))
+                }
+            }
+        }
+        AccentColor.entries.forEach { c ->
+            val selected = selectedArgb == c.seed
+            Box(
+                Modifier
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .background(Color(c.seed))
+                    .border(if (selected) 3.dp else 1.dp, if (selected) MaterialTheme.colorScheme.primary else Color.Gray, CircleShape)
+                    .clickable { onSelect(c.seed) },
+            )
+        }
+    }
 }
 
 private fun buildColorMatrix(state: EditState): android.graphics.ColorMatrix {
@@ -1502,16 +1836,27 @@ private fun cropRectFor(bitmapW: Int, bitmapH: Int, rect: NormRect): Rect {
     return Rect(left, top, right, bottom)
 }
 
-/** The crop step alone -- see [CropMode] for what each of the three shapes does. */
+/**
+ * The crop step -- see [CropMode] for what each of the two shapes does -- followed by the
+ * Perspective tab's depth-based warp, if any of its corners have been pulled off zero. That warp
+ * operates on the ALREADY-cropped bitmap's own unit square (its 4 real corners), displaced per
+ * [state.perspectiveDepths] and then mapped back onto a plain rectangle via [warpQuadToRect] --
+ * the same "pull a corner to add/correct keystone" mechanism the old drag-based Perspective crop
+ * mode used, just fed a synthetic quad from depth sliders instead of a dragged one.
+ */
 private fun applyCrop(bitmap: Bitmap, state: EditState): Bitmap {
-    val quad = state.cropQuad
-    return when {
-        quad != null && state.cropMode == CropMode.PERSPECTIVE -> warpQuadToRect(bitmap, quad)
-        quad != null -> cropQuadTransparent(bitmap, quad)
-        else -> {
-            val cropRect = cropRectFor(bitmap.width, bitmap.height, state.cropRect)
-            Bitmap.createBitmap(bitmap, cropRect.left, cropRect.top, cropRect.width(), cropRect.height())
-        }
+    val cropped = if (state.cropMode == CropMode.FREE_CORNERS) {
+        val quad = state.cropQuad ?: CropQuad.fromRect(state.cropRect)
+        cropQuadTransparent(bitmap, quad)
+    } else {
+        val cropRect = cropRectFor(bitmap.width, bitmap.height, state.cropRect)
+        Bitmap.createBitmap(bitmap, cropRect.left, cropRect.top, cropRect.width(), cropRect.height())
+    }
+    return if (!state.perspectiveDepths.isIdentity) {
+        val unitSquare = CropQuad.fromRect(NormRect.FULL)
+        warpQuadToRect(cropped, depthAdjustedQuad(unitSquare, state.perspectiveDepths))
+    } else {
+        cropped
     }
 }
 
@@ -1524,9 +1869,14 @@ private suspend fun saveEditedPhoto(
 ) = withContext(Dispatchers.IO) {
     val cropped = applyCrop(bitmap, state)
     // Stickers/focus below are positioned relative to this rect -- exact for a plain rectangle
-    // crop, an approximation (the quad's own axis-aligned bounding box) for a perspective quad,
-    // since those overlays aren't themselves warped through the same projective transform.
-    val effectiveCropRect = state.cropQuad?.let { boundingRectOf(it) } ?: state.cropRect
+    // crop, an approximation (the quad's own axis-aligned bounding box) for a Free corners quad,
+    // since those overlays aren't themselves warped through the same projective transform a
+    // Perspective warp (or the old Free-corners-as-Perspective mode) applies.
+    val effectiveCropRect = if (state.cropMode == CropMode.FREE_CORNERS) {
+        boundingRectOf(state.cropQuad ?: CropQuad.fromRect(state.cropRect))
+    } else {
+        state.cropRect
+    }
 
     val output = Bitmap.createBitmap(cropped.width, cropped.height, Bitmap.Config.ARGB_8888)
     val canvas = android.graphics.Canvas(output)
@@ -1547,16 +1897,30 @@ private suspend fun saveEditedPhoto(
         canvas.drawRect(0f, 0f, output.width.toFloat(), output.height.toFloat(), Paint().apply { this.shader = shader })
     }
 
-    if (state.stickers.isNotEmpty()) {
+    for (sticker in state.stickers) {
+        val relX = (sticker.xNorm - effectiveCropRect.left) / (effectiveCropRect.right - effectiveCropRect.left)
+        val relY = (sticker.yNorm - effectiveCropRect.top) / (effectiveCropRect.bottom - effectiveCropRect.top)
         val textPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-            textSize = output.width / 18f
+            // output.width / 18f at the sticker's own default 22sp/1x preview size matches the old
+            // fixed-size behavior; scaling from there keeps the typed text size and sticker size
+            // sliders' effect proportionally consistent with what the live preview showed.
+            textSize = (output.width / 18f) * (sticker.textSizeSp / 22f) * sticker.scale
+            color = sticker.colorArgb.toInt()
         }
-        for (sticker in state.stickers) {
-            val relX = (sticker.xNorm - effectiveCropRect.left) / (effectiveCropRect.right - effectiveCropRect.left)
-            val relY = (sticker.yNorm - effectiveCropRect.top) / (effectiveCropRect.bottom - effectiveCropRect.top)
-            textPaint.color = sticker.colorArgb.toInt()
-            canvas.drawText(sticker.text, relX * output.width, relY * output.height, textPaint)
+        val x = relX * output.width
+        val y = relY * output.height
+        if (sticker.backgroundArgb != null) {
+            val bounds = Rect()
+            textPaint.getTextBounds(sticker.text, 0, sticker.text.length, bounds)
+            val pad = textPaint.textSize * 0.2f
+            val bgPaint = Paint().apply { color = sticker.backgroundArgb.toInt() }
+            canvas.drawRect(
+                x + bounds.left - pad, y + bounds.top - pad,
+                x + bounds.right + pad, y + bounds.bottom + pad,
+                bgPaint,
+            )
         }
+        canvas.drawText(sticker.text, x, y, textPaint)
     }
 
     // Straighten is applied last, on top of crop + adjustments + focus + stickers -- rotating the
@@ -1567,11 +1931,15 @@ private suspend fun saveEditedPhoto(
     val finalBitmap = if (state.straightenDegrees != 0f) rotateBitmapArbitrary(output, state.straightenDegrees) else output
 
     // A quad crop can leave part of the output transparent (see cropQuadTransparent), and so can
-    // an off-90-degree straighten (see rotateBitmapArbitrary) -- JPEG has no alpha channel at
-    // all, so saving one through it would flatten that transparency to solid black. PNG
-    // (lossless, alpha-capable) is used instead whenever either applies; a plain rectangle crop
-    // with no straighten is always fully opaque, so JPEG still applies there as before.
-    val hasTransparency = state.cropMode == CropMode.FREE_CORNERS || state.straightenDegrees % 90f != 0f
+    // an off-90-degree straighten (see rotateBitmapArbitrary) or a Perspective depth warp that
+    // pulls a corner beyond the cropped bitmap's own edge (see applyCrop/depthAdjustedQuad) --
+    // JPEG has no alpha channel at all, so saving one through it would flatten that transparency
+    // to solid black. PNG (lossless, alpha-capable) is used instead whenever any of these apply; a
+    // plain rectangle crop with no straighten or perspective is always fully opaque, so JPEG still
+    // applies there as before.
+    val hasTransparency = state.cropMode == CropMode.FREE_CORNERS ||
+        !state.perspectiveDepths.isIdentity ||
+        state.straightenDegrees % 90f != 0f
     val resolver = context.contentResolver
     val baseName = original.displayName.substringBeforeLast('.', original.displayName)
     val extension = if (hasTransparency) "png" else "jpg"

@@ -171,6 +171,19 @@ fun FolderNode.promotedChildren(includedFolders: Set<String>): List<FolderNode> 
 fun FolderNode.allItemsRecursive(): List<MediaItem> =
     items + children.values.flatMap { it.allItemsRecursive() }
 
+/** Every real folder path in this tree (this node included, the synthetic empty-path root
+ * excluded) -- used to snapshot "which folders currently have media" as the baseline for the
+ * backup settings' auto-include-future-folders toggle (see [com.elghayesh.gallerybackup.ui.settings.BackupViewModel]):
+ * a folder path already in that baseline was one the user could see and manually choose to back
+ * up at the moment the toggle was turned on, so it's never auto-included later; a path that shows
+ * up in a later scan but wasn't in the baseline is a folder that gained media afterward. */
+fun FolderNode.allFolderPathsRecursive(): Set<String> {
+    val result = mutableSetOf<String>()
+    if (path.isNotEmpty()) result += path
+    children.values.forEach { result += it.allFolderPathsRecursive() }
+    return result
+}
+
 /** Every folder in this tree (this one included) whose own [FolderNode.name] contains [query],
  * case-insensitively -- used by the gallery's search feature to find folders by name regardless
  * of where they sit in the tree. The synthetic root (empty [FolderNode.path]) is never itself a

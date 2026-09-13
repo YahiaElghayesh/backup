@@ -115,9 +115,19 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     private val _allDeviceFolderPaths = MutableStateFlow<Set<String>>(emptySet())
     val allDeviceFolderPaths: StateFlow<Set<String>> = _allDeviceFolderPaths.asStateFlow()
 
+    /** True once the first full [refreshAllDeviceFolders] walk has completed. The walk itself takes
+     * a few seconds (a real recursive filesystem walk, unlike [root]'s fast MediaStore-only scan),
+     * so a folder picker that started rendering [allDeviceFolderPaths] before this flips true would
+     * show a handful of MediaStore-known folders first and then visibly "jump" to the complete list
+     * once the walk lands -- both pickers instead show a loading state until this is true, so the
+     * full list is the only one ever shown. */
+    private val _hasLoadedAllDeviceFolders = MutableStateFlow(false)
+    val hasLoadedAllDeviceFolders: StateFlow<Boolean> = _hasLoadedAllDeviceFolders.asStateFlow()
+
     fun refreshAllDeviceFolders() {
         viewModelScope.launch {
             _allDeviceFolderPaths.value = repository.listAllDeviceFolderPaths()
+            _hasLoadedAllDeviceFolders.value = true
         }
     }
 

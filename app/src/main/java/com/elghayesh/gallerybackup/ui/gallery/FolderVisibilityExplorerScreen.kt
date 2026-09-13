@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -28,6 +29,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -61,10 +63,16 @@ fun FolderVisibilityExplorerScreen(
     val rawRoot by viewModel.root.collectAsState()
     val virtualFolders by viewModel.virtualFolders.collectAsState()
     val allDeviceFolderPaths by viewModel.allDeviceFolderPaths.collectAsState()
+    val hasLoadedAllDeviceFolders by viewModel.hasLoadedAllDeviceFolders.collectAsState()
     val includedFolders by viewModel.includedFolders.collectAsState()
     val hiddenFolders by viewModel.hiddenFolders.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     var currentPath by remember { mutableStateOf("") }
+
+    // Unconditional, unlike AllFilesAccessPrompt's onGranted below -- without that permission the
+    // walk just comes back with whatever it can see (typically nothing), but it still needs to run
+    // once so hasLoadedAllDeviceFolders flips true and the loading spinner below doesn't spin forever.
+    LaunchedEffect(Unit) { viewModel.refreshAllDeviceFolders() }
 
     val root = rawRoot?.withVirtualFolders(virtualFolders + allDeviceFolderPaths)
     val node = root?.findNode(currentPath)
@@ -122,7 +130,15 @@ fun FolderVisibilityExplorerScreen(
                         modifier = Modifier.padding(16.dp),
                     )
                 }
-                if (children.isEmpty()) {
+                if (!hasLoadedAllDeviceFolders) {
+                    // Waits for the FULL device-wide folder walk to land before showing anything --
+                    // otherwise this would first paint just the handful of folders MediaStore
+                    // already knew about (the fast scan behind [root]), then visibly jump to the
+                    // complete list a few seconds later once the slow walk finishes.
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator()
+                    }
+                } else if (children.isEmpty()) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text("No subfolders here.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }

@@ -35,7 +35,10 @@ class MediaChangeObserver(
         MediaChangeSignal.notifyChanged()
         scope.launch {
             val isConnected = settings.isConnected.first()
-            val hasSelection = settings.selectedFolders.first().isNotEmpty()
+            // Auto-include-future-folders means a change can be worth syncing even with nothing
+            // explicitly selected yet -- a newly-populated folder outside the baseline snapshot
+            // still needs to be picked up (see BackupRepository.sync).
+            val hasSelection = settings.selectedFolders.first().isNotEmpty() || settings.autoIncludeFutureFolders.first()
             if (!isConnected || !hasSelection) return@launch
             val wifiOnly = settings.wifiOnly.first()
             SyncScheduler.runDebouncedSyncOnChange(context, wifiOnly)

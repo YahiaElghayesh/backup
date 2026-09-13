@@ -11,6 +11,7 @@ import com.elghayesh.gallerybackup.data.drive.DriveAuthResult
 import com.elghayesh.gallerybackup.data.media.FolderNode
 import com.elghayesh.gallerybackup.data.media.MediaItem
 import com.elghayesh.gallerybackup.data.media.MediaRepository
+import com.elghayesh.gallerybackup.data.media.allFolderPathsRecursive
 import com.elghayesh.gallerybackup.data.onedrive.OneDriveApiClient
 import com.elghayesh.gallerybackup.data.onedrive.OneDriveAuthManager
 import com.elghayesh.gallerybackup.data.onedrive.OneDriveSettingsRepository
@@ -48,18 +49,29 @@ class BackupRepository(private val context: Context) {
         if (driveToken == null && oneDriveToken == null) return SyncOutcome.NotConnected
 
         val selectedFolders = settings.selectedFolders.first()
-        if (selectedFolders.isEmpty()) return SyncOutcome.NothingSelected
-
         val tree = mediaRepository.scanFolderTree()
+        // If the user has turned on "auto-include future folders", any folder that gained media
+        // AFTER that toggle was last switched on (i.e. isn't in the baseline snapshot taken at that
+        // moment -- see SettingsRepository.autoIncludeFutureFolders) is backed up automatically,
+        // exactly as if it had been selected by hand. A folder that already had media at that
+        // moment still needs to be in [selectedFolders] same as always.
+        val effectiveSelectedFolders = if (settings.autoIncludeFutureFolders.first()) {
+            val baseline = settings.knownFoldersBaseline.first()
+            selectedFolders + (tree.allFolderPathsRecursive() - baseline)
+        } else {
+            selectedFolders
+        }
+        if (effectiveSelectedFolders.isEmpty()) return SyncOutcome.NothingSelected
+
         var uploaded = 0
         var failed = 0
         if (driveToken != null) {
-            val (u, f) = syncTreeToDrive(driveToken, tree, selectedFolders, onProgress)
+            val (u, f) = syncTreeToDrive(driveToken, tree, effectiveSelectedFolders, onProgress)
             uploaded += u
             failed += f
         }
         if (oneDriveToken != null) {
-            val (u, f) = syncTreeToOneDrive(oneDriveToken, tree, selectedFolders, onProgress)
+            val (u, f) = syncTreeToOneDrive(oneDriveToken, tree, effectiveSelectedFolders, onProgress)
             uploaded += u
             failed += f
         }
