@@ -110,8 +110,11 @@ import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 private enum class CropAspect(val label: String, val ratio: Float) {
@@ -184,6 +187,8 @@ private data class TextSticker(
     /** Overall size multiplier for the whole sticker (text + background together), independent of
      * [textSizeSp] -- lets the sticker be scaled as a unit as well as having its own font size tuned. */
     val scale: Float = 1f,
+    /** Free rotation, in degrees, set by dragging the sticker's own resize/rotate handle. */
+    val rotationDegrees: Float = 0f,
 )
 
 /** Per-corner "how far this corner is pulled toward (positive) or pushed away from (negative) the
@@ -360,13 +365,33 @@ fun PhotoEditScreen(
         current = redoStack.removeAt(redoStack.lastIndex)
     }
 
+    // Sticker edits (text/size/color/rotation) live-update `current.stickers` directly, WITHOUT a
+    // modal -- unlike the old StickerTextDialog, they're shown in the bottom panel below the photo
+    // (see EditTab.STICKER's body) so the photo stays fully visible the whole time you're adjusting.
+    fun updateSticker(id: Long, transform: (TextSticker) -> TextSticker) {
+        current = current.copy(stickers = current.stickers.map { if (it.id == id) transform(it) else it })
+    }
+
+    // Deselecting (tapping elsewhere on the photo, tapping Done in the sticker panel, or leaving
+    // via back) drops any sticker that was left with no actual text -- e.g. one just added via
+    // "Add text" and then abandoned before typing anything -- instead of leaving an invisible
+    // empty sticker behind.
+    fun deselectSticker() {
+        val id = editingStickerId ?: return
+        val sticker = current.stickers.find { it.id == id }
+        if (sticker != null && sticker.text.isBlank()) {
+            commit(current.copy(stickers = current.stickers.filter { it.id != id }))
+        }
+        editingStickerId = null
+    }
+
     // Without this, system back (button or gesture) always closed the whole editor immediately,
-    // no matter what was open inside it -- a text-sticker dialog mid-edit, or a tool tab other
-    // than Transform. One back press now only steps out one level at a time (closes the sticker
-    // dialog, or returns to Transform from another tab) before a further press actually leaves.
+    // no matter what was open inside it -- a selected sticker mid-edit, or a tool tab other than
+    // Transform. One back press now only steps out one level at a time (deselects the sticker, or
+    // returns to Transform from another tab) before a further press actually leaves.
     BackHandler {
         when {
-            editingStickerId != null -> editingStickerId = null
+            editingStickerId != null -> deselectSticker()
             tab != null -> tab = null
             else -> onDone()
         }
@@ -414,52 +439,6 @@ fun PhotoEditScreen(
                     Text("Save as new")
                 }
             },
-        )
-    }
-
-    editingStickerId?.let { id ->
-        val sticker = current.stickers.find { it.id == id }
-        StickerTextDialog(
-            initial = sticker,
-            onConfirm = { draft ->
-                val stickers = if (sticker != null) {
-                    if (draft.text.isBlank()) {
-                        current.stickers.filter { it.id != id }
-                    } else {
-                        current.stickers.map {
-                            if (it.id == id) {
-                                it.copy(
-                                    text = draft.text,
-                                    colorArgb = draft.colorArgb,
-                                    backgroundArgb = draft.backgroundArgb,
-                                    textSizeSp = draft.textSizeSp,
-                                    scale = draft.scale,
-                                )
-                            } else {
-                                it
-                            }
-                        }
-                    }
-                } else if (draft.text.isNotBlank()) {
-                    current.stickers + TextSticker(
-                        id, draft.text, 0.5f, 0.5f,
-                        draft.colorArgb, draft.backgroundArgb, draft.textSizeSp, draft.scale,
-                    )
-                } else {
-                    current.stickers
-                }
-                commit(current.copy(stickers = stickers))
-                editingStickerId = null
-            },
-            onDelete = if (sticker != null) {
-                {
-                    commit(current.copy(stickers = current.stickers.filter { it.id != id }))
-                    editingStickerId = null
-                }
-            } else {
-                null
-            },
-            onDismiss = { editingStickerId = null },
         )
     }
 
@@ -676,19 +655,109 @@ fun PhotoEditScreen(
                                 onChangeFinished = { endLiveMutation() },
                             )
                         }
-                        EditTab.STICKER -> Column(Modifier.background(panelBg).fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
-                            ToolPanelHeader("Sticker") { tab = null }
-                            TextButton(onClick = { editingStickerId = nextStickerId; nextStickerId += 1 }) {
-                                Icon(Icons.Filled.Add, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                                Spacer(Modifier.width(4.dp))
-                                Text("Add text", color = MaterialTheme.colorScheme.primary)
+                        EditTab.STICKER -> Column(
+                            Modifier.background(panelBg).fillMaxWidth()
+                                .verticalScroll(rememberScrollState())
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                        ) {
+                            val selectedSticker = current.stickers.find { it.id == editingStickerId }
+                            if (selectedSticker == null) {
+                                ToolPanelHeader("Sticker") { tab = null }
+                                TextButton(onClick = {
+                                    val id = nextStickerId
+                                    nextStickerId += 1
+                                    commit(current.copy(stickers = current.stickers + TextSticker(id, "Text", 0.5f, 0.5f, 0xFFFFFFFFL)))
+                                    editingStickerId = id
+                                }) {
+                                    Icon(Icons.Filled.Add, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Add text", color = MaterialTheme.colorScheme.primary)
+                                }
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    "Tap a sticker on the photo to edit it -- drag it to move, or use its " +
+                                        "corner handle to resize and rotate freely.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color.White.copy(alpha = 0.6f),
+                                )
+                            } else {
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    SectionLabel("Sticker")
+                                    Row {
+                                        IconButton(
+                                            onClick = {
+                                                commit(current.copy(stickers = current.stickers.filter { it.id != selectedSticker.id }))
+                                                editingStickerId = null
+                                            },
+                                        ) {
+                                            Icon(Icons.Filled.Close, contentDescription = "Delete sticker", tint = Color.White.copy(alpha = 0.8f))
+                                        }
+                                        TextButton(onClick = { deselectSticker() }) {
+                                            Icon(
+                                                Icons.Filled.Check,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(18.dp),
+                                            )
+                                            Spacer(Modifier.width(4.dp))
+                                            Text("Done", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                }
+                                Spacer(Modifier.height(8.dp))
+                                OutlinedTextField(
+                                    value = selectedSticker.text,
+                                    onValueChange = { newText -> updateSticker(selectedSticker.id) { it.copy(text = newText) } },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    label = { Text("Text") },
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                Text(
+                                    "Text size: ${selectedSticker.textSizeSp.roundToInt()}sp",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = Color.White.copy(alpha = 0.8f),
+                                )
+                                Slider(
+                                    value = selectedSticker.textSizeSp,
+                                    onValueChange = { mutateLive(current.copy(stickers = current.stickers.map { s -> if (s.id == selectedSticker.id) s.copy(textSizeSp = it) else s })) },
+                                    onValueChangeFinished = { endLiveMutation() },
+                                    valueRange = 12f..64f,
+                                )
+                                Text(
+                                    "Sticker size: ${String.format("%.1f", selectedSticker.scale)}x",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = Color.White.copy(alpha = 0.8f),
+                                )
+                                Slider(
+                                    value = selectedSticker.scale,
+                                    onValueChange = { mutateLive(current.copy(stickers = current.stickers.map { s -> if (s.id == selectedSticker.id) s.copy(scale = it) else s })) },
+                                    onValueChangeFinished = { endLiveMutation() },
+                                    valueRange = 0.3f..5f,
+                                )
+                                Spacer(Modifier.height(8.dp))
+                                Text("Text color", style = MaterialTheme.typography.labelMedium, color = Color.White.copy(alpha = 0.8f))
+                                Spacer(Modifier.height(4.dp))
+                                ColorSwatchRow(
+                                    selectedArgb = selectedSticker.colorArgb,
+                                    onSelect = { c ->
+                                        c?.let { commit(current.copy(stickers = current.stickers.map { s -> if (s.id == selectedSticker.id) s.copy(colorArgb = it) else s })) }
+                                    },
+                                )
+                                Spacer(Modifier.height(8.dp))
+                                Text("Background", style = MaterialTheme.typography.labelMedium, color = Color.White.copy(alpha = 0.8f))
+                                Spacer(Modifier.height(4.dp))
+                                ColorSwatchRow(
+                                    selectedArgb = selectedSticker.backgroundArgb,
+                                    includeNone = true,
+                                    onSelect = { c ->
+                                        commit(current.copy(stickers = current.stickers.map { s -> if (s.id == selectedSticker.id) s.copy(backgroundArgb = c) else s }))
+                                    },
+                                )
                             }
-                            Spacer(Modifier.height(4.dp))
-                            Text(
-                                "Drag a sticker to move it, or tap it to edit its text, size, and colors.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Color.White.copy(alpha = 0.6f),
-                            )
                         }
                     }
                 }
@@ -745,7 +814,9 @@ fun PhotoEditScreen(
                             // correctly without any change to their own (unrotated) coordinate math.
                             .graphicsLayer(rotationZ = current.straightenDegrees)
                             // Press and hold anywhere on the photo to instantly preview the untouched
-                            // original -- release to go back to the edited version.
+                            // original -- release to go back to the edited version. A plain tap
+                            // (not on a sticker -- those consume the touch first via their own
+                            // pointerInput/clickable) deselects whichever sticker was selected.
                             .pointerInput(Unit) {
                                 detectTapGestures(
                                     onPress = {
@@ -753,6 +824,7 @@ fun PhotoEditScreen(
                                         tryAwaitRelease()
                                         showOriginal = false
                                     },
+                                    onTap = { deselectSticker() },
                                 )
                             },
                     ) {
@@ -786,6 +858,7 @@ fun PhotoEditScreen(
                                 FocusOverlay(current.focus)
                             }
                             current.stickers.forEach { sticker ->
+                                val isSelected = sticker.id == editingStickerId
                                 Text(
                                     sticker.text,
                                     color = Color(sticker.colorArgb),
@@ -793,7 +866,11 @@ fun PhotoEditScreen(
                                     modifier = Modifier
                                         .align(Alignment.TopStart)
                                         .normOffset(sticker.xNorm, sticker.yNorm, boxSize, density)
-                                        .graphicsLayer(scaleX = sticker.scale, scaleY = sticker.scale)
+                                        .graphicsLayer(
+                                            scaleX = sticker.scale,
+                                            scaleY = sticker.scale,
+                                            rotationZ = sticker.rotationDegrees,
+                                        )
                                         .pointerInput(sticker.id, boxSize) {
                                             detectDragImmediate(
                                                 onDragEnd = { endLiveMutation() },
@@ -818,9 +895,66 @@ fun PhotoEditScreen(
                                                 },
                                             )
                                         }
-                                        .clickable { editingStickerId = sticker.id }
+                                        .clickable {
+                                            editingStickerId = sticker.id
+                                            tab = EditTab.STICKER
+                                        }
                                         .background(sticker.backgroundArgb?.let { Color(it) } ?: Color.Transparent)
+                                        .then(
+                                            if (isSelected) {
+                                                Modifier.border(1.dp, Color.White.copy(alpha = 0.8f))
+                                            } else {
+                                                Modifier
+                                            },
+                                        )
                                         .padding(horizontal = 6.dp, vertical = 2.dp),
+                                )
+                            }
+                            // The selected sticker's own resize+rotate handle -- dragging it changes
+                            // both the sticker's distance from this handle's rest position (-> scale)
+                            // and the angle between them (-> rotation) at once, the standard
+                            // "corner handle" gesture from most sticker/text editors, instead of only
+                            // being adjustable via the size slider in the bottom panel.
+                            current.stickers.firstOrNull { it.id == editingStickerId }?.let { sticker ->
+                                val handleDistancePx = with(density) { 56.dp.toPx() }
+                                Box(
+                                    Modifier
+                                        .align(Alignment.TopStart)
+                                        .offset {
+                                            val baseX = sticker.xNorm * boxSize.width
+                                            val baseY = sticker.yNorm * boxSize.height
+                                            val angleRad = Math.toRadians(sticker.rotationDegrees.toDouble())
+                                            val dist = handleDistancePx * sticker.scale
+                                            IntOffset(
+                                                (baseX + dist * cos(angleRad)).roundToInt(),
+                                                (baseY + dist * sin(angleRad)).roundToInt(),
+                                            )
+                                        }
+                                        .size(32.dp)
+                                        .pointerInput(sticker.id) {
+                                            detectDragImmediate(onDragEnd = { endLiveMutation() }) { change, dragAmount ->
+                                                change.consume()
+                                                val latest = current.stickers.firstOrNull { it.id == sticker.id } ?: return@detectDragImmediate
+                                                val angleRad = Math.toRadians(latest.rotationDegrees.toDouble())
+                                                val dist = handleDistancePx * latest.scale
+                                                val curX = dist * cos(angleRad)
+                                                val curY = dist * sin(angleRad)
+                                                val newX = curX + dragAmount.x
+                                                val newY = curY + dragAmount.y
+                                                val newDist = sqrt(newX * newX + newY * newY)
+                                                val newScale = (newDist / handleDistancePx).toFloat().coerceIn(0.3f, 5f)
+                                                val newRotation = Math.toDegrees(atan2(newY, newX)).toFloat()
+                                                mutateLive(
+                                                    current.copy(
+                                                        stickers = current.stickers.map {
+                                                            if (it.id == sticker.id) it.copy(scale = newScale, rotationDegrees = newRotation) else it
+                                                        },
+                                                    ),
+                                                )
+                                            }
+                                        }
+                                        .background(MaterialTheme.colorScheme.primary, CircleShape)
+                                        .border(2.dp, Color.White, CircleShape),
                                 )
                             }
                             when (tab) {
@@ -914,7 +1048,6 @@ private fun ToolDockButton(tab: EditTab, selected: Boolean, onClick: () -> Unit)
     }
 }
 
-@Composable
 /** [compact] shrinks padding/text so 4+ of these fit on one row on a phone-width screen without
  * needing to scroll horizontally to reach the last one (used by the Perspective tab's 4 corner
  * pills -- previously at full size they overflowed off-screen). */
@@ -1682,70 +1815,6 @@ private fun FocusHandle(
                 }
             }
             .border(2.dp, Color.White, CircleShape),
-    )
-}
-
-/** Everything [StickerTextDialog] can hand back for one sticker in a single shot. */
-private data class StickerDraft(
-    val text: String,
-    val colorArgb: Long,
-    val backgroundArgb: Long?,
-    val textSizeSp: Float,
-    val scale: Float,
-)
-
-@Composable
-private fun StickerTextDialog(
-    initial: TextSticker?,
-    onConfirm: (StickerDraft) -> Unit,
-    onDelete: (() -> Unit)?,
-    onDismiss: () -> Unit,
-) {
-    var text by remember { mutableStateOf(initial?.text ?: "") }
-    var colorArgb by remember { mutableStateOf(initial?.colorArgb ?: 0xFFFFFFFFL) }
-    var backgroundArgb by remember { mutableStateOf(initial?.backgroundArgb) }
-    var textSizeSp by remember { mutableStateOf(initial?.textSizeSp ?: 22f) }
-    var scale by remember { mutableStateOf(initial?.scale ?: 1f) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Text sticker") },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
-                OutlinedTextField(
-                    value = text,
-                    onValueChange = { text = it },
-                    label = { Text("Text") },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(14.dp))
-                Text("Text size: ${textSizeSp.roundToInt()}sp", style = MaterialTheme.typography.labelMedium)
-                Slider(value = textSizeSp, onValueChange = { textSizeSp = it }, valueRange = 12f..64f)
-                Spacer(Modifier.height(8.dp))
-                Text("Sticker size: ${String.format("%.1f", scale)}x", style = MaterialTheme.typography.labelMedium)
-                Slider(value = scale, onValueChange = { scale = it }, valueRange = 0.5f..3f)
-                Spacer(Modifier.height(8.dp))
-                Text("Text color", style = MaterialTheme.typography.labelMedium)
-                Spacer(Modifier.height(4.dp))
-                ColorSwatchRow(selectedArgb = colorArgb, onSelect = { it?.let { c -> colorArgb = c } })
-                Spacer(Modifier.height(8.dp))
-                Text("Background", style = MaterialTheme.typography.labelMedium)
-                Spacer(Modifier.height(4.dp))
-                ColorSwatchRow(selectedArgb = backgroundArgb, includeNone = true, onSelect = { backgroundArgb = it })
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = { onConfirm(StickerDraft(text, colorArgb, backgroundArgb, textSizeSp, scale)) }) {
-                Text("Done")
-            }
-        },
-        dismissButton = {
-            Row {
-                if (onDelete != null) {
-                    IconButton(onClick = onDelete) { Icon(Icons.Filled.Close, contentDescription = "Remove") }
-                }
-                TextButton(onClick = onDismiss) { Text("Cancel") }
-            }
-        },
     )
 }
 
