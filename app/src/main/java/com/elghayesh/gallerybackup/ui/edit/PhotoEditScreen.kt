@@ -41,6 +41,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.Redo
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Tune
@@ -48,6 +49,7 @@ import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -382,10 +384,12 @@ fun PhotoEditScreen(
         bottomBar = {
             Column(Modifier.background(Color.Black)) {
                 when (tab) {
-                    EditTab.TRANSFORM -> Column(Modifier.background(panelBg).padding(vertical = 12.dp)) {
+                    EditTab.TRANSFORM -> Column(Modifier.background(panelBg).padding(vertical = 16.dp)) {
+                        SectionLabel("Crop shape", modifier = Modifier.padding(horizontal = 16.dp))
+                        Spacer(Modifier.height(8.dp))
                         Row(
-                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
-                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             IconButton(
@@ -398,12 +402,8 @@ fun PhotoEditScreen(
                                     commit(EditState())
                                 },
                             ) {
-                                Icon(Icons.Filled.RotateRight, contentDescription = "Rotate", tint = Color.White)
+                                Icon(Icons.Filled.RotateRight, contentDescription = "Rotate 90°", tint = Color.White)
                             }
-                            // Placed right after Rotate, before the aspect pills -- appending it
-                            // at the end of this row (as it was before) put it past however many
-                            // aspect pills fit on screen, off the visible edge until scrolled to,
-                            // easy to miss entirely.
                             DarkPill(
                                 label = "Free corners",
                                 selected = current.cropMode == CropMode.FREE_CORNERS,
@@ -436,50 +436,78 @@ fun PhotoEditScreen(
                                     )
                                 },
                             )
-                            CropAspect.entries.forEach { a ->
-                                DarkPill(
-                                    label = a.label,
-                                    selected = current.cropMode == CropMode.RECT && current.cropAspect == a,
-                                    onClick = {
-                                        val bitmap = workingBitmap
-                                        val rect = if (a == CropAspect.FREE || bitmap == null) {
-                                            NormRect.FULL
-                                        } else {
-                                            applyAspectLock(current.cropRect, a.ratio, bitmap.width, bitmap.height)
-                                        }
-                                        commit(current.copy(cropAspect = a, cropRect = rect, cropMode = CropMode.RECT, cropQuad = null))
-                                    },
-                                )
-                            }
                         }
+                        // Only one of these three ever applies at a time, so only its own controls
+                        // show -- the aspect-ratio row is irrelevant noise while Free corners or
+                        // Perspective is active, and vice versa, rather than always showing every
+                        // control regardless of which shape is actually selected.
                         when (current.cropMode) {
+                            CropMode.RECT -> {
+                                Spacer(Modifier.height(12.dp))
+                                Row(
+                                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                ) {
+                                    CropAspect.entries.forEach { a ->
+                                        DarkPill(
+                                            label = a.label,
+                                            selected = current.cropAspect == a,
+                                            onClick = {
+                                                val bitmap = workingBitmap
+                                                val rect = if (a == CropAspect.FREE || bitmap == null) {
+                                                    NormRect.FULL
+                                                } else {
+                                                    applyAspectLock(current.cropRect, a.ratio, bitmap.width, bitmap.height)
+                                                }
+                                                commit(current.copy(cropAspect = a, cropRect = rect))
+                                            },
+                                        )
+                                    }
+                                }
+                            }
                             CropMode.FREE_CORNERS -> {
-                                Spacer(Modifier.height(8.dp))
+                                Spacer(Modifier.height(10.dp))
                                 Text(
                                     "The area outside your selection will be transparent.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = Color.White.copy(alpha = 0.6f),
-                                    modifier = Modifier.padding(horizontal = 12.dp),
+                                    modifier = Modifier.padding(horizontal = 16.dp),
                                 )
                             }
                             CropMode.PERSPECTIVE -> {
-                                Spacer(Modifier.height(8.dp))
+                                Spacer(Modifier.height(10.dp))
                                 Text(
                                     "Drag a corner toward or away from you to correct or add perspective.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = Color.White.copy(alpha = 0.6f),
-                                    modifier = Modifier.padding(horizontal = 12.dp),
+                                    modifier = Modifier.padding(horizontal = 16.dp),
                                 )
                             }
-                            CropMode.RECT -> Unit
                         }
-                        Spacer(Modifier.height(12.dp))
-                        Text(
-                            "Straighten -- ${current.straightenDegrees.roundToInt()}°",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = Color.White.copy(alpha = 0.7f),
-                            modifier = Modifier.padding(horizontal = 12.dp),
-                        )
+                        Spacer(Modifier.height(18.dp))
+                        HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = Color.White.copy(alpha = 0.12f))
+                        Spacer(Modifier.height(16.dp))
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            SectionLabel("Straighten", modifier = Modifier.weight(1f))
+                            Text(
+                                "${current.straightenDegrees.roundToInt()}°",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = Color.White.copy(alpha = 0.7f),
+                            )
+                            if (current.straightenDegrees != 0f) {
+                                IconButton(onClick = { commit(current.copy(straightenDegrees = 0f)) }) {
+                                    Icon(
+                                        Icons.Filled.Refresh,
+                                        contentDescription = "Reset straighten",
+                                        tint = Color.White.copy(alpha = 0.7f),
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                }
+                            }
+                        }
                         Slider(
                             value = current.straightenDegrees,
                             onValueChange = { mutateLive(current.copy(straightenDegrees = it)) },
@@ -530,12 +558,13 @@ fun PhotoEditScreen(
                             onChangeFinished = { endLiveMutation() },
                         )
                     }
-                    EditTab.STICKER -> Column(Modifier.background(panelBg).fillMaxWidth().padding(16.dp)) {
+                    EditTab.STICKER -> Column(Modifier.background(panelBg).fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
                         TextButton(onClick = { editingStickerId = nextStickerId; nextStickerId += 1 }) {
                             Icon(Icons.Filled.Add, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                             Spacer(Modifier.width(4.dp))
                             Text("Add text", color = MaterialTheme.colorScheme.primary)
                         }
+                        Spacer(Modifier.height(4.dp))
                         Text(
                             "Drag a sticker to move it, or tap it to edit or remove it.",
                             style = MaterialTheme.typography.bodySmall,
@@ -755,6 +784,20 @@ private fun DarkPill(label: String, selected: Boolean, onClick: () -> Unit) {
             style = MaterialTheme.typography.labelLarge,
         )
     }
+}
+
+/** A small caps-style heading above a group of controls in the bottom panel -- gives each section
+ * (crop shape, straighten, etc.) a visible name instead of leaving related controls to just run
+ * together with nothing marking where one group ends and the next begins. */
+@Composable
+private fun SectionLabel(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelMedium,
+        color = Color.White.copy(alpha = 0.85f),
+        fontWeight = FontWeight.Bold,
+        modifier = modifier,
+    )
 }
 
 /**

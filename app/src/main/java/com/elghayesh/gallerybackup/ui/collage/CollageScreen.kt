@@ -28,9 +28,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -45,6 +47,7 @@ import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -291,9 +294,17 @@ fun CollageScreen(
             )
         },
         bottomBar = {
-            Column(Modifier.background(panelBg).padding(vertical = 12.dp)) {
+            Column(
+                Modifier
+                    .background(panelBg)
+                    .heightIn(max = 360.dp)
+                    .verticalScroll(rememberScrollState())
+                    .padding(vertical = 16.dp),
+            ) {
+                CollageSectionLabel("Layout", modifier = Modifier.padding(horizontal = 16.dp))
+                Spacer(Modifier.height(8.dp))
                 Row(
-                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     CollagePreset.entries.forEach { preset ->
@@ -304,9 +315,15 @@ fun CollageScreen(
                         )
                     }
                 }
-                Spacer(Modifier.height(12.dp))
+
+                Spacer(Modifier.height(18.dp))
+                HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = Color.White.copy(alpha = 0.12f))
+                Spacer(Modifier.height(16.dp))
+
+                CollageSectionLabel("Canvas shape", modifier = Modifier.padding(horizontal = 16.dp))
+                Spacer(Modifier.height(8.dp))
                 Row(
-                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     CanvasAspectPreset.entries.forEach { a ->
@@ -314,16 +331,10 @@ fun CollageScreen(
                     }
                 }
                 if (canvasAspectPreset == CanvasAspectPreset.FREE) {
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        "Canvas shape -- width : height",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = Color.White.copy(alpha = 0.7f),
-                        modifier = Modifier.padding(horizontal = 12.dp),
-                    )
+                    Spacer(Modifier.height(10.dp))
                     Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         val fieldColors = OutlinedTextFieldDefaults.colors(
                             focusedTextColor = Color.White,
@@ -352,22 +363,37 @@ fun CollageScreen(
                         )
                     }
                 }
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "Border -- ${borderWidthDp.roundToInt()}dp",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = Color.White.copy(alpha = 0.7f),
-                    modifier = Modifier.padding(horizontal = 12.dp),
-                )
+
+                Spacer(Modifier.height(18.dp))
+                HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = Color.White.copy(alpha = 0.12f))
+                Spacer(Modifier.height(16.dp))
+
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CollageSectionLabel("Border", modifier = Modifier.weight(1f))
+                    Text(
+                        "${borderWidthDp.roundToInt()}dp",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color.White.copy(alpha = 0.7f),
+                    )
+                }
                 Slider(
                     value = borderWidthDp,
                     onValueChange = { borderWidthDp = it },
                     valueRange = 0f..150f,
                     modifier = Modifier.padding(horizontal = 12.dp),
                 )
-                Spacer(Modifier.height(4.dp))
+
+                Spacer(Modifier.height(10.dp))
+                HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = Color.White.copy(alpha = 0.12f))
+                Spacer(Modifier.height(16.dp))
+
+                CollageSectionLabel("Background color", modifier = Modifier.padding(horizontal = 16.dp))
+                Spacer(Modifier.height(8.dp))
                 Row(
-                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     AccentColor.entries.forEach { color ->
@@ -383,15 +409,13 @@ fun CollageScreen(
                     }
                 }
                 if (selectedItemIndex != null) {
+                    Spacer(Modifier.height(18.dp))
+                    HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = Color.White.copy(alpha = 0.12f))
+                    Spacer(Modifier.height(16.dp))
+                    CollageSectionLabel("Selected photo", modifier = Modifier.padding(horizontal = 16.dp))
                     Spacer(Modifier.height(8.dp))
-                    Text(
-                        "Selected photo",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = Color.White.copy(alpha = 0.7f),
-                        modifier = Modifier.padding(horizontal = 12.dp),
-                    )
                     Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -525,6 +549,20 @@ private fun CollagePill(label: String, selected: Boolean, onClick: () -> Unit) {
             style = MaterialTheme.typography.labelLarge,
         )
     }
+}
+
+/** A small caps-style heading above a group of controls in the bottom panel -- gives each section
+ * (layout, canvas shape, border, etc.) a visible name instead of leaving them to just run
+ * together with nothing marking where one group ends and the next begins. */
+@Composable
+private fun CollageSectionLabel(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelMedium,
+        color = Color.White.copy(alpha = 0.85f),
+        fontWeight = FontWeight.Bold,
+        modifier = modifier,
+    )
 }
 
 @Composable
