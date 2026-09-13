@@ -46,6 +46,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import com.elghayesh.gallerybackup.BuildConfig
 import com.elghayesh.gallerybackup.data.settings.AccentColor
 import com.elghayesh.gallerybackup.data.settings.LockMethod
 import com.elghayesh.gallerybackup.data.settings.ThemeMode
@@ -136,6 +137,16 @@ fun GallerySettingsScreen(
                 item {
                     Column(Modifier.padding(16.dp)) {
                         Text("Updates", style = MaterialTheme.typography.titleMedium)
+                        Spacer(Modifier.height(4.dp))
+                        // BuildConfig.VERSION_CODE/VERSION_NAME come straight from this exact APK's
+                        // own manifest -- the same build number the in-app updater compares against
+                        // (see UpdateChecker's doc comment) -- so this is always literally what's
+                        // actually installed, not something that can drift out of sync with it.
+                        Text(
+                            "Build ${BuildConfig.VERSION_CODE} (version ${BuildConfig.VERSION_NAME})",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                         Spacer(Modifier.height(8.dp))
                         Button(
                             onClick = { UpdateCheckCoordinator.requestCheck() },
