@@ -75,6 +75,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.PathOperation
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
@@ -128,12 +129,19 @@ private enum class CropCorner { TOP_LEFT, TOP_RIGHT, BOTTOM_LEFT, BOTTOM_RIGHT }
 
 private data class NormPoint(val x: Float, val y: Float)
 
+/** Which of the three mutually-exclusive crop shapes is active. [RECT] is the plain
+ * axis-aligned/aspect-locked crop ([EditState.cropRect]); [FREE_CORNERS] and [PERSPECTIVE] both
+ * use the same 4-independently-draggable-corner [CropQuad] interaction, just interpreted
+ * differently on save -- [FREE_CORNERS] crops the photo (at its own natural proportions, never
+ * stretched) into the quad's shape with transparency outside it (see [cropQuadTransparent]);
+ * [PERSPECTIVE] instead warps the quad onto a plain rectangle via a true 4-point projective
+ * transform (see [warpQuadToRect]), the classic "pull one corner to correct/add keystone" effect,
+ * with the whole result opaque (no transparency, since the warp fills every pixel). */
+private enum class CropMode { RECT, FREE_CORNERS, PERSPECTIVE }
+
 /** A general quadrilateral crop -- each corner moved independently rather than kept as an
- * axis-aligned rectangle -- used by "Free corners": an arbitrarily-shaped (not just rectangular)
- * crop. On save, the photo is placed at its own natural proportions (never stretched/warped) into
- * the quad's own bounding box, masked to the quad's shape -- so the quad's interior shows the
- * photo and the space between the quad and its bounding box is left transparent, see
- * [cropQuadTransparent]. */
+ * axis-aligned rectangle. See [CropMode] for how [FREE_CORNERS] and [PERSPECTIVE] each use one of
+ * these differently. */
 private data class CropQuad(
     val topLeft: NormPoint,
     val topRight: NormPoint,
@@ -172,9 +180,14 @@ private data class FocusSpot(
 private data class EditState(
     val cropRect: NormRect = NormRect.FULL,
     val cropAspect: CropAspect = CropAspect.FREE,
-    /** Non-null while "Free corners" mode is active -- overrides [cropRect] for both the
-     * on-screen overlay and the actual save, see [CropQuad]'s own doc comment. */
+    val cropMode: CropMode = CropMode.RECT,
+    /** Non-null while [cropMode] is [CropMode.FREE_CORNERS] or [CropMode.PERSPECTIVE] -- overrides
+     * [cropRect] for both the on-screen overlay and the actual save. */
     val cropQuad: CropQuad? = null,
+    /** Continuous fine-rotation ("straighten"), in degrees -- applied as a final step after
+     * cropping, unlike the discrete 90-degree rotate button which rotates the whole working
+     * bitmap up front instead. */
+    val straightenDegrees: Float = 0f,
     val brightness: Float = 0f,
     val contrast: Float = 0f,
     val saturation: Float = 0f,
@@ -393,13 +406,32 @@ fun PhotoEditScreen(
                             // easy to miss entirely.
                             DarkPill(
                                 label = "Free corners",
-                                selected = current.cropQuad != null,
+                                selected = current.cropMode == CropMode.FREE_CORNERS,
                                 onClick = {
                                     commit(
-                                        if (current.cropQuad != null) {
-                                            current.copy(cropQuad = null)
+                                        if (current.cropMode == CropMode.FREE_CORNERS) {
+                                            current.copy(cropMode = CropMode.RECT, cropQuad = null)
                                         } else {
-                                            current.copy(cropQuad = CropQuad.fromRect(current.cropRect))
+                                            current.copy(
+                                                cropMode = CropMode.FREE_CORNERS,
+                                                cropQuad = current.cropQuad ?: CropQuad.fromRect(current.cropRect),
+                                            )
+                                        },
+                                    )
+                                },
+                            )
+                            DarkPill(
+                                label = "Perspective",
+                                selected = current.cropMode == CropMode.PERSPECTIVE,
+                                onClick = {
+                                    commit(
+                                        if (current.cropMode == CropMode.PERSPECTIVE) {
+                                            current.copy(cropMode = CropMode.RECT, cropQuad = null)
+                                        } else {
+                                            current.copy(
+                                                cropMode = CropMode.PERSPECTIVE,
+                                                cropQuad = current.cropQuad ?: CropQuad.fromRect(current.cropRect),
+                                            )
                                         },
                                     )
                                 },
@@ -407,7 +439,7 @@ fun PhotoEditScreen(
                             CropAspect.entries.forEach { a ->
                                 DarkPill(
                                     label = a.label,
-                                    selected = current.cropQuad == null && current.cropAspect == a,
+                                    selected = current.cropMode == CropMode.RECT && current.cropAspect == a,
                                     onClick = {
                                         val bitmap = workingBitmap
                                         val rect = if (a == CropAspect.FREE || bitmap == null) {
@@ -415,20 +447,46 @@ fun PhotoEditScreen(
                                         } else {
                                             applyAspectLock(current.cropRect, a.ratio, bitmap.width, bitmap.height)
                                         }
-                                        commit(current.copy(cropAspect = a, cropRect = rect, cropQuad = null))
+                                        commit(current.copy(cropAspect = a, cropRect = rect, cropMode = CropMode.RECT, cropQuad = null))
                                     },
                                 )
                             }
                         }
-                        if (current.cropQuad != null) {
-                            Spacer(Modifier.height(8.dp))
-                            Text(
-                                "The area outside your selection will be transparent.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Color.White.copy(alpha = 0.6f),
-                                modifier = Modifier.padding(horizontal = 12.dp),
-                            )
+                        when (current.cropMode) {
+                            CropMode.FREE_CORNERS -> {
+                                Spacer(Modifier.height(8.dp))
+                                Text(
+                                    "The area outside your selection will be transparent.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color.White.copy(alpha = 0.6f),
+                                    modifier = Modifier.padding(horizontal = 12.dp),
+                                )
+                            }
+                            CropMode.PERSPECTIVE -> {
+                                Spacer(Modifier.height(8.dp))
+                                Text(
+                                    "Drag a corner toward or away from you to correct or add perspective.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color.White.copy(alpha = 0.6f),
+                                    modifier = Modifier.padding(horizontal = 12.dp),
+                                )
+                            }
+                            CropMode.RECT -> Unit
                         }
+                        Spacer(Modifier.height(12.dp))
+                        Text(
+                            "Straighten -- ${current.straightenDegrees.roundToInt()}°",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Color.White.copy(alpha = 0.7f),
+                            modifier = Modifier.padding(horizontal = 12.dp),
+                        )
+                        Slider(
+                            value = current.straightenDegrees,
+                            onValueChange = { mutateLive(current.copy(straightenDegrees = it)) },
+                            onValueChangeFinished = { endLiveMutation() },
+                            valueRange = -45f..45f,
+                            modifier = Modifier.padding(horizontal = 12.dp),
+                        )
                     }
                     EditTab.ADJUST -> Column {
                         if (current.focus.strength > 0f) {
@@ -529,6 +587,14 @@ fun PhotoEditScreen(
                         modifier = Modifier
                             .size(photoWidthDp, photoHeightDp)
                             .onSizeChanged { boxSize = it }
+                            // Rotates the photo AND every overlay drawn inside this same Box
+                            // (crop rect/quad, focus spot, stickers) together as one rigid unit --
+                            // so the crop selection always stays a plain rectangle/quad relative
+                            // to the tilted photo, the same way dragging a straighten slider works
+                            // in other photo editors, and Compose's hit-testing already accounts
+                            // for this transform, so dragging those overlays' handles keeps working
+                            // correctly without any change to their own (unrotated) coordinate math.
+                            .graphicsLayer(rotationZ = current.straightenDegrees)
                             // Press and hold anywhere on the photo to instantly preview the untouched
                             // original -- release to go back to the edited version.
                             .pointerInput(Unit) {
@@ -1149,6 +1215,66 @@ private fun cropQuadTransparent(source: Bitmap, quad: CropQuad): Bitmap {
     return output
 }
 
+/**
+ * Warps the quadrilateral [quad] (its 4 corners, normalized 0..1 within [source]) onto a
+ * straightened rectangle via a true projective transform -- Matrix.setPolyToPoly with 4 point
+ * pairs performs actual perspective correction, not just an affine skew -- which is what pulling a
+ * single corner toward or away from the viewer simulates: correcting (or deliberately adding)
+ * keystone distortion, like a photo of a document or whiteboard shot at an angle. Unlike
+ * [cropQuadTransparent], the whole output rectangle ends up fully opaque -- there's no "outside
+ * the quad" left over once every pixel has been stretched to fill it. Output size is derived from
+ * the quad's own average edge lengths in source pixels, so a wide, shallow quad still maps to a
+ * roughly similarly-proportioned (now rectangular) output.
+ */
+private fun warpQuadToRect(source: Bitmap, quad: CropQuad): Bitmap {
+    val w = source.width.toFloat()
+    val h = source.height.toFloat()
+    val tl = floatArrayOf(quad.topLeft.x * w, quad.topLeft.y * h)
+    val tr = floatArrayOf(quad.topRight.x * w, quad.topRight.y * h)
+    val bl = floatArrayOf(quad.bottomLeft.x * w, quad.bottomLeft.y * h)
+    val br = floatArrayOf(quad.bottomRight.x * w, quad.bottomRight.y * h)
+
+    fun dist(a: FloatArray, b: FloatArray): Float {
+        val dx = a[0] - b[0]
+        val dy = a[1] - b[1]
+        return sqrt(dx * dx + dy * dy)
+    }
+    val outW = (((dist(tl, tr) + dist(bl, br)) / 2f).roundToInt()).coerceAtLeast(1)
+    val outH = (((dist(tl, bl) + dist(tr, br)) / 2f).roundToInt()).coerceAtLeast(1)
+
+    val src = floatArrayOf(tl[0], tl[1], tr[0], tr[1], bl[0], bl[1], br[0], br[1])
+    val dst = floatArrayOf(0f, 0f, outW.toFloat(), 0f, 0f, outH.toFloat(), outW.toFloat(), outH.toFloat())
+    val matrix = Matrix()
+    matrix.setPolyToPoly(src, 0, dst, 0, 4)
+
+    val output = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+    val canvas = android.graphics.Canvas(output)
+    val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    canvas.drawBitmap(source, matrix, paint)
+    return output
+}
+
+/**
+ * Rotates [bitmap] by an arbitrary [degrees] (the "straighten" slider), unlike [rotateBitmap90]'s
+ * fixed quarter-turn -- the output canvas expands to fit the rotated rectangle so no corner of the
+ * original photo is clipped, which leaves 4 transparent triangular corners around the rotated
+ * content whenever [degrees] isn't a multiple of 90 (see [saveEditedPhoto]'s PNG-vs-JPEG choice).
+ */
+private fun rotateBitmapArbitrary(bitmap: Bitmap, degrees: Float): Bitmap {
+    if (degrees == 0f) return bitmap
+    val matrix = Matrix().apply { postRotate(degrees) }
+    val rotatedBounds = android.graphics.RectF(0f, 0f, bitmap.width.toFloat(), bitmap.height.toFloat())
+    matrix.mapRect(rotatedBounds)
+    val outW = rotatedBounds.width().roundToInt().coerceAtLeast(1)
+    val outH = rotatedBounds.height().roundToInt().coerceAtLeast(1)
+
+    val output = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+    val canvas = android.graphics.Canvas(output)
+    val centeredMatrix = Matrix(matrix).apply { postTranslate(-rotatedBounds.left, -rotatedBounds.top) }
+    canvas.drawBitmap(bitmap, centeredMatrix, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
+    return output
+}
+
 private fun updatedCropRect(rect: NormRect, corner: CropCorner, dxNorm: Float, dyNorm: Float): NormRect {
     val minSize = 0.08f
     return when (corner) {
@@ -1333,14 +1459,16 @@ private fun cropRectFor(bitmapW: Int, bitmapH: Int, rect: NormRect): Rect {
     return Rect(left, top, right, bottom)
 }
 
-/** The crop step alone (quad mask-onto-transparent, or a plain rectangle crop). */
+/** The crop step alone -- see [CropMode] for what each of the three shapes does. */
 private fun applyCrop(bitmap: Bitmap, state: EditState): Bitmap {
     val quad = state.cropQuad
-    return if (quad != null) {
-        cropQuadTransparent(bitmap, quad)
-    } else {
-        val cropRect = cropRectFor(bitmap.width, bitmap.height, state.cropRect)
-        Bitmap.createBitmap(bitmap, cropRect.left, cropRect.top, cropRect.width(), cropRect.height())
+    return when {
+        quad != null && state.cropMode == CropMode.PERSPECTIVE -> warpQuadToRect(bitmap, quad)
+        quad != null -> cropQuadTransparent(bitmap, quad)
+        else -> {
+            val cropRect = cropRectFor(bitmap.width, bitmap.height, state.cropRect)
+            Bitmap.createBitmap(bitmap, cropRect.left, cropRect.top, cropRect.width(), cropRect.height())
+        }
     }
 }
 
@@ -1388,11 +1516,19 @@ private suspend fun saveEditedPhoto(
         }
     }
 
-    // A quad crop can leave part of the output transparent (see cropQuadTransparent) -- JPEG has
-    // no alpha channel at all, so saving one through it would flatten that transparency to solid
-    // black. PNG (lossless, alpha-capable) is used instead whenever that's possible; a plain
-    // rectangle crop is always fully opaque, so JPEG still applies there as before.
-    val hasTransparency = state.cropQuad != null
+    // Straighten is applied last, on top of crop + adjustments + focus + stickers -- rotating the
+    // ALREADY-CROPPED result (rather than the original bitmap) reproduces exactly what the live
+    // preview shows, since that rotates the photo and its crop overlay together as one rigid
+    // unit (see PhotoEditScreen's own comment on the preview Box's graphicsLayer), meaning the
+    // crop selection's normalized coordinates were always relative to the un-rotated photo.
+    val finalBitmap = if (state.straightenDegrees != 0f) rotateBitmapArbitrary(output, state.straightenDegrees) else output
+
+    // A quad crop can leave part of the output transparent (see cropQuadTransparent), and so can
+    // an off-90-degree straighten (see rotateBitmapArbitrary) -- JPEG has no alpha channel at
+    // all, so saving one through it would flatten that transparency to solid black. PNG
+    // (lossless, alpha-capable) is used instead whenever either applies; a plain rectangle crop
+    // with no straighten is always fully opaque, so JPEG still applies there as before.
+    val hasTransparency = state.cropMode == CropMode.FREE_CORNERS || state.straightenDegrees % 90f != 0f
     val resolver = context.contentResolver
     val baseName = original.displayName.substringBeforeLast('.', original.displayName)
     val extension = if (hasTransparency) "png" else "jpg"
@@ -1411,7 +1547,7 @@ private suspend fun saveEditedPhoto(
     val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
     if (uri != null) {
         resolver.openOutputStream(uri)?.use { out ->
-            output.compress(if (hasTransparency) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG, 92, out)
+            finalBitmap.compress(if (hasTransparency) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG, 92, out)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val doneValues = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
