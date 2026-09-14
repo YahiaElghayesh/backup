@@ -1402,7 +1402,7 @@ private fun CropOverlay(
     Box(
         Modifier
             .normOffset(rect.left, rect.top, boxSize, density, centerOnPointDp = 40.dp)
-            .size(40.dp)
+            .size(28.dp)
             .pointerInput(boxSize) {
                 detectDragImmediate(onDragEnd = { onDragEnd() }) { change, dragAmount ->
                     change.consume()
@@ -1411,13 +1411,13 @@ private fun CropOverlay(
                     }
                 }
             }
-            .background(Color.White, CircleShape)
-            .border(2.dp, Color.Black, CircleShape),
+            .background(Color.White.copy(alpha = 0.8f), CircleShape)
+            .border(2.dp, Color.Black.copy(alpha = 0.8f), CircleShape),
     )
     Box(
         Modifier
             .normOffset(rect.right, rect.top, boxSize, density, centerOnPointDp = 40.dp)
-            .size(40.dp)
+            .size(28.dp)
             .pointerInput(boxSize) {
                 detectDragImmediate(onDragEnd = { onDragEnd() }) { change, dragAmount ->
                     change.consume()
@@ -1426,13 +1426,13 @@ private fun CropOverlay(
                     }
                 }
             }
-            .background(Color.White, CircleShape)
-            .border(2.dp, Color.Black, CircleShape),
+            .background(Color.White.copy(alpha = 0.8f), CircleShape)
+            .border(2.dp, Color.Black.copy(alpha = 0.8f), CircleShape),
     )
     Box(
         Modifier
             .normOffset(rect.left, rect.bottom, boxSize, density, centerOnPointDp = 40.dp)
-            .size(40.dp)
+            .size(28.dp)
             .pointerInput(boxSize) {
                 detectDragImmediate(onDragEnd = { onDragEnd() }) { change, dragAmount ->
                     change.consume()
@@ -1441,13 +1441,13 @@ private fun CropOverlay(
                     }
                 }
             }
-            .background(Color.White, CircleShape)
-            .border(2.dp, Color.Black, CircleShape),
+            .background(Color.White.copy(alpha = 0.8f), CircleShape)
+            .border(2.dp, Color.Black.copy(alpha = 0.8f), CircleShape),
     )
     Box(
         Modifier
             .normOffset(rect.right, rect.bottom, boxSize, density, centerOnPointDp = 40.dp)
-            .size(40.dp)
+            .size(28.dp)
             .pointerInput(boxSize) {
                 detectDragImmediate(onDragEnd = { onDragEnd() }) { change, dragAmount ->
                     change.consume()
@@ -1456,8 +1456,8 @@ private fun CropOverlay(
                     }
                 }
             }
-            .background(Color.White, CircleShape)
-            .border(2.dp, Color.Black, CircleShape),
+            .background(Color.White.copy(alpha = 0.8f), CircleShape)
+            .border(2.dp, Color.Black.copy(alpha = 0.8f), CircleShape),
     )
 }
 
@@ -1558,7 +1558,7 @@ private fun FreeCornersOverlay(
         Box(
             Modifier
                 .normOffset(point.x, point.y, boxSize, density, centerOnPointDp = 40.dp)
-                .size(40.dp)
+                .size(28.dp)
                 .pointerInput(boxSize, corner) {
                     detectDragImmediate(onDragEnd = { onDragEnd() }) { change, dragAmount ->
                         change.consume()
@@ -1567,8 +1567,8 @@ private fun FreeCornersOverlay(
                         }
                     }
                 }
-                .background(Color.White, CircleShape)
-                .border(2.dp, Color.Black, CircleShape),
+                .background(Color.White.copy(alpha = 0.8f), CircleShape)
+                .border(2.dp, Color.Black.copy(alpha = 0.8f), CircleShape),
         )
     }
 }
