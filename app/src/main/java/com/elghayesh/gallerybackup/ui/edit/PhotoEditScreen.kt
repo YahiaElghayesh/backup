@@ -1399,6 +1399,9 @@ private fun CropOverlay(
                 }
             },
     )
+    // Invisible -- only the bracket drawn above marks the corner now; this Box exists purely as
+    // the same-size (28dp) touch target the visible circle used to occupy, so removing the circle
+    // doesn't shrink how forgiving dragging from the corner is.
     Box(
         Modifier
             .normOffset(rect.left, rect.top, boxSize, density, centerOnPointDp = 40.dp)
@@ -1410,9 +1413,7 @@ private fun CropOverlay(
                         onCornerDrag(CropCorner.TOP_LEFT, dragAmount.x / boxSize.width, dragAmount.y / boxSize.height)
                     }
                 }
-            }
-            .background(Color.White.copy(alpha = 0.8f), CircleShape)
-            .border(2.dp, Color.Black.copy(alpha = 0.8f), CircleShape),
+            },
     )
     Box(
         Modifier
@@ -1425,9 +1426,7 @@ private fun CropOverlay(
                         onCornerDrag(CropCorner.TOP_RIGHT, dragAmount.x / boxSize.width, dragAmount.y / boxSize.height)
                     }
                 }
-            }
-            .background(Color.White.copy(alpha = 0.8f), CircleShape)
-            .border(2.dp, Color.Black.copy(alpha = 0.8f), CircleShape),
+            },
     )
     Box(
         Modifier
@@ -1440,9 +1439,7 @@ private fun CropOverlay(
                         onCornerDrag(CropCorner.BOTTOM_LEFT, dragAmount.x / boxSize.width, dragAmount.y / boxSize.height)
                     }
                 }
-            }
-            .background(Color.White.copy(alpha = 0.8f), CircleShape)
-            .border(2.dp, Color.Black.copy(alpha = 0.8f), CircleShape),
+            },
     )
     Box(
         Modifier
@@ -1455,9 +1452,7 @@ private fun CropOverlay(
                         onCornerDrag(CropCorner.BOTTOM_RIGHT, dragAmount.x / boxSize.width, dragAmount.y / boxSize.height)
                     }
                 }
-            }
-            .background(Color.White.copy(alpha = 0.8f), CircleShape)
-            .border(2.dp, Color.Black.copy(alpha = 0.8f), CircleShape),
+            },
     )
 }
 
@@ -1566,9 +1561,7 @@ private fun FreeCornersOverlay(
                             onCornerDrag(corner, dragAmount.x / boxSize.width, dragAmount.y / boxSize.height)
                         }
                     }
-                }
-                .background(Color.White.copy(alpha = 0.8f), CircleShape)
-                .border(2.dp, Color.Black.copy(alpha = 0.8f), CircleShape),
+                },
         )
     }
 }
