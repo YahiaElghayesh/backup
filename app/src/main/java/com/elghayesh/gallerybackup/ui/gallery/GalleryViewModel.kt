@@ -15,6 +15,7 @@ import com.elghayesh.gallerybackup.data.media.TrashRepository
 import com.elghayesh.gallerybackup.data.media.allItemsRecursive
 import com.elghayesh.gallerybackup.data.media.copyMediaTo
 import com.elghayesh.gallerybackup.data.media.filtered
+import com.elghayesh.gallerybackup.data.media.findNode
 import com.elghayesh.gallerybackup.data.media.withVirtualFolders
 import com.elghayesh.gallerybackup.data.settings.AccentColor
 import com.elghayesh.gallerybackup.data.settings.FolderCover
@@ -48,6 +49,23 @@ private data class RootFilterInputs(
     val hiddenFolders: Set<String>,
     val hiddenMedia: Set<Long>,
     val showHidden: Boolean,
+)
+
+enum class TransferAction { MOVE, COPY }
+
+/** How to resolve a Move/Copy whose incoming item(s) collide by name with something already at
+ * the destination -- see [GalleryViewModel.requestTransfer] and [GalleryViewModel.resolveNameConflict]. */
+enum class NameConflictResolution { REPLACE, KEEP_BOTH, CANCEL }
+
+/** A Move/Copy waiting on the user to say how to handle a name collision at the destination.
+ * [conflictingNames] are the incoming items' own display names that already exist there, shown
+ * so the user knows what they're being asked about. */
+data class PendingNameConflict(
+    val mediaItems: List<MediaItem>,
+    val folders: List<FolderNode>,
+    val destinationPath: String,
+    val action: TransferAction,
+    val conflictingNames: List<String>,
 )
 
 class GalleryViewModel(app: Application) : AndroidViewModel(app) {
@@ -97,6 +115,11 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
 
     /** The full, unfiltered scan -- used by backup folder selection, which should see everything. */
     val root: StateFlow<FolderNode?> = _rawRoot.asStateFlow()
+
+    /** Non-null while a Move/Copy is waiting on the user to resolve a name collision at the
+     * destination -- see [requestTransfer]/[resolveNameConflict]. */
+    private val _pendingNameConflict = MutableStateFlow<PendingNameConflict?>(null)
+    val pendingNameConflict: StateFlow<PendingNameConflict?> = _pendingNameConflict.asStateFlow()
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
@@ -762,6 +785,57 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     fun copySelectionTo(mediaItems: List<MediaItem>, folders: List<FolderNode>, destinationPath: String) {
         if (mediaItems.isNotEmpty()) copyMediaItems(mediaItems, destinationPath)
         folders.forEach { copyFolder(it, destinationPath) }
+    }
+
+    /**
+     * Entry point every Move/Copy picker should call instead of [moveSelectionTo]/[copySelectionTo]
+     * directly. [mediaItems] whose display name (case-insensitive) already exists directly in the
+     * destination folder used to get silently auto-renamed by MediaStore with no way to ask for
+     * anything else -- this checks for that upfront and, if any exist, parks the whole transfer in
+     * [pendingNameConflict] instead of running it, so the UI can ask Replace/Keep both/Cancel (see
+     * [resolveNameConflict]) rather than deciding on the user's behalf. Folder-name collisions
+     * (moving/copying a whole folder onto an existing one) aren't covered by this -- those already
+     * refuse and fall back to the old copy+trash approach on their own, unchanged.
+     */
+    fun requestTransfer(mediaItems: List<MediaItem>, folders: List<FolderNode>, destinationPath: String, action: TransferAction) {
+        val destinationNames = _rawRoot.value?.findNode(destinationPath)?.items
+            ?.map { it.displayName.lowercase() }?.toSet() ?: emptySet()
+        val conflicts = mediaItems.filter { it.displayName.lowercase() in destinationNames }
+        if (conflicts.isEmpty()) {
+            performTransfer(mediaItems, folders, destinationPath, action)
+        } else {
+            _pendingNameConflict.value = PendingNameConflict(mediaItems, folders, destinationPath, action, conflicts.map { it.displayName })
+        }
+    }
+
+    /**
+     * Resolves the transfer parked in [pendingNameConflict]. [NameConflictResolution.CANCEL] drops
+     * it untouched -- nothing was ever moved/copied, so there's nothing to undo.
+     * [NameConflictResolution.KEEP_BOTH] just runs the transfer as before -- MediaStore's own
+     * auto-rename on a colliding name already produces exactly a "keep both" outcome.
+     * [NameConflictResolution.REPLACE] first trashes whichever of the destination's existing items
+     * collide by name (through the same real trash/consent flow as a direct delete, so it's
+     * recoverable rather than silently gone) -- MediaStore's own trash renames the file out of the
+     * way as part of that, which is what frees up the exact name for the transfer that follows to
+     * land under, with no separate overwrite logic needed.
+     */
+    fun resolveNameConflict(resolution: NameConflictResolution) {
+        val pending = _pendingNameConflict.value ?: return
+        _pendingNameConflict.value = null
+        if (resolution == NameConflictResolution.CANCEL) return
+        viewModelScope.launch {
+            if (resolution == NameConflictResolution.REPLACE) {
+                val incomingNames = pending.mediaItems.map { it.displayName.lowercase() }.toSet()
+                val existingConflicts = _rawRoot.value?.findNode(pending.destinationPath)?.items
+                    ?.filter { it.displayName.lowercase() in incomingNames } ?: emptyList()
+                if (existingConflicts.isNotEmpty() && !requestTrash(existingConflicts, skipTrash = false)) return@launch
+            }
+            performTransfer(pending.mediaItems, pending.folders, pending.destinationPath, pending.action)
+        }
+    }
+
+    private fun performTransfer(mediaItems: List<MediaItem>, folders: List<FolderNode>, destinationPath: String, action: TransferAction) {
+        if (action == TransferAction.MOVE) moveSelectionTo(mediaItems, folders, destinationPath) else copySelectionTo(mediaItems, folders, destinationPath)
     }
 
     fun deleteSelection(mediaItems: List<MediaItem>, folders: List<FolderNode>, skipTrash: Boolean) {

@@ -133,6 +133,7 @@ import com.elghayesh.gallerybackup.data.settings.GroupCriterion
 import com.elghayesh.gallerybackup.data.settings.SortCriterion
 import com.elghayesh.gallerybackup.data.settings.ViewType
 import com.elghayesh.gallerybackup.ui.common.CreateFolderDialog
+import com.elghayesh.gallerybackup.ui.common.NameConflictDialog
 import com.elghayesh.gallerybackup.ui.common.FolderCoverDialog
 import com.elghayesh.gallerybackup.ui.common.FolderTreePickerDialog
 import com.elghayesh.gallerybackup.ui.common.MediaActionBar
@@ -296,6 +297,7 @@ fun GalleryScreen(
     val currentMedia = rememberUpdatedState(media)
     val selectedItems = media.filter { it.id in selectedMediaIds }
     val selectedFolderNodes = folders.filter { it.path in selectedFolderPaths }
+    val pendingNameConflict by viewModel.pendingNameConflict.collectAsState()
     val isSelectionMode = selectedMediaIds.isNotEmpty() || selectedFolderPaths.isNotEmpty()
     val totalSelectedCount = selectedItems.size + selectedFolderNodes.size
     val totalSelectableCount = folders.size + media.size
@@ -419,14 +421,21 @@ fun GalleryScreen(
             root = visibleRoot,
             title = if (mode == FolderTransferMode.MOVE) "Move to..." else "Copy to...",
             onPick = { destination ->
-                if (mode == FolderTransferMode.MOVE) {
-                    viewModel.moveSelectionTo(selectedItems, selectedFolderNodes, destination)
-                } else {
-                    viewModel.copySelectionTo(selectedItems, selectedFolderNodes, destination)
-                }
+                viewModel.requestTransfer(
+                    selectedItems,
+                    selectedFolderNodes,
+                    destination,
+                    if (mode == FolderTransferMode.MOVE) TransferAction.MOVE else TransferAction.COPY,
+                )
                 transferMode = null
             },
             onDismiss = { transferMode = null },
+        )
+    }
+    pendingNameConflict?.let { conflict ->
+        NameConflictDialog(
+            conflictingNames = conflict.conflictingNames,
+            onResolve = { viewModel.resolveNameConflict(it) },
         )
     }
     if (showProperties && totalSelectedCount > 0) {

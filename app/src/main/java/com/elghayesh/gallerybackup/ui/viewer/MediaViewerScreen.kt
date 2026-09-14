@@ -71,12 +71,14 @@ import com.elghayesh.gallerybackup.data.media.MediaItem
 import com.elghayesh.gallerybackup.data.media.findNode
 import com.elghayesh.gallerybackup.ui.common.FolderTreePickerDialog
 import com.elghayesh.gallerybackup.ui.common.MediaActionBar
+import com.elghayesh.gallerybackup.ui.common.NameConflictDialog
 import com.elghayesh.gallerybackup.ui.common.PropertiesDialog
 import com.elghayesh.gallerybackup.ui.common.RenameDialog
 import com.elghayesh.gallerybackup.ui.common.rememberDeleteRequester
 import com.elghayesh.gallerybackup.ui.common.setAsWallpaper
 import com.elghayesh.gallerybackup.ui.common.shareMedia
 import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
+import com.elghayesh.gallerybackup.ui.gallery.TransferAction
 import com.elghayesh.gallerybackup.ui.gallery.effectiveFolderSort
 import com.elghayesh.gallerybackup.ui.gallery.sortedMedia
 
@@ -123,6 +125,7 @@ fun MediaViewerScreen(
     var currentScale by remember { mutableFloatStateOf(1f) }
 
     var transferMode by remember { mutableStateOf<ViewerTransferMode?>(null) }
+    val pendingNameConflict by viewModel.pendingNameConflict.collectAsState()
     var showProperties by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
     val requestDelete = rememberDeleteRequester(viewModel)
@@ -147,15 +150,22 @@ fun MediaViewerScreen(
             title = if (mode == ViewerTransferMode.MOVE) "Move to..." else "Copy to...",
             onPick = { destination ->
                 currentItem?.let { item ->
-                    if (mode == ViewerTransferMode.MOVE) {
-                        viewModel.moveMediaItems(listOf(item), destination)
-                    } else {
-                        viewModel.copyMediaItems(listOf(item), destination)
-                    }
+                    viewModel.requestTransfer(
+                        listOf(item),
+                        emptyList(),
+                        destination,
+                        if (mode == ViewerTransferMode.MOVE) TransferAction.MOVE else TransferAction.COPY,
+                    )
                 }
                 transferMode = null
             },
             onDismiss = { transferMode = null },
+        )
+    }
+    pendingNameConflict?.let { conflict ->
+        NameConflictDialog(
+            conflictingNames = conflict.conflictingNames,
+            onResolve = { viewModel.resolveNameConflict(it) },
         )
     }
     if (showProperties && currentItem != null) {
