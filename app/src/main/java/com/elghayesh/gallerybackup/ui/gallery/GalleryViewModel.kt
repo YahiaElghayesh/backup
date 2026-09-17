@@ -303,16 +303,20 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
      * longer be found there once MediaStore's own trash actually holds it. */
     private val _trashedScan = MutableStateFlow<List<MediaItem>>(emptyList())
 
-    /** Every trashed item. On Android 11+ these come from [_trashedScan], since MediaStore's real
-     * trash removes the item from [_rawRoot]'s normal scan the moment it's trashed. Below Android
-     * 11, trashing is pure local bookkeeping with the file left untouched, so it's still resolved
-     * from the regular scan there instead. */
+    /** Every trashed item, most recently deleted first. On Android 11+ these come from
+     * [_trashedScan], since MediaStore's real trash removes the item from [_rawRoot]'s normal
+     * scan the moment it's trashed. Below Android 11, trashing is pure local bookkeeping with the
+     * file left untouched, so it's still resolved from the regular scan there instead. Either
+     * way, the underlying scan's own order has no defined relationship to when something was
+     * actually deleted -- [trashedEntries]' own timestamp (recorded at the moment of trashing) is
+     * what "sorted by date deleted" has to mean. */
     val trashedItems: StateFlow<List<MediaItem>> = combine(_rawRoot, trashedEntries, _trashedScan) { raw, entries, scanned ->
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        val items = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             scanned.filter { it.id in entries.keys }
         } else {
             raw?.allItemsRecursive()?.filter { it.id in entries.keys } ?: emptyList()
         }
+        items.sortedByDescending { entries[it.id] ?: 0L }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     init {
