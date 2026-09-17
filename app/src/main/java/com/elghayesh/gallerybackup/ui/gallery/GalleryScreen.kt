@@ -1724,24 +1724,20 @@ private fun FolderCoverContent(folder: FolderNode, cover: FolderCover?, included
     }
 }
 
-/** Font size as a fraction of [CoverText]'s own measured container width, at the largest end of
- * the slider's range -- only ever used as a guaranteed-too-big starting point to shrink down from
- * (see [CoverText]'s own doc comment); using a size relative to the container (rather than a
- * fixed sp value from Material typography) is what keeps that starting guess sized consistently
- * everywhere CoverText is used -- a big cover-dialog preview and a small grid tile included. */
+/** Font size as a fraction of [CoverText]'s own measured container width, at [userScale] 1f --
+ * using a size relative to the container (rather than a fixed sp value from Material typography)
+ * is what makes the exact same [userScale] look the same relative size everywhere CoverText is
+ * used -- a big cover-dialog preview and a small grid tile included -- instead of comfortably
+ * fitting in one and being forced tiny (or wrapping badly) in the other. */
 private const val COVER_FONT_WIDTH_FRACTION = 0.18f
 
 /** The folder-cover text-size slider's own range (see FolderCoverDialog, which reads these same
- * two constants) -- [CoverText] needs them to turn the raw slider value into a proportional
- * position between the smallest and largest size that actually fits, rather than treating it as
- * a direct font-size multiplier. */
+ * two constants). Deliberately calibrated, together with [COVER_FONT_WIDTH_FRACTION], so the
+ * requested size at [COVER_TEXT_MAX_SCALE] is a realistic size an ordinary folder name can
+ * actually reach without needing [CoverText]'s overflow shrink to kick in -- see its own doc
+ * comment for why a much higher max (this used to be 3.5f) defeated the point of a slider at all. */
 internal const val COVER_TEXT_MIN_SCALE = 0.4f
-internal const val COVER_TEXT_MAX_SCALE = 3.5f
-
-/** At the slider's minimum, text renders at this fraction of the largest size that fits -- never
- * shrunk all the way down to (or anywhere near) [COVER_FONT_MIN_SIZE_SP], which would make the
- * low end of the slider produce illegibly tiny text regardless of how big the cover itself is. */
-private const val COVER_MIN_SCALE_FRACTION_OF_MAX = 0.3f
+internal const val COVER_TEXT_MAX_SCALE = 1.6f
 
 /** Absolute floor purely to stop the shrink loop from ever reaching zero/negative size -- not a
  * "give up and truncate" threshold. Real folder names fit comfortably in [COVER_MAX_LINES] lines
@@ -1779,22 +1775,33 @@ private fun hasMidWordBreak(result: TextLayoutResult, text: String): Boolean {
     return false
 }
 
-/** A text folder cover's label, sized by [userScale] (the position the user picked on the cover
- * dialog's slider, [COVER_TEXT_MIN_SCALE]..[COVER_TEXT_MAX_SCALE]) between the smallest and
- * largest size that actually fits within its own measured bounds -- both width AND height -- so a
- * long or large custom cover name never spills past the thumbnail it's drawn on, however small
- * the tile or row is. When [wrap] is on, a name too long to fit even at the smallest readable size
- * is allowed to grow past 2 lines (up to [COVER_MAX_LINES_WRAP]) instead of being cut off; only
- * [wrap] off (single line by design) still ellipsizes if a name can't be shrunk to fit on one line.
+/** A text folder cover's label, starting at [userScale] (the size the user picked in the cover
+ * dialog) and shrinking further, only if needed, until it fits within its own measured bounds --
+ * both width AND height -- so a long or large custom cover name never spills past the thumbnail
+ * it's drawn on, however small the tile or row is. When [wrap] is on, a name too long to fit even
+ * at the smallest readable size is allowed to grow past 2 lines (up to [COVER_MAX_LINES_WRAP])
+ * instead of being cut off; only [wrap] off (single line by design) still ellipsizes if a name
+ * can't be shrunk to fit on one line.
  *
- * [userScale] used to be treated as a direct font-size multiplier, shrunk further only if it
- * overflowed -- which meant most of the slider's range collapsed onto the same result: any
- * [userScale] past the point where the multiplied size first overflowed converged, via repeated
- * shrinking, to essentially the same "largest size that fits" -- so the slider felt like it jumped
- * straight from small to maxed-out with an unresponsive tail afterward, instead of scaling
- * smoothly. Finding that maximum first, then placing [userScale] proportionally between it and
- * [COVER_MIN_SCALE_FRACTION_OF_MAX] of it, makes every point on the slider produce a distinct,
- * predictable size instead.
+ * [userScale] alone always requests the exact same font size regardless of what [text] actually
+ * is -- the same setting looks the same size on every cover, the same way picking a font size in
+ * any ordinary text editor does. An earlier version of this instead normalized [userScale] as a
+ * percentage of *that specific text's own* largest size that fits -- which sounds equivalent but
+ * isn't: a short name like "Grad" has a far higher such ceiling than a long one like "Center of
+ * Excellence", so the exact same slider value (the exact same percentage) rendered wildly
+ * different absolute sizes side by side in the same folder list, which is a worse bug than the
+ * one that approach was trying to fix (see below). The shrink-if-needed step here still exists,
+ * but only ever kicks in for a given text once its *requested* size (which is text-independent)
+ * would actually overflow -- it's a safety net for unusually long names, not the primary sizing
+ * mechanism.
+ *
+ * [COVER_TEXT_MAX_SCALE] is deliberately calibrated (together with [COVER_FONT_WIDTH_FRACTION])
+ * so the requested size at the slider's own maximum is one an ordinary short-to-medium folder
+ * name can actually reach without the shrink step ever engaging -- this used to be high enough
+ * (3.5x) that almost any real folder name overflowed well before the slider's midpoint, so every
+ * [userScale] above that point converged, via the same shrinking, to the exact same "largest size
+ * that fits" -- most of the slider's range did nothing at all, which read as the low end being the
+ * only part that mattered and everything past it a dead, unresponsive tail.
  *
  * The right size is computed in one deterministic pass with [TextMeasurer] before anything is
  * drawn, rather than rendering at a guess and reactively shrinking one step per recomposition in
@@ -1824,7 +1831,9 @@ internal fun CoverText(
             maxHeight = with(density) { maxHeight.roundToPx() },
         )
         val resolvedFontSizeSp = remember(text, userScale, bold, wrap, maxWidth, maxHeight) {
-            fun fits(fontSizeSp: Float): Boolean {
+            val baseFontSizeSp = maxWidth.value * COVER_FONT_WIDTH_FRACTION * userScale
+            var fontSizeSp = baseFontSizeSp
+            while (true) {
                 val result = textMeasurer.measure(
                     text = text,
                     style = TextStyle(
@@ -1836,22 +1845,13 @@ internal fun CoverText(
                     constraints = constraints,
                     maxLines = maxLines,
                 )
-                return !result.didOverflowWidth && !result.didOverflowHeight && !(wrap && hasMidWordBreak(result, text))
+                val needsShrink = result.didOverflowWidth ||
+                    result.didOverflowHeight ||
+                    (wrap && hasMidWordBreak(result, text))
+                if (!needsShrink || fontSizeSp <= COVER_FONT_MIN_SIZE_SP) break
+                fontSizeSp = (fontSizeSp * COVER_FONT_SHRINK_STEP).coerceAtLeast(COVER_FONT_MIN_SIZE_SP)
             }
-
-            // The largest size this exact text actually fits at, in this exact container --
-            // shrinking down from a starting guess big enough to guarantee overflow for any real
-            // folder name, so this is independent of userScale (see this function's own doc
-            // comment for why coupling the two together was the actual bug).
-            var maxFitSp = maxWidth.value * COVER_FONT_WIDTH_FRACTION * COVER_TEXT_MAX_SCALE
-            while (maxFitSp > COVER_FONT_MIN_SIZE_SP && !fits(maxFitSp)) {
-                maxFitSp *= COVER_FONT_SHRINK_STEP
-            }
-            maxFitSp = maxFitSp.coerceAtLeast(COVER_FONT_MIN_SIZE_SP)
-
-            val minFitSp = (maxFitSp * COVER_MIN_SCALE_FRACTION_OF_MAX).coerceAtLeast(COVER_FONT_MIN_SIZE_SP)
-            val t = ((userScale - COVER_TEXT_MIN_SCALE) / (COVER_TEXT_MAX_SCALE - COVER_TEXT_MIN_SCALE)).coerceIn(0f, 1f)
-            minFitSp + (maxFitSp - minFitSp) * t
+            fontSizeSp
         }
         Text(
             text = text,
