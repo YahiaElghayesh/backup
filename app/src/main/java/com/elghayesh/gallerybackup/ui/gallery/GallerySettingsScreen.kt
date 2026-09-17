@@ -63,6 +63,7 @@ private enum class SettingsSection { APPEARANCE, LAYOUT, RECYCLE_BIN, SECURITY }
 fun GallerySettingsScreen(
     viewModel: GalleryViewModel,
     onOpenFolderExplorer: () -> Unit,
+    onOpenBackupSettings: () -> Unit,
     onBack: () -> Unit,
 ) {
     var openSection by remember { mutableStateOf<SettingsSection?>(null) }
@@ -94,6 +95,19 @@ fun GallerySettingsScreen(
             },
         ) { padding ->
             LazyColumn(modifier = Modifier.padding(padding).fillMaxWidth()) {
+                item {
+                    // Backup itself used to live ONLY as a separate, unlabeled sibling item next to
+                    // "Gallery settings" in the gallery screen's own overflow menu -- not inside
+                    // Settings at all, so opening Settings looking for it (a completely reasonable
+                    // thing to do, given backup is this app's whole point) found nothing. Listed
+                    // first here now, alongside staying reachable from that overflow menu too.
+                    SettingsMenuRow(
+                        title = "Backup",
+                        subtitle = "Back up folders to Google Drive or OneDrive, choose which folders sync, and Wi-Fi-only.",
+                        onClick = onOpenBackupSettings,
+                    )
+                    HorizontalDivider()
+                }
                 item {
                     SettingsMenuRow(
                         title = "Appearance",

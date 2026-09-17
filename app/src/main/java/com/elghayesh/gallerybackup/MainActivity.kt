@@ -346,6 +346,7 @@ private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: Back
             GallerySettingsScreen(
                 viewModel = galleryViewModel,
                 onOpenFolderExplorer = { navController.navigateSafely("folderExplorer") },
+                onOpenBackupSettings = { navController.navigateSafely("backupSettings") },
                 onBack = { navController.popBackStack() },
             )
         }
