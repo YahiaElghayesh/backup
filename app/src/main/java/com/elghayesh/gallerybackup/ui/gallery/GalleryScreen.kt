@@ -1929,11 +1929,14 @@ internal fun FolderGridTile(
                 text = "${folder.name}  ·  ${folder.promotionAwareItemCount(includedFolders)}",
                 color = Color.White,
                 style = MaterialTheme.typography.labelMedium,
-                // A single line with ellipsis used to just cut a multi-word name straight off --
-                // wrapping onto up to 3 lines instead lets a name too wide for the tile spill onto
-                // its own line per word rather than losing the end of it. Still ellipsizes on the
-                // 3rd line as a last resort for anything even that doesn't fit.
-                maxLines = 3,
+                // Wraps onto up to 3 lines so a multi-word name too wide for the tile spills onto
+                // its own line per word instead of losing the end of it -- but only when there's
+                // more than one word to wrap BETWEEN: a single-word name has no space for Compose's
+                // line breaking to wrap at, so if it doesn't fit, the default behavior is to break
+                // the word itself mid-character instead ("Telecommunications" as "Telecommunicat" /
+                // "ions") -- worse than the original single-line ellipsis it replaced. Staying at
+                // maxLines = 1 for a single word keeps that original, correct behavior for it.
+                maxLines = if (folder.name.trim().any { it.isWhitespace() }) 3 else 1,
                 overflow = TextOverflow.Ellipsis,
             )
         }
@@ -2103,8 +2106,15 @@ private fun GalleryListItem(
             }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                // Wraps onto a 2nd line instead of straight-up cutting a multi-word name off.
-                Text(title, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                // Wraps onto a 2nd line for a multi-word name instead of cutting it off -- but
+                // only when there's more than one word to wrap between (see FolderGridTile's own
+                // identical reasoning): a single word with nowhere to break at would otherwise get
+                // split mid-character instead, which single-line ellipsis handles correctly.
+                Text(
+                    title,
+                    maxLines = if (title.trim().any { it.isWhitespace() }) 2 else 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
                 Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             if (isSelected) {
