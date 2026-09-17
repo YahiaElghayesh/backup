@@ -50,14 +50,19 @@ import com.elghayesh.gallerybackup.data.media.allItemsRecursive
 import com.elghayesh.gallerybackup.data.settings.AccentColor
 import com.elghayesh.gallerybackup.data.settings.FolderCover
 import com.elghayesh.gallerybackup.data.settings.ViewType
+import com.elghayesh.gallerybackup.ui.gallery.COVER_TEXT_MAX_SCALE
+import com.elghayesh.gallerybackup.ui.gallery.COVER_TEXT_MIN_SCALE
 import com.elghayesh.gallerybackup.ui.gallery.CoverText
 import com.elghayesh.gallerybackup.ui.gallery.contrastingTextColor
 import kotlin.math.roundToInt
 
 private enum class CoverMode { TEXT, PHOTO }
 
-private const val MIN_TEXT_SCALE = 0.4f
-private const val MAX_TEXT_SCALE = 3.5f
+// Kept as CoverText's own COVER_TEXT_MIN_SCALE/COVER_TEXT_MAX_SCALE (imported above) -- CoverText
+// needs the exact same range to turn this slider's value into a proportional size, so this file
+// aliases rather than redeclares them to guarantee they can never drift apart.
+private const val MIN_TEXT_SCALE = COVER_TEXT_MIN_SCALE
+private const val MAX_TEXT_SCALE = COVER_TEXT_MAX_SCALE
 
 /** Lets the user give one or more folders a custom cover: plain text over a solid background
  * color, or (single-folder only) a specific photo/video frame picked from the folder's own items.

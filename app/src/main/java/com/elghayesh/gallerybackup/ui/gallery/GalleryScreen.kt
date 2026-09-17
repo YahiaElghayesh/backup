@@ -1724,12 +1724,24 @@ private fun FolderCoverContent(folder: FolderNode, cover: FolderCover?, included
     }
 }
 
-/** Font size at [userScale] 1f, as a fraction of [CoverText]'s own measured container width. Using
- * a size relative to the container (rather than a fixed sp value from Material typography) is
- * what makes the exact same [userScale] look the same relative size everywhere CoverText is used
- * -- a big cover-dialog preview and a small grid tile included -- instead of comfortably fitting
- * in one and being forced tiny (or wrapping badly) in the other. */
+/** Font size as a fraction of [CoverText]'s own measured container width, at the largest end of
+ * the slider's range -- only ever used as a guaranteed-too-big starting point to shrink down from
+ * (see [CoverText]'s own doc comment); using a size relative to the container (rather than a
+ * fixed sp value from Material typography) is what keeps that starting guess sized consistently
+ * everywhere CoverText is used -- a big cover-dialog preview and a small grid tile included. */
 private const val COVER_FONT_WIDTH_FRACTION = 0.18f
+
+/** The folder-cover text-size slider's own range (see FolderCoverDialog, which reads these same
+ * two constants) -- [CoverText] needs them to turn the raw slider value into a proportional
+ * position between the smallest and largest size that actually fits, rather than treating it as
+ * a direct font-size multiplier. */
+internal const val COVER_TEXT_MIN_SCALE = 0.4f
+internal const val COVER_TEXT_MAX_SCALE = 3.5f
+
+/** At the slider's minimum, text renders at this fraction of the largest size that fits -- never
+ * shrunk all the way down to (or anywhere near) [COVER_FONT_MIN_SIZE_SP], which would make the
+ * low end of the slider produce illegibly tiny text regardless of how big the cover itself is. */
+private const val COVER_MIN_SCALE_FRACTION_OF_MAX = 0.3f
 
 /** Absolute floor purely to stop the shrink loop from ever reaching zero/negative size -- not a
  * "give up and truncate" threshold. Real folder names fit comfortably in [COVER_MAX_LINES] lines
@@ -1767,23 +1779,32 @@ private fun hasMidWordBreak(result: TextLayoutResult, text: String): Boolean {
     return false
 }
 
-/** A text folder cover's label, starting at [userScale] (the size the user picked in the cover
- * dialog) and shrinking further step by step until it fits within its own measured bounds -- both
- * width AND height -- so a long or large custom cover name never spills past the thumbnail it's
- * drawn on, however small the tile or row is. When [wrap] is on, a name too long to fit even at
- * the smallest readable size is allowed to grow past 2 lines (up to [COVER_MAX_LINES_WRAP])
- * instead of being cut off; only [wrap] off (single line by design) still ellipsizes if a name
- * can't be shrunk to fit on one line.
+/** A text folder cover's label, sized by [userScale] (the position the user picked on the cover
+ * dialog's slider, [COVER_TEXT_MIN_SCALE]..[COVER_TEXT_MAX_SCALE]) between the smallest and
+ * largest size that actually fits within its own measured bounds -- both width AND height -- so a
+ * long or large custom cover name never spills past the thumbnail it's drawn on, however small
+ * the tile or row is. When [wrap] is on, a name too long to fit even at the smallest readable size
+ * is allowed to grow past 2 lines (up to [COVER_MAX_LINES_WRAP]) instead of being cut off; only
+ * [wrap] off (single line by design) still ellipsizes if a name can't be shrunk to fit on one line.
+ *
+ * [userScale] used to be treated as a direct font-size multiplier, shrunk further only if it
+ * overflowed -- which meant most of the slider's range collapsed onto the same result: any
+ * [userScale] past the point where the multiplied size first overflowed converged, via repeated
+ * shrinking, to essentially the same "largest size that fits" -- so the slider felt like it jumped
+ * straight from small to maxed-out with an unresponsive tail afterward, instead of scaling
+ * smoothly. Finding that maximum first, then placing [userScale] proportionally between it and
+ * [COVER_MIN_SCALE_FRACTION_OF_MAX] of it, makes every point on the slider produce a distinct,
+ * predictable size instead.
  *
  * The right size is computed in one deterministic pass with [TextMeasurer] before anything is
- * drawn, rather than the previous approach of rendering at a guess and reactively shrinking one
- * step per recomposition in response to [Text]'s own onTextLayout -- that iterative version could
- * visibly settle on a still-wrapping size (e.g. "Devonics Task" breaking mid-word into "Devoni" /
- * "cs Task") if the multi-frame convergence it depended on didn't fully play out. Measuring every
- * candidate size up front and picking the best BEFORE the first frame renders can't get stuck
- * partway like that. [clipToBounds] is still kept on the rendered text as a last-resort safety
- * net -- so even if a measurement is ever slightly off, the result is a hard clip within the
- * cover's own bounds, never text spilling out over whatever is drawn next to it. */
+ * drawn, rather than rendering at a guess and reactively shrinking one step per recomposition in
+ * response to [Text]'s own onTextLayout -- that iterative version could visibly settle on a still-
+ * wrapping size (e.g. "Devonics Task" breaking mid-word into "Devoni" / "cs Task") if the
+ * multi-frame convergence it depended on didn't fully play out. Measuring every candidate size up
+ * front and picking the best BEFORE the first frame renders can't get stuck partway like that.
+ * [clipToBounds] is still kept on the rendered text as a last-resort safety net -- so even if a
+ * measurement is ever slightly off, the result is a hard clip within the cover's own bounds, never
+ * text spilling out over whatever is drawn next to it. */
 @Composable
 internal fun CoverText(
     text: String,
@@ -1803,9 +1824,7 @@ internal fun CoverText(
             maxHeight = with(density) { maxHeight.roundToPx() },
         )
         val resolvedFontSizeSp = remember(text, userScale, bold, wrap, maxWidth, maxHeight) {
-            val baseFontSizeSp = maxWidth.value * COVER_FONT_WIDTH_FRACTION * userScale
-            var fontSizeSp = baseFontSizeSp
-            while (true) {
+            fun fits(fontSizeSp: Float): Boolean {
                 val result = textMeasurer.measure(
                     text = text,
                     style = TextStyle(
@@ -1817,13 +1836,22 @@ internal fun CoverText(
                     constraints = constraints,
                     maxLines = maxLines,
                 )
-                val needsShrink = result.didOverflowWidth ||
-                    result.didOverflowHeight ||
-                    (wrap && hasMidWordBreak(result, text))
-                if (!needsShrink || fontSizeSp <= COVER_FONT_MIN_SIZE_SP) break
-                fontSizeSp = (fontSizeSp * COVER_FONT_SHRINK_STEP).coerceAtLeast(COVER_FONT_MIN_SIZE_SP)
+                return !result.didOverflowWidth && !result.didOverflowHeight && !(wrap && hasMidWordBreak(result, text))
             }
-            fontSizeSp
+
+            // The largest size this exact text actually fits at, in this exact container --
+            // shrinking down from a starting guess big enough to guarantee overflow for any real
+            // folder name, so this is independent of userScale (see this function's own doc
+            // comment for why coupling the two together was the actual bug).
+            var maxFitSp = maxWidth.value * COVER_FONT_WIDTH_FRACTION * COVER_TEXT_MAX_SCALE
+            while (maxFitSp > COVER_FONT_MIN_SIZE_SP && !fits(maxFitSp)) {
+                maxFitSp *= COVER_FONT_SHRINK_STEP
+            }
+            maxFitSp = maxFitSp.coerceAtLeast(COVER_FONT_MIN_SIZE_SP)
+
+            val minFitSp = (maxFitSp * COVER_MIN_SCALE_FRACTION_OF_MAX).coerceAtLeast(COVER_FONT_MIN_SIZE_SP)
+            val t = ((userScale - COVER_TEXT_MIN_SCALE) / (COVER_TEXT_MAX_SCALE - COVER_TEXT_MIN_SCALE)).coerceIn(0f, 1f)
+            minFitSp + (maxFitSp - minFitSp) * t
         }
         Text(
             text = text,
@@ -1901,7 +1929,11 @@ internal fun FolderGridTile(
                 text = "${folder.name}  ·  ${folder.promotionAwareItemCount(includedFolders)}",
                 color = Color.White,
                 style = MaterialTheme.typography.labelMedium,
-                maxLines = 1,
+                // A single line with ellipsis used to just cut a multi-word name straight off --
+                // wrapping onto up to 3 lines instead lets a name too wide for the tile spill onto
+                // its own line per word rather than losing the end of it. Still ellipsizes on the
+                // 3rd line as a last resort for anything even that doesn't fit.
+                maxLines = 3,
                 overflow = TextOverflow.Ellipsis,
             )
         }
@@ -2071,7 +2103,8 @@ private fun GalleryListItem(
             }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                // Wraps onto a 2nd line instead of straight-up cutting a multi-word name off.
+                Text(title, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             if (isSelected) {
