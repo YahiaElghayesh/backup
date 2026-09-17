@@ -71,7 +71,7 @@ enum class AccentColor(val seed: Long) {
     MAGENTA(0xFFC2185B),
     BROWN(0xFF795548),
     GRAY(0xFF757575),
-    WHITE(0xFFF2F1EF),
+    WHITE(0xFFEBE7DF),
     BLACK(0xFF1C1C1C),
 }
 
