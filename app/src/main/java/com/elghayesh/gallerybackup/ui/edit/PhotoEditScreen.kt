@@ -2092,9 +2092,100 @@ private suspend fun saveEditedPhoto(
         resolver.openOutputStream(uri)?.use { out ->
             finalBitmap.compress(if (hasTransparency) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG, 92, out)
         }
+        // Bitmap.compress writes a fresh JPEG with none of the original's metadata (date taken,
+        // GPS, camera make/model, orientation, ...) -- without this, every edited photo silently
+        // lost all of it, "replace original" included. JPEG only: PNG (only used when the edit
+        // left real transparency -- see hasTransparency above) has no equivalent APP1/Exif segment
+        // to splice into, and photos edited here almost always started as JPEG/HEIC anyway.
+        if (!hasTransparency) {
+            runCatching { copyExifSegmentExact(context, original.uri, uri) }
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val doneValues = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
             resolver.update(uri, doneValues, null, null)
         }
     }
+}
+
+/**
+ * Copies [sourceUri]'s EXIF data onto [destUri] -- literally, as the exact same raw APP1/Exif
+ * marker segment bytes, not read-and-rewritten tag by tag through [androidx.exifinterface.media.ExifInterface]'s
+ * own get/set API. That API only understands a fixed set of standard tags, so round-tripping
+ * through it can silently drop anything it doesn't recognize (a camera's proprietary MakerNote
+ * data, an embedded EXIF thumbnail) and can reorder what it does keep when re-serializing --
+ * splicing the original segment's own bytes in whole guarantees the destination's metadata is
+ * identical to the source's, not merely equivalent.
+ */
+private fun copyExifSegmentExact(context: Context, sourceUri: Uri, destUri: Uri) {
+    val sourceBytes = context.contentResolver.openInputStream(sourceUri)?.use { it.readBytes() } ?: return
+    val exifSegment = extractExifApp1Segment(sourceBytes) ?: return
+    val destBytes = context.contentResolver.openInputStream(destUri)?.use { it.readBytes() } ?: return
+    val spliced = spliceExifApp1Segment(destBytes, exifSegment) ?: return
+    context.contentResolver.openOutputStream(destUri)?.use { it.write(spliced) }
+}
+
+private const val JPEG_SOI = 0xD8
+private const val JPEG_EOI = 0xD9
+private const val JPEG_SOS = 0xDA
+private const val JPEG_APP1 = 0xE1
+
+/** Returns the complete EXIF APP1 segment (its 0xFFE1 marker, 2-byte length, and payload) from
+ * [jpegBytes], or null if this isn't a well-formed JPEG or carries no EXIF APP1 segment -- e.g. a
+ * marker with a length that would run past the end of the array, which a real JPEG never has, is
+ * treated as "not actually a JPEG we can safely parse" rather than trusted at face value. */
+private fun extractExifApp1Segment(jpegBytes: ByteArray): ByteArray? {
+    if (jpegBytes.size < 4 || jpegBytes[0] != 0xFF.toByte() || (jpegBytes[1].toInt() and 0xFF) != JPEG_SOI) return null
+    var pos = 2
+    while (pos + 4 <= jpegBytes.size) {
+        if (jpegBytes[pos] != 0xFF.toByte()) return null
+        val marker = jpegBytes[pos + 1].toInt() and 0xFF
+        if (marker == JPEG_SOI || marker == JPEG_EOI) {
+            pos += 2
+            continue
+        }
+        if (marker == JPEG_SOS) return null
+        val length = ((jpegBytes[pos + 2].toInt() and 0xFF) shl 8) or (jpegBytes[pos + 3].toInt() and 0xFF)
+        val segmentEnd = pos + 2 + length
+        if (length < 2 || segmentEnd > jpegBytes.size) return null
+        if (marker == JPEG_APP1 && isExifPayload(jpegBytes, pos + 4, segmentEnd)) {
+            return jpegBytes.copyOfRange(pos, segmentEnd)
+        }
+        pos = segmentEnd
+    }
+    return null
+}
+
+/** Replaces [jpegBytes]' existing EXIF APP1 segment with [exifSegment] (inserting it right after
+ * SOI if there wasn't one already). Returns null if [jpegBytes] isn't a well-formed JPEG this can
+ * safely parse -- same bounds checks as [extractExifApp1Segment], so a malformed or unexpected
+ * structure is left completely untouched rather than risking a corrupted write. */
+private fun spliceExifApp1Segment(jpegBytes: ByteArray, exifSegment: ByteArray): ByteArray? {
+    if (jpegBytes.size < 4 || jpegBytes[0] != 0xFF.toByte() || (jpegBytes[1].toInt() and 0xFF) != JPEG_SOI) return null
+    var pos = 2
+    while (pos + 4 <= jpegBytes.size) {
+        if (jpegBytes[pos] != 0xFF.toByte()) break
+        val marker = jpegBytes[pos + 1].toInt() and 0xFF
+        if (marker == JPEG_SOI || marker == JPEG_EOI) {
+            pos += 2
+            continue
+        }
+        if (marker == JPEG_SOS) break
+        val length = ((jpegBytes[pos + 2].toInt() and 0xFF) shl 8) or (jpegBytes[pos + 3].toInt() and 0xFF)
+        val segmentEnd = pos + 2 + length
+        if (length < 2 || segmentEnd > jpegBytes.size) break
+        if (marker == JPEG_APP1 && isExifPayload(jpegBytes, pos + 4, segmentEnd)) {
+            return jpegBytes.copyOfRange(0, pos) + exifSegment + jpegBytes.copyOfRange(segmentEnd, jpegBytes.size)
+        }
+        pos = segmentEnd
+    }
+    return jpegBytes.copyOfRange(0, 2) + exifSegment + jpegBytes.copyOfRange(2, jpegBytes.size)
+}
+
+/** Whether the APP1 payload starting at [from] (ending before [to]) begins with the "Exif\0\0"
+ * identifier that distinguishes an EXIF APP1 segment from an XMP or other APP1 use. */
+private fun isExifPayload(bytes: ByteArray, from: Int, to: Int): Boolean {
+    if (to - from < 6) return false
+    return bytes[from] == 'E'.code.toByte() && bytes[from + 1] == 'x'.code.toByte() &&
+        bytes[from + 2] == 'i'.code.toByte() && bytes[from + 3] == 'f'.code.toByte() &&
+        bytes[from + 4] == 0.toByte() && bytes[from + 5] == 0.toByte()
 }
