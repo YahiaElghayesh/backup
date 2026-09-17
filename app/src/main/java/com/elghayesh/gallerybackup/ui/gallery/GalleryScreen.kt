@@ -456,17 +456,7 @@ fun GalleryScreen(
         topBar = {
             if (!isSelectionMode) {
                 TopAppBar(
-                    title = {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (isUpdating) {
-                                CircularProgressIndicator(
-                                    strokeWidth = 2.dp,
-                                    modifier = Modifier.size(16.dp).padding(end = 8.dp),
-                                )
-                            }
-                            Text(breadcrumbTitle(path))
-                        }
-                    },
+                    title = { Text(breadcrumbTitle(path)) },
                     navigationIcon = {
                         if (path.isNotEmpty()) {
                             IconButton(onClick = onNavigateUp) {
@@ -475,6 +465,20 @@ fun GalleryScreen(
                         }
                     },
                     actions = {
+                        // Was previously inside the title's own Row, ahead of the folder name --
+                        // stealing that much width from it changed how many lines the name needed
+                        // to wrap onto, so the exact same folder name reflowed (and, since the app
+                        // bar's height follows its title's own measured height, visibly changed
+                        // height) the instant a sync started or finished, sometimes clipping a line
+                        // that had fit a moment before. An action icon has a fixed slot of its own
+                        // that never competes with the title for width, so showing/hiding it here
+                        // can't affect the title's layout at all.
+                        if (isUpdating) {
+                            CircularProgressIndicator(
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.padding(horizontal = 12.dp).size(20.dp),
+                            )
+                        }
                         IconButton(onClick = { showSearch = true }) {
                             Icon(Icons.Filled.Search, contentDescription = "Search")
                         }
