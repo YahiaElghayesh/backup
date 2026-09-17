@@ -66,6 +66,8 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.HorizontalDivider
@@ -1891,6 +1893,67 @@ private val ScrimBrush = Brush.verticalGradient(
     1f to Color.Black.copy(alpha = 0.78f),
 )
 
+/** Renders [text] wrapped strictly at word boundaries -- never mid-character -- across up to
+ * [maxLines] lines, by greedily packing words onto lines up to the container's actually measured
+ * width and joining the result with explicit line breaks, then rendering with [Text]'s own
+ * automatic wrapping switched off ([TextLayoutResult]-based `softWrap = false`) so Compose can't
+ * re-wrap (and potentially split a word) on top of that pre-computed layout. This is the fix for
+ * a bug the previous approach (a plain [Text] with `maxLines` alone) could not actually solve:
+ * Compose's default line breaking will split a single word across two lines whenever that word
+ * alone is wider than the available width, regardless of `maxLines`/`overflow` -- and that can
+ * happen to one long word inside an otherwise multi-word name, not just to a name that is a single
+ * word in its entirety. Packing words onto lines up front means a word too wide to share a line
+ * always gets a line of its own instead, and only ellipsizes (rather than splits) if it's still
+ * too wide even alone. */
+@Composable
+private fun WordWrapText(
+    text: String,
+    modifier: Modifier = Modifier,
+    color: Color = LocalContentColor.current,
+    style: TextStyle = LocalTextStyle.current,
+    maxLines: Int = 6,
+) {
+    val textMeasurer = rememberTextMeasurer()
+    BoxWithConstraints(modifier) {
+        val density = LocalDensity.current
+        val maxWidthPx = with(density) { maxWidth.roundToPx() }
+        val wrapped = remember(text, style, maxWidthPx) {
+            val words = text.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+            if (words.size <= 1) {
+                text
+            } else {
+                val lines = mutableListOf<String>()
+                var current = ""
+                for (word in words) {
+                    val candidate = if (current.isEmpty()) word else "$current $word"
+                    val candidateWidth = textMeasurer.measure(
+                        text = candidate,
+                        style = style,
+                        softWrap = false,
+                        maxLines = 1,
+                    ).size.width
+                    if (current.isEmpty() || candidateWidth <= maxWidthPx) {
+                        current = candidate
+                    } else {
+                        lines += current
+                        current = word
+                    }
+                }
+                if (current.isNotEmpty()) lines += current
+                lines.joinToString("\n")
+            }
+        }
+        Text(
+            text = wrapped,
+            color = color,
+            style = style,
+            maxLines = maxLines,
+            overflow = TextOverflow.Ellipsis,
+            softWrap = false,
+        )
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun FolderGridTile(
@@ -1929,19 +1992,12 @@ internal fun FolderGridTile(
                 .background(ScrimBrush)
                 .padding(horizontal = 8.dp, vertical = 8.dp),
         ) {
-            Text(
+            WordWrapText(
                 text = "${folder.name}  ·  ${folder.promotionAwareItemCount(includedFolders)}",
+                modifier = Modifier.fillMaxWidth(),
                 color = Color.White,
                 style = MaterialTheme.typography.labelMedium,
-                // Wraps onto up to 3 lines so a multi-word name too wide for the tile spills onto
-                // its own line per word instead of losing the end of it -- but only when there's
-                // more than one word to wrap BETWEEN: a single-word name has no space for Compose's
-                // line breaking to wrap at, so if it doesn't fit, the default behavior is to break
-                // the word itself mid-character instead ("Telecommunications" as "Telecommunicat" /
-                // "ions") -- worse than the original single-line ellipsis it replaced. Staying at
-                // maxLines = 1 for a single word keeps that original, correct behavior for it.
-                maxLines = if (folder.name.trim().any { it.isWhitespace() }) 3 else 1,
-                overflow = TextOverflow.Ellipsis,
+                maxLines = 6,
             )
         }
         if (isHidden) {
@@ -2110,14 +2166,10 @@ private fun GalleryListItem(
             }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                // Wraps onto a 2nd line for a multi-word name instead of cutting it off -- but
-                // only when there's more than one word to wrap between (see FolderGridTile's own
-                // identical reasoning): a single word with nowhere to break at would otherwise get
-                // split mid-character instead, which single-line ellipsis handles correctly.
-                Text(
-                    title,
-                    maxLines = if (title.trim().any { it.isWhitespace() }) 2 else 1,
-                    overflow = TextOverflow.Ellipsis,
+                WordWrapText(
+                    text = title,
+                    modifier = Modifier.fillMaxWidth(),
+                    maxLines = 6,
                 )
                 Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
