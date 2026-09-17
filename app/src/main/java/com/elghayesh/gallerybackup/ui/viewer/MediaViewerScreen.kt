@@ -63,6 +63,8 @@ import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import coil.size.Size
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
@@ -270,7 +272,16 @@ fun MediaViewerScreen(
                     onSwipePrevious = onSwipePrevious,
                 ) {
                     AsyncImage(
-                        model = item.uri,
+                        // Explicit Size.ORIGINAL -- without it, Coil decodes down to roughly this
+                        // Image composable's own on-screen pixel size (its usual memory-saving
+                        // default), so pinch-zooming in just magnified an already-downsampled
+                        // bitmap instead of revealing real detail. The pager only composes the
+                        // current page (no beyondViewportPageCount override), so this only holds
+                        // one full-resolution decode in memory at a time, not the whole gallery.
+                        model = ImageRequest.Builder(context)
+                            .data(item.uri)
+                            .size(Size.ORIGINAL)
+                            .build(),
                         contentDescription = item.displayName,
                         contentScale = ContentScale.Fit,
                         modifier = Modifier.fillMaxSize(),
