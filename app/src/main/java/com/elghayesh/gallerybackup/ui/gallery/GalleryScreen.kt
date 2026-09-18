@@ -1918,35 +1918,43 @@ private fun WordWrapText(
         val maxWidthPx = with(density) { maxWidth.roundToPx() }
         val wrapped = remember(text, style, maxWidthPx) {
             val words = text.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
-            if (words.size <= 1) {
-                text
-            } else {
-                val lines = mutableListOf<String>()
-                var current = ""
-                for (word in words) {
-                    val candidate = if (current.isEmpty()) word else "$current $word"
-                    val candidateWidth = textMeasurer.measure(
-                        text = candidate,
-                        style = style,
-                        softWrap = false,
-                        maxLines = 1,
-                    ).size.width
-                    if (current.isEmpty() || candidateWidth <= maxWidthPx) {
-                        current = candidate
-                    } else {
-                        lines += current
-                        current = word
-                    }
+            val lines = mutableListOf<String>()
+            var current = ""
+            // Runs even for a single word -- current.isEmpty() always accepts the first/only
+            // word unconditionally (a lone word too wide to fit still gets its own line, never
+            // split), so this one loop handles both cases identically instead of a separate,
+            // untrimmed-text-returning special case for words.size <= 1.
+            for (word in words) {
+                val candidate = if (current.isEmpty()) word else "$current $word"
+                val candidateWidth = textMeasurer.measure(
+                    text = candidate,
+                    style = style,
+                    softWrap = false,
+                    maxLines = 1,
+                ).size.width
+                if (current.isEmpty() || candidateWidth <= maxWidthPx) {
+                    current = candidate
+                } else {
+                    lines += current
+                    current = word
                 }
-                if (current.isNotEmpty()) lines += current
-                lines.joinToString("\n")
             }
+            if (current.isNotEmpty()) lines += current
+            lines.joinToString("\n")
         }
+        // A single actual line -- the common case: most names fit on one line, or are one
+        // unbreakable word -- renders with maxLines = 1 rather than the full [maxLines] budget.
+        // Some Compose text-layout paths size/ellipsize a softWrap = false single line
+        // differently once a larger maxLines is in play (as if reserving room for lines that
+        // will never come), which can ellipsize a line early even though it would fit as the
+        // sole line. maxLines = 1 is the same well-exercised configuration a plain single-line
+        // Text with an ellipsis already used, before this composable existed.
+        val lineCount = wrapped.count { it == '\n' } + 1
         Text(
             text = wrapped,
             color = color,
             style = style,
-            maxLines = maxLines,
+            maxLines = if (lineCount > 1) maxLines else 1,
             overflow = TextOverflow.Ellipsis,
             softWrap = false,
         )
