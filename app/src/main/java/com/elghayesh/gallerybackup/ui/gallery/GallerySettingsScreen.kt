@@ -639,18 +639,20 @@ private fun LayoutTargetSettings(
         Slider(
             value = rowSize.toFloat(),
             onValueChange = { onRowSizeChange(it.roundToInt()) },
-            valueRange = 8f..600f,
-            // 10 fixed sizes rather than a free scrollbar -- steps is the number of divisions
-            // BETWEEN the two endpoints, so 8 divisions = 10 selectable values total.
-            steps = 8,
+            valueRange = 24f..200f,
+            // 20 fixed sizes rather than a free scrollbar (double the previous 10) -- steps is
+            // the number of divisions BETWEEN the two endpoints, so 18 divisions = 20 selectable
+            // values total. Narrower valueRange (was 8..600) means those 20 steps now land across
+            // only the realistic sizes, so each one is a small, even change instead of a jump.
+            steps = 18,
         )
         Spacer(Modifier.height(8.dp))
         Text("${thumbnailWidth}dp thumbnail width", style = MaterialTheme.typography.bodyMedium)
         Slider(
             value = thumbnailWidth.toFloat(),
             onValueChange = { onThumbnailWidthChange(it.roundToInt()) },
-            valueRange = 8f..600f,
-            steps = 8,
+            valueRange = 24f..200f,
+            steps = 18,
         )
     }
 }

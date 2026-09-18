@@ -17,8 +17,13 @@ private val Context.galleryPrefsStore by preferencesDataStore(name = "gallery_ui
 /** Valid range (dp) for a list-view thumbnail's height or width -- shared by
  * folderRowSize/mediaRowSize (height) and folderThumbnailWidth/mediaThumbnailWidth (width), so
  * either dimension can be shrunk down to a compact strip or stretched into a large banner-like
- * row. */
-private val THUMBNAIL_SIZE_RANGE_DP = 8..600
+ * row. Previously 8..600: a 600dp max is far wider than any phone screen (nobody ever actually
+ * used the top ~3/4 of that range), which squeezed every realistic size -- everything a person
+ * would plausibly pick -- into just the slider's first couple of steps, making early steps look
+ * huge and later ones pointless. Narrowing the range to the sizes people actually use spreads the
+ * same number of steps across only the useful span, so each one now represents a proportionally
+ * similar, much smaller change. */
+private val THUMBNAIL_SIZE_RANGE_DP = 24..200
 
 enum class ViewType { GRID, LIST }
 
