@@ -178,7 +178,7 @@ fun MediaViewerScreen(
         containerColor = Color.Black,
         topBar = {
             TopAppBar(
-                title = { Text(currentItem?.displayName.orEmpty()) },
+                title = {},
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
