@@ -322,6 +322,7 @@ class MediaRepository(private val context: Context) {
             add(MediaStore.MediaColumns._ID)
             add(MediaStore.MediaColumns.DISPLAY_NAME)
             add(MediaStore.MediaColumns.DATE_MODIFIED)
+            add(MediaStore.MediaColumns.DATE_ADDED)
             add(MediaStore.MediaColumns.DATE_TAKEN)
             add(MediaStore.MediaColumns.SIZE)
             add(MediaStore.MediaColumns.MIME_TYPE)
@@ -338,6 +339,7 @@ class MediaRepository(private val context: Context) {
             val idCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
             val nameCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
             val dateCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_MODIFIED)
+            val dateAddedCol = cursor.getColumnIndex(MediaStore.MediaColumns.DATE_ADDED)
             val dateTakenCol = cursor.getColumnIndex(MediaStore.MediaColumns.DATE_TAKEN)
             val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
             val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
@@ -373,6 +375,7 @@ class MediaRepository(private val context: Context) {
                 // anything not already covered by an override happens afterward, in the
                 // background, via refineDateTakenFromExif -- see its own doc comment.
                 val dateModifiedSec = cursor.getLong(dateCol)
+                val dateAddedSec = if (dateAddedCol >= 0) cursor.getLong(dateAddedCol) else dateModifiedSec
                 val dateTakenMs = if (dateTakenCol >= 0) cursor.getLong(dateTakenCol) else 0L
                 val dateTakenSec = dateTakenOverrides[id]
                     ?: (if (dateTakenMs > 0) dateTakenMs / 1000 else dateModifiedSec)
@@ -382,6 +385,7 @@ class MediaRepository(private val context: Context) {
                     displayName = cursor.getString(nameCol) ?: "",
                     folderPath = folderPath,
                     dateModifiedSec = dateModifiedSec,
+                    dateAddedSec = dateAddedSec,
                     dateTakenSec = dateTakenSec,
                     size = cursor.getLong(sizeCol),
                     mimeType = cursor.getString(mimeCol) ?: if (isVideo) "video/*" else "image/*",

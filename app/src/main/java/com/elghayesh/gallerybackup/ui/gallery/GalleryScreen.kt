@@ -441,8 +441,7 @@ fun GalleryScreen(
         )
     }
     if (showProperties && totalSelectedCount > 0) {
-        val allItemsForProperties = selectedItems + selectedFolderNodes.flatMap { it.allItemsRecursive() }
-        PropertiesDialog(items = allItemsForProperties, onDismiss = { showProperties = false })
+        PropertiesDialog(items = selectedItems, folders = selectedFolderNodes, onDismiss = { showProperties = false })
     }
     if (showSearch) {
         SearchDialog(

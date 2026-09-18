@@ -13,6 +13,10 @@ data class MediaItem(
     val displayName: String,
     val folderPath: String,
     val dateModifiedSec: Long,
+    /** When MediaStore first indexed this file (MediaColumns.DATE_ADDED) -- the closest thing
+     * Android exposes to a real filesystem "date created", which isn't reliably readable across
+     * OS versions/vendors any other way. Shown as "Created" in the Properties dialog. */
+    val dateAddedSec: Long,
     /** A photo's real capture time -- read directly from its own EXIF DateTimeOriginal tag (see
      * MediaRepository.readExifDateTakenSec), NOT from MediaStore's own cached DATE_TAKEN column,
      * which proved unreliable: it's a value MediaStore cached once during whatever scan first
