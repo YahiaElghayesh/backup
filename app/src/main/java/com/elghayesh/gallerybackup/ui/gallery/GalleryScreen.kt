@@ -457,7 +457,7 @@ fun GalleryScreen(
         topBar = {
             if (!isSelectionMode) {
                 TopAppBar(
-                    title = { Text(breadcrumbTitle(path)) },
+                    title = { WordWrapText(text = breadcrumbTitle(path), modifier = Modifier.fillMaxWidth(), maxLines = 2) },
                     navigationIcon = {
                         if (path.isNotEmpty()) {
                             IconButton(onClick = onNavigateUp) {
