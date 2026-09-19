@@ -3,10 +3,12 @@ package com.elghayesh.gallerybackup.ui.common
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -86,6 +88,7 @@ fun FolderTreePickerDialog(
     val folderSort by viewModel.folderSort.collectAsState()
     val folderSortOverrides by viewModel.folderSortOverrides.collectAsState()
     val folderThumbnailWidth by viewModel.folderThumbnailWidth.collectAsState()
+    val pinContentToBottom by viewModel.pinContentToBottom.collectAsState()
 
     // Same promotion (a pinned folder is hidden from its real parent's own listing, and -- at the
     // very top level -- surfaces instead as its own separate tile there) and sort order the
@@ -153,38 +156,60 @@ fun FolderTreePickerDialog(
                         Text("No subfolders here.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 } else if (folderViewType == ViewType.GRID) {
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(folderGridColumns),
-                        contentPadding = PaddingValues(8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                        modifier = Modifier.padding(padding).fillMaxSize(),
-                    ) {
-                        items(children, key = { it.path }) { folder ->
-                            FolderGridTile(
-                                folder = folder,
-                                isHidden = false,
-                                isSelected = false,
-                                cover = folderCovers[folder.path],
-                                includedFolders = includedFolders,
-                                onClick = { currentPath = folder.path },
-                            )
+                    // See GalleryScreen's own pin-to-bottom comment: a loose (not exact) max-height
+                    // bound lets the grid shrink-wrap its content and the bottom alignment then pins
+                    // that short content low, while content that already fills or overflows the
+                    // viewport clamps to the full height and the alignment becomes a no-op -- same
+                    // mechanism, applied here too, so this picker follows the setting exactly like
+                    // the main gallery instead of always anchoring to the top regardless of it.
+                    BoxWithConstraints(Modifier.padding(padding).fillMaxSize()) {
+                        LazyVerticalGrid(
+                            columns = GridCells.Fixed(folderGridColumns),
+                            contentPadding = PaddingValues(8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier
+                                .align(if (pinContentToBottom) Alignment.BottomStart else Alignment.TopStart)
+                                .fillMaxWidth()
+                                .then(
+                                    if (pinContentToBottom) Modifier.heightIn(max = maxHeight) else Modifier.fillMaxHeight(),
+                                ),
+                        ) {
+                            items(children, key = { it.path }) { folder ->
+                                FolderGridTile(
+                                    folder = folder,
+                                    isHidden = false,
+                                    isSelected = false,
+                                    cover = folderCovers[folder.path],
+                                    includedFolders = includedFolders,
+                                    onClick = { currentPath = folder.path },
+                                )
+                            }
                         }
                     }
                 } else {
-                    LazyColumn(modifier = Modifier.padding(padding).fillMaxSize()) {
-                        listItems(children, key = { it.path }) { folder ->
-                            FolderListRow(
-                                folder = folder,
-                                isHidden = false,
-                                isSelected = false,
-                                cover = folderCovers[folder.path],
-                                includedFolders = includedFolders,
-                                thumbnailSizeDp = folderRowSize,
-                                thumbnailWidthDp = folderThumbnailWidth,
-                                onClick = { currentPath = folder.path },
-                                onLongClick = {},
-                            )
+                    BoxWithConstraints(Modifier.padding(padding).fillMaxSize()) {
+                        LazyColumn(
+                            modifier = Modifier
+                                .align(if (pinContentToBottom) Alignment.BottomStart else Alignment.TopStart)
+                                .fillMaxWidth()
+                                .then(
+                                    if (pinContentToBottom) Modifier.heightIn(max = maxHeight) else Modifier.fillMaxHeight(),
+                                ),
+                        ) {
+                            listItems(children, key = { it.path }) { folder ->
+                                FolderListRow(
+                                    folder = folder,
+                                    isHidden = false,
+                                    isSelected = false,
+                                    cover = folderCovers[folder.path],
+                                    includedFolders = includedFolders,
+                                    thumbnailSizeDp = folderRowSize,
+                                    thumbnailWidthDp = folderThumbnailWidth,
+                                    onClick = { currentPath = folder.path },
+                                    onLongClick = {},
+                                )
+                            }
                         }
                     }
                 }
