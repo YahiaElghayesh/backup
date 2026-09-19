@@ -47,8 +47,11 @@ import com.elghayesh.gallerybackup.data.settings.ViewType
 import com.elghayesh.gallerybackup.ui.gallery.FolderGridTile
 import com.elghayesh.gallerybackup.ui.gallery.FolderListRow
 import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
+import com.elghayesh.gallerybackup.ui.gallery.MediaGridTile
+import com.elghayesh.gallerybackup.ui.gallery.MediaListRow
 import com.elghayesh.gallerybackup.ui.gallery.effectiveFolderSort
 import com.elghayesh.gallerybackup.ui.gallery.sortedFolders
+import com.elghayesh.gallerybackup.ui.gallery.sortedMedia
 
 /**
  * A full-screen, navigable browser of the real folder tree for picking a Move to/Copy to
@@ -88,6 +91,8 @@ fun FolderTreePickerDialog(
     val folderSort by viewModel.folderSort.collectAsState()
     val folderSortOverrides by viewModel.folderSortOverrides.collectAsState()
     val folderThumbnailWidth by viewModel.folderThumbnailWidth.collectAsState()
+    val mediaRowSize by viewModel.mediaRowSize.collectAsState()
+    val mediaThumbnailWidth by viewModel.mediaThumbnailWidth.collectAsState()
     val pinContentToBottom by viewModel.pinContentToBottom.collectAsState()
 
     // Same promotion (a pinned folder is hidden from its real parent's own listing, and -- at the
@@ -106,6 +111,16 @@ fun FolderTreePickerDialog(
         }
         val pinnedExtras = if (currentPath.isEmpty()) includedFolders.mapNotNull { root?.findNode(it) } else emptyList()
         sortedFolders(ownChildren + pinnedExtras, effectiveFolderSort(currentPath, folderSort, folderSortOverrides), includedFolders)
+    }
+
+    // The current folder's own photos/videos, shown below its subfolders -- so picking "this
+    // folder" as a Move/Copy destination (or just browsing into it) shows what's already there,
+    // not just an empty-looking list of subfolders. [root] is already the gallery's own
+    // hidden/trashed-filtered tree (see the call site), so these need no separate filtering here.
+    // Purely informational: rendered with no onClick/onLongClick, since this dialog's only
+    // actionable items are folders (to navigate into) and the bottom bar's own pick button.
+    val mediaItems = remember(node, folderSort, folderSortOverrides, currentPath) {
+        sortedMedia(node?.items ?: emptyList(), effectiveFolderSort(currentPath, folderSort, folderSortOverrides))
     }
 
     if (showCreateFolderDialog) {
@@ -151,9 +166,9 @@ fun FolderTreePickerDialog(
                     }
                 },
             ) { padding ->
-                if (children.isEmpty()) {
+                if (children.isEmpty() && mediaItems.isEmpty()) {
                     Box(Modifier.padding(padding).fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("No subfolders here.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Nothing here yet.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 } else if (folderViewType == ViewType.GRID) {
                     // See GalleryScreen's own pin-to-bottom comment: a loose (not exact) max-height
@@ -175,7 +190,7 @@ fun FolderTreePickerDialog(
                                     if (pinContentToBottom) Modifier.heightIn(max = maxHeight) else Modifier.fillMaxHeight(),
                                 ),
                         ) {
-                            items(children, key = { it.path }) { folder ->
+                            items(children, key = { "folder:${it.path}" }) { folder ->
                                 FolderGridTile(
                                     folder = folder,
                                     isHidden = false,
@@ -184,6 +199,9 @@ fun FolderTreePickerDialog(
                                     includedFolders = includedFolders,
                                     onClick = { currentPath = folder.path },
                                 )
+                            }
+                            items(mediaItems, key = { "media:${it.id}" }) { item ->
+                                MediaGridTile(item = item, isHidden = false, isSelected = false)
                             }
                         }
                     }
@@ -197,7 +215,7 @@ fun FolderTreePickerDialog(
                                     if (pinContentToBottom) Modifier.heightIn(max = maxHeight) else Modifier.fillMaxHeight(),
                                 ),
                         ) {
-                            listItems(children, key = { it.path }) { folder ->
+                            listItems(children, key = { "folder:${it.path}" }) { folder ->
                                 FolderListRow(
                                     folder = folder,
                                     isHidden = false,
@@ -208,6 +226,15 @@ fun FolderTreePickerDialog(
                                     thumbnailWidthDp = folderThumbnailWidth,
                                     onClick = { currentPath = folder.path },
                                     onLongClick = {},
+                                )
+                            }
+                            listItems(mediaItems, key = { "media:${it.id}" }) { item ->
+                                MediaListRow(
+                                    item = item,
+                                    isHidden = false,
+                                    isSelected = false,
+                                    thumbnailSizeDp = mediaRowSize,
+                                    thumbnailWidthDp = mediaThumbnailWidth,
                                 )
                             }
                         }

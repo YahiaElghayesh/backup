@@ -2036,7 +2036,7 @@ internal fun FolderGridTile(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun MediaGridTile(
+internal fun MediaGridTile(
     item: MediaItem,
     isHidden: Boolean,
     isSelected: Boolean,
