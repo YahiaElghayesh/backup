@@ -8,6 +8,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -17,12 +18,15 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -400,12 +404,29 @@ private fun ZoomableMediaBox(
 
 /** Playback state shared between [VideoSurface] and [VideoControlsOverlay] -- split apart so the
  * overlay can be drawn outside the pinch-zoom transform while still driving the same player. */
+private val PLAYBACK_SPEEDS = listOf(0.5f, 1f, 1.5f, 2f)
+
 private class VideoPlayerState(val exoPlayer: ExoPlayer) {
     var controlsVisible by mutableStateOf(false)
     var isPlaying by mutableStateOf(true)
     var positionMs by mutableStateOf(0L)
     var durationMs by mutableStateOf(0L)
     var isScrubbing by mutableStateOf(false)
+    var isMuted by mutableStateOf(false)
+    var speed by mutableFloatStateOf(1f)
+
+    fun toggleMute() {
+        isMuted = !isMuted
+        exoPlayer.volume = if (isMuted) 0f else 1f
+    }
+
+    /** Cycles 0.5x -> 1x -> 1.5x -> 2x -> back to 0.5x on each tap, rather than a slider or menu
+     * -- the same one-tap-to-cycle pattern most video players use for a control this coarse. */
+    fun cycleSpeed() {
+        val next = PLAYBACK_SPEEDS[(PLAYBACK_SPEEDS.indexOf(speed) + 1) % PLAYBACK_SPEEDS.size]
+        speed = next
+        exoPlayer.setPlaybackSpeed(next)
+    }
 
     /** Pauses/resumes and updates [isPlaying] in the same call -- the background poll in
      * [rememberVideoPlayerState] only re-reads [ExoPlayer.isPlaying] every 300ms, so relying on it
@@ -481,6 +502,20 @@ private fun VideoControlsOverlay(state: VideoPlayerState) {
     Box(Modifier.fillMaxSize()) {
         if (state.controlsVisible) {
             Row(
+                Modifier.align(Alignment.TopEnd).padding(16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SpeedButton(speed = state.speed, onClick = { state.cycleSpeed() })
+                PlayerControlButton(
+                    icon = if (state.isMuted) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
+                    contentDescription = if (state.isMuted) "Unmute" else "Mute",
+                    size = 40.dp,
+                ) {
+                    state.toggleMute()
+                }
+            }
+            Row(
                 Modifier.align(Alignment.Center),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -552,6 +587,24 @@ private fun PlayerControlButton(
                 onClick = onClick,
             )
             .padding(size / 5),
+    )
+}
+
+@Composable
+private fun SpeedButton(speed: Float, onClick: () -> Unit) {
+    val label = if (speed == speed.toLong().toFloat()) "${speed.toLong()}x" else "${speed}x"
+    Text(
+        label,
+        color = Color.White,
+        style = MaterialTheme.typography.labelLarge,
+        modifier = Modifier
+            .background(Color.Black.copy(alpha = 0.35f), RoundedCornerShape(50))
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = onClick,
+            )
+            .padding(horizontal = 14.dp, vertical = 8.dp),
     )
 }
 
