@@ -6,8 +6,10 @@ import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -16,6 +18,7 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -43,6 +46,7 @@ import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.EditedMediaItem
+import androidx.media3.transformer.EditedMediaItemSequence
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.Transformer
@@ -58,6 +62,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 
+private enum class TrimMode { KEEP_SELECTION, REMOVE_SELECTION }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
@@ -66,6 +72,7 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
     val scope = rememberCoroutineScope()
     val durationMs = item.durationMs.coerceAtLeast(1000L)
 
+    var trimMode by remember { mutableStateOf(TrimMode.KEEP_SELECTION) }
     var trimRange by remember { mutableStateOf(0f..durationMs.toFloat()) }
     // Where the preview scrubber (below the trim range) currently sits -- always kept inside
     // trimRange, separately from the range's own two handles, so the user can freely scrub
@@ -111,6 +118,8 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                 item.uri,
                 trimRange.start.toLong(),
                 trimRange.endInclusive.toLong(),
+                durationMs,
+                removeSelection = trimMode == TrimMode.REMOVE_SELECTION,
                 outputPath,
             )
             if (success) {
@@ -141,6 +150,11 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
         )
     }
 
+    // Removing the selection when it spans the whole video would leave nothing to save --
+    // disable Save rather than silently produce (or fail to produce) an empty file.
+    val removesEverything = trimMode == TrimMode.REMOVE_SELECTION &&
+        trimRange.start <= 0f && trimRange.endInclusive >= durationMs.toFloat()
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -150,7 +164,7 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                 },
                 actions = {
                     TextButton(
-                        enabled = !isSaving,
+                        enabled = !isSaving && !removesEverything,
                         onClick = { showSaveChoiceDialog = true },
                     ) {
                         Text("Save")
@@ -180,11 +194,36 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                 }
             }
             Column(Modifier.fillMaxWidth().padding(16.dp)) {
-                Text("Trim: ${formatMs(trimRange.start.toLong())} - ${formatMs(trimRange.endInclusive.toLong())}")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = trimMode == TrimMode.KEEP_SELECTION,
+                        onClick = { trimMode = TrimMode.KEEP_SELECTION },
+                        label = { Text("Keep selection") },
+                    )
+                    FilterChip(
+                        selected = trimMode == TrimMode.REMOVE_SELECTION,
+                        onClick = { trimMode = TrimMode.REMOVE_SELECTION },
+                        label = { Text("Remove selection") },
+                    )
+                }
+                val selectedDurationMs = (trimRange.endInclusive - trimRange.start).toLong()
                 Text(
-                    "Selected duration: ${formatMs((trimRange.endInclusive - trimRange.start).toLong())}",
+                    if (trimMode == TrimMode.KEEP_SELECTION) {
+                        "Trim: ${formatMs(trimRange.start.toLong())} - ${formatMs(trimRange.endInclusive.toLong())}"
+                    } else {
+                        "Removing: ${formatMs(trimRange.start.toLong())} - ${formatMs(trimRange.endInclusive.toLong())}"
+                    },
+                )
+                Text(
+                    if (trimMode == TrimMode.KEEP_SELECTION) {
+                        "Selected duration: ${formatMs(selectedDurationMs)}"
+                    } else if (removesEverything) {
+                        "This would remove the entire video -- adjust the selection first."
+                    } else {
+                        "Result duration: ${formatMs(durationMs - selectedDurationMs)}"
+                    },
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (removesEverything) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 RangeSlider(
                     value = trimRange,
@@ -239,12 +278,20 @@ private fun formatMs(ms: Long): String {
 /**
  * Must run on a thread with a Looper (the caller's Main dispatcher) -- Transformer requires one.
  *
- * [experimentalSetTrimOptimizationEnabled] is what keeps the trim as close to lossless as a cut
- * can physically be: a video can only be split cleanly at a keyframe, so Transformer re-encodes
- * just the short group of pictures around the trim start (aligning it to the nearest keyframe)
- * and stream-copies -- byte for byte, same resolution, same bitrate, no quality loss -- every
- * frame after that. Without it, Transformer re-encodes the entire clip from scratch, which is
- * exactly the quality/resolution drift trimming a video should never cause.
+ * When [removeSelection] is false (keep the selection, the ordinary trim), this is a single clip
+ * and [experimentalSetTrimOptimizationEnabled] keeps it as close to lossless as a cut can
+ * physically be: a video can only be split cleanly at a keyframe, so Transformer re-encodes just
+ * the short group of pictures around the trim start (aligning it to the nearest keyframe) and
+ * stream-copies -- byte for byte, same resolution, same bitrate, no quality loss -- every frame
+ * after that.
+ *
+ * When [removeSelection] is true (cut the selection out, keep everything else), the output is
+ * built from the two remaining pieces -- [0, startMs) and (endMs, totalDurationMs] -- concatenated
+ * into one [EditedMediaItemSequence]. This can't get the same near-lossless treatment: trim
+ * optimization only ever applies to a single clip (Transformer disables it automatically for a
+ * multi-segment composition), since splicing two previously non-adjacent points together isn't a
+ * straight byte copy the way a single cut's untouched remainder is -- the whole output is
+ * re-encoded. That's an unavoidable consequence of removing a middle section, not a shortcut.
  */
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 private suspend fun transformVideo(
@@ -252,9 +299,47 @@ private suspend fun transformVideo(
     sourceUri: Uri,
     startMs: Long,
     endMs: Long,
+    totalDurationMs: Long,
+    removeSelection: Boolean,
     outputPath: String,
 ): Boolean = suspendCancellableCoroutine { cont ->
-    val mediaItem = ExoMediaItem.Builder()
+    val listener = object : Transformer.Listener {
+        override fun onCompleted(composition: Composition, exportResult: ExportResult) {
+            if (cont.isActive) cont.resume(true, onCancellation = null)
+        }
+
+        override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
+            if (cont.isActive) cont.resume(false, onCancellation = null)
+        }
+    }
+
+    if (!removeSelection) {
+        val mediaItem = clippedMediaItem(sourceUri, startMs, endMs)
+        val editedMediaItem = EditedMediaItem.Builder(mediaItem).build()
+        val transformer = Transformer.Builder(context)
+            .experimentalSetTrimOptimizationEnabled(true)
+            .addListener(listener)
+            .build()
+        cont.invokeOnCancellation { transformer.cancel() }
+        transformer.start(editedMediaItem, outputPath)
+    } else {
+        val pieces = buildList {
+            if (startMs > 0) add(EditedMediaItem.Builder(clippedMediaItem(sourceUri, 0, startMs)).build())
+            if (endMs < totalDurationMs) add(EditedMediaItem.Builder(clippedMediaItem(sourceUri, endMs, totalDurationMs)).build())
+        }
+        if (pieces.isEmpty()) {
+            cont.resume(false, onCancellation = null)
+            return@suspendCancellableCoroutine
+        }
+        val composition = Composition.Builder(EditedMediaItemSequence(pieces)).build()
+        val transformer = Transformer.Builder(context).addListener(listener).build()
+        cont.invokeOnCancellation { transformer.cancel() }
+        transformer.start(composition, outputPath)
+    }
+}
+
+private fun clippedMediaItem(sourceUri: Uri, startMs: Long, endMs: Long): ExoMediaItem =
+    ExoMediaItem.Builder()
         .setUri(sourceUri)
         .setClippingConfiguration(
             ExoMediaItem.ClippingConfiguration.Builder()
@@ -263,24 +348,6 @@ private suspend fun transformVideo(
                 .build(),
         )
         .build()
-    val editedMediaItem = EditedMediaItem.Builder(mediaItem).build()
-
-    val transformer = Transformer.Builder(context)
-        .experimentalSetTrimOptimizationEnabled(true)
-        .addListener(object : Transformer.Listener {
-            override fun onCompleted(composition: Composition, exportResult: ExportResult) {
-                if (cont.isActive) cont.resume(true, onCancellation = null)
-            }
-
-            override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
-                if (cont.isActive) cont.resume(false, onCancellation = null)
-            }
-        })
-        .build()
-
-    cont.invokeOnCancellation { transformer.cancel() }
-    transformer.start(editedMediaItem, outputPath)
-}
 
 private suspend fun saveTrimmedVideo(context: Context, outputPath: String, original: MediaItem, replace: Boolean) =
     withContext(Dispatchers.IO) {
