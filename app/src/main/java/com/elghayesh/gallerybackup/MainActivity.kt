@@ -58,6 +58,7 @@ import com.elghayesh.gallerybackup.data.media.findNode
 import com.elghayesh.gallerybackup.security.AppLockGateScreen
 import com.elghayesh.gallerybackup.security.AuthPromptHost
 import com.elghayesh.gallerybackup.ui.collage.CollageScreen
+import com.elghayesh.gallerybackup.ui.edit.VideoMergeScreen
 import com.elghayesh.gallerybackup.ui.edit.PhotoEditScreen
 import com.elghayesh.gallerybackup.ui.edit.VideoTrimScreen
 import com.elghayesh.gallerybackup.ui.gallery.FolderVisibilityExplorerScreen
@@ -303,6 +304,7 @@ private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: Back
                     navController.navigateSafely("trimVideo/${URLEncoder.encode(folderPath, "UTF-8")}/$index")
                 },
                 onOpenCollage = { ids -> navController.navigateSafely("collage/${ids.joinToString(",")}") },
+                onOpenMergeVideos = { ids -> navController.navigateSafely("mergeVideos/${ids.joinToString(",")}") },
                 onNavigateUp = { navController.popBackStack() },
             )
         }
@@ -407,6 +409,21 @@ private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: Back
                 ?.sortedBy { idOrder[it.id] }
                 ?: emptyList()
             CollageScreen(items = items, viewModel = galleryViewModel, onDone = { navController.popBackStack() })
+        }
+        composable(
+            route = "mergeVideos/{ids}",
+            arguments = listOf(navArgument("ids") { type = NavType.StringType }),
+        ) { backStackEntry ->
+            val ids = (backStackEntry.arguments?.getString("ids") ?: "").split(",").mapNotNull { it.toLongOrNull() }
+            val root by galleryViewModel.visibleRoot.collectAsState()
+            // Order matches the id list (selection order) -- the merge screen's own reorder
+            // controls take over from there.
+            val idOrder = ids.withIndex().associate { (index, id) -> id to index }
+            val items = root?.allItemsRecursive()
+                ?.filter { it.id in idOrder }
+                ?.sortedBy { idOrder[it.id] }
+                ?: emptyList()
+            VideoMergeScreen(items = items, viewModel = galleryViewModel, onDone = { navController.popBackStack() })
         }
         composable(
             route = "trimVideo/{path}/{index}",
