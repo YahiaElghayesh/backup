@@ -18,13 +18,16 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RangeSlider
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -49,6 +52,8 @@ import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
 import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -62,6 +67,11 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
     val durationMs = item.durationMs.coerceAtLeast(1000L)
 
     var trimRange by remember { mutableStateOf(0f..durationMs.toFloat()) }
+    // Where the preview scrubber (below the trim range) currently sits -- always kept inside
+    // trimRange, separately from the range's own two handles, so the user can freely scrub
+    // anywhere *within* the selected area to check its contents without disturbing the start/end
+    // points they already set.
+    var previewPositionMs by remember { mutableStateOf(0f) }
     var isSaving by remember { mutableStateOf(false) }
     var showSaveChoiceDialog by remember { mutableStateOf(false) }
 
@@ -73,6 +83,24 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
         }
     }
     DisposableEffect(exoPlayer) { onDispose { exoPlayer.release() } }
+
+    // Keeps the preview scrubber in sync with actual playback position, and loops playback back
+    // to the trim start the moment it reaches the trim end -- so pressing play previews exactly
+    // the selected area, on repeat, instead of running past it into the part being cut.
+    LaunchedEffect(exoPlayer) {
+        while (isActive) {
+            if (exoPlayer.isPlaying) {
+                val position = exoPlayer.currentPosition.toFloat()
+                if (position >= trimRange.endInclusive) {
+                    exoPlayer.seekTo(trimRange.start.toLong())
+                    previewPositionMs = trimRange.start
+                } else {
+                    previewPositionMs = position.coerceIn(trimRange.start, trimRange.endInclusive)
+                }
+            }
+            delay(100)
+        }
+    }
 
     fun performSave(replace: Boolean) {
         isSaving = true
@@ -153,10 +181,50 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
             }
             Column(Modifier.fillMaxWidth().padding(16.dp)) {
                 Text("Trim: ${formatMs(trimRange.start.toLong())} - ${formatMs(trimRange.endInclusive.toLong())}")
+                Text(
+                    "Selected duration: ${formatMs((trimRange.endInclusive - trimRange.start).toLong())}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 RangeSlider(
                     value = trimRange,
-                    onValueChange = { trimRange = it },
+                    onValueChange = { newRange ->
+                        // Seek the player live to whichever handle actually moved, so the preview
+                        // shows the exact frame at that point while it's being dragged -- rather
+                        // than only updating after the user lifts their finger.
+                        val movedStart = newRange.start != trimRange.start
+                        val movedEnd = newRange.endInclusive != trimRange.endInclusive
+                        trimRange = newRange
+                        when {
+                            movedStart -> {
+                                exoPlayer.seekTo(newRange.start.toLong())
+                                previewPositionMs = newRange.start
+                            }
+                            movedEnd -> {
+                                exoPlayer.seekTo(newRange.endInclusive.toLong())
+                                previewPositionMs = newRange.endInclusive
+                            }
+                        }
+                        previewPositionMs = previewPositionMs.coerceIn(newRange.start, newRange.endInclusive)
+                    },
                     valueRange = 0f..durationMs.toFloat(),
+                )
+                Text(
+                    "Preview within selection: ${formatMs(previewPositionMs.toLong())}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                // A separate scrubber spanning only the selected area -- lets the user freely
+                // move through everything they've selected (not just its two endpoints) to
+                // confirm nothing they want got left out, without that drag also moving the trim
+                // start/end above.
+                Slider(
+                    value = previewPositionMs.coerceIn(trimRange.start, trimRange.endInclusive),
+                    onValueChange = { position ->
+                        previewPositionMs = position
+                        exoPlayer.seekTo(position.toLong())
+                    },
+                    valueRange = trimRange,
                 )
             }
         }
@@ -168,7 +236,17 @@ private fun formatMs(ms: Long): String {
     return "%d:%02d".format(totalSec / 60, totalSec % 60)
 }
 
-/** Must run on a thread with a Looper (the caller's Main dispatcher) -- Transformer requires one. */
+/**
+ * Must run on a thread with a Looper (the caller's Main dispatcher) -- Transformer requires one.
+ *
+ * [experimentalSetTrimOptimizationEnabled] is what keeps the trim as close to lossless as a cut
+ * can physically be: a video can only be split cleanly at a keyframe, so Transformer re-encodes
+ * just the short group of pictures around the trim start (aligning it to the nearest keyframe)
+ * and stream-copies -- byte for byte, same resolution, same bitrate, no quality loss -- every
+ * frame after that. Without it, Transformer re-encodes the entire clip from scratch, which is
+ * exactly the quality/resolution drift trimming a video should never cause.
+ */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 private suspend fun transformVideo(
     context: Context,
     sourceUri: Uri,
@@ -188,6 +266,7 @@ private suspend fun transformVideo(
     val editedMediaItem = EditedMediaItem.Builder(mediaItem).build()
 
     val transformer = Transformer.Builder(context)
+        .experimentalSetTrimOptimizationEnabled(true)
         .addListener(object : Transformer.Listener {
             override fun onCompleted(composition: Composition, exportResult: ExportResult) {
                 if (cont.isActive) cont.resume(true, onCancellation = null)
