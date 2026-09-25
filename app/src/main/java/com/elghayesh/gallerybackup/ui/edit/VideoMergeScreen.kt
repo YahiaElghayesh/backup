@@ -289,7 +289,10 @@ private suspend fun saveMergedVideo(context: Context, outputPath: String, refere
         val tempFile = File(outputPath)
         if (!tempFile.exists()) return@withContext
 
-        val fileName = "merged_${System.currentTimeMillis() / 1000}.mp4"
+        // Named and dated after the first video in the merge order, like a "save as new" edit of
+        // it, rather than an anonymous "merged_<timestamp>".
+        val baseName = referenceItem.displayName.substringBeforeLast('.', referenceItem.displayName)
+        val fileName = "${baseName}_merged_${System.currentTimeMillis() / 1000}.mp4"
         val values = ContentValues().apply {
             put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
             put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
