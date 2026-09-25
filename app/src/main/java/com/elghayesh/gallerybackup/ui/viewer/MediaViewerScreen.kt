@@ -70,6 +70,7 @@ import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import coil.size.Size
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
@@ -320,6 +321,7 @@ private fun ZoomableMediaBox(
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
     var boxSize by remember { mutableStateOf(IntSize.Zero) }
+    val tapScope = rememberCoroutineScope()
 
     Box(
         Modifier
@@ -328,7 +330,9 @@ private fun ZoomableMediaBox(
             .pointerInput(Unit) {
                 var lastTapUpTimeMs = 0L
                 var lastTapPosition = Offset.Zero
+                var pendingTapJob: Job? = null
                 val tapSlopPx = 24.dp.toPx()
+                val doubleTapTimeoutMs = 300L
                 val swipeThresholdPx = 72.dp.toPx()
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
@@ -382,12 +386,13 @@ private fun ZoomableMediaBox(
                     } else if (totalPan < tapSlopPx && lastEvent.changes.size == 1) {
                         val upPosition = lastEvent.changes.first().position
                         val now = System.currentTimeMillis()
-                        val isDoubleTap = now - lastTapUpTimeMs < 300 &&
+                        val isDoubleTap = now - lastTapUpTimeMs < doubleTapTimeoutMs &&
                             (upPosition - lastTapPosition).getDistance() < tapSlopPx * 3
                         if (isDoubleTap) {
-                            // onTap() is deliberately NOT called here when seeking -- toggling
-                            // play/pause and the controls' visibility on every double-tap-to-seek
-                            // read as jittery and wasn't wanted alongside the seek itself.
+                            // Cancel the first tap's delayed onTap() (see below) -- otherwise it
+                            // would still fire and, for video, pause playback right as the seek
+                            // lands.
+                            pendingTapJob?.cancel()
                             if (onDoubleTapSeek != null) {
                                 onDoubleTapSeek(upPosition.x > boxSize.width / 2f)
                             } else {
@@ -398,9 +403,22 @@ private fun ZoomableMediaBox(
                             }
                             lastTapUpTimeMs = 0L
                         } else {
-                            onTap()
                             lastTapUpTimeMs = now
                             lastTapPosition = upPosition
+                            if (onDoubleTapSeek != null) {
+                                // A tap that might turn into a double-tap-to-seek can't fire
+                                // onTap() (play/pause) right away -- there's no way yet to tell it
+                                // apart from the first half of a double-tap, and firing it
+                                // immediately was pausing the video for an instant on every
+                                // double-tap seek. Wait out the double-tap window first; the
+                                // isDoubleTap branch above cancels this if a second tap arrives.
+                                pendingTapJob = tapScope.launch {
+                                    delay(doubleTapTimeoutMs)
+                                    onTap()
+                                }
+                            } else {
+                                onTap()
+                            }
                         }
                     }
                 }
@@ -530,22 +548,6 @@ private fun VideoSurface(exoPlayer: ExoPlayer, modifier: Modifier = Modifier) {
 private fun VideoControlsOverlay(state: VideoPlayerState) {
     val exoPlayer = state.exoPlayer
     Box(Modifier.fillMaxSize()) {
-        // Mute and speed stay visible regardless of controlsVisible -- like a voice note's own
-        // speed button, they're meant to be reachable at a glance, not hidden behind a tap first.
-        Row(
-            Modifier.align(Alignment.TopEnd).padding(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            SpeedButton(speed = state.speed, onClick = { state.cycleSpeed() })
-            PlayerControlButton(
-                icon = if (state.isMuted) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
-                contentDescription = if (state.isMuted) "Unmute" else "Mute",
-                size = 40.dp,
-            ) {
-                state.toggleMute()
-            }
-        }
         // Flashed briefly by a double-tap seek (see ZoomableMediaBox's onDoubleTapSeek below) --
         // separate from controlsVisible so double-tapping to seek never also reveals/hides the
         // main play/pause/skip row.
@@ -591,33 +593,54 @@ private fun VideoControlsOverlay(state: VideoPlayerState) {
             }
         }
 
-        Row(
+        Column(
             Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.6f))))
-                .padding(horizontal = 12.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
+                .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.6f)))),
         ) {
-            Text(formatVideoTime(state.positionMs), color = Color.White, style = MaterialTheme.typography.labelSmall)
-            Slider(
-                value = if (state.durationMs > 0) (state.positionMs.toFloat() / state.durationMs).coerceIn(0f, 1f) else 0f,
-                onValueChange = { fraction ->
-                    state.isScrubbing = true
-                    state.positionMs = (fraction * state.durationMs).toLong()
-                },
-                onValueChangeFinished = {
-                    exoPlayer.seekTo(state.positionMs)
-                    state.isScrubbing = false
-                },
-                colors = SliderDefaults.colors(
-                    activeTrackColor = Color.White,
-                    thumbColor = Color.White,
-                    inactiveTrackColor = Color.White.copy(alpha = 0.35f),
-                ),
-                modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
-            )
-            Text(formatVideoTime(state.durationMs), color = Color.White, style = MaterialTheme.typography.labelSmall)
+            // Mute and speed stay visible regardless of controlsVisible -- like a voice note's
+            // own speed button, they're meant to be reachable at a glance, not hidden behind a
+            // tap first -- and sit directly above the progress bar rather than up by the status
+            // bar, out of the way of the video itself.
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SpeedButton(speed = state.speed, onClick = { state.cycleSpeed() })
+                PlayerControlButton(
+                    icon = if (state.isMuted) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
+                    contentDescription = if (state.isMuted) "Unmute" else "Mute",
+                    size = 40.dp,
+                ) {
+                    state.toggleMute()
+                }
+            }
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(formatVideoTime(state.positionMs), color = Color.White, style = MaterialTheme.typography.labelSmall)
+                Slider(
+                    value = if (state.durationMs > 0) (state.positionMs.toFloat() / state.durationMs).coerceIn(0f, 1f) else 0f,
+                    onValueChange = { fraction ->
+                        state.isScrubbing = true
+                        state.positionMs = (fraction * state.durationMs).toLong()
+                    },
+                    onValueChangeFinished = {
+                        exoPlayer.seekTo(state.positionMs)
+                        state.isScrubbing = false
+                    },
+                    colors = SliderDefaults.colors(
+                        activeTrackColor = Color.White,
+                        thumbColor = Color.White,
+                        inactiveTrackColor = Color.White.copy(alpha = 0.35f),
+                    ),
+                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+                )
+                Text(formatVideoTime(state.durationMs), color = Color.White, style = MaterialTheme.typography.labelSmall)
+            }
         }
     }
 }
