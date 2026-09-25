@@ -43,11 +43,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem as ExoMediaItem
+import androidx.media3.common.audio.SonicAudioProcessor
+import androidx.media3.effect.SpeedChangeEffect
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
+import androidx.media3.transformer.Effects
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.ProgressHolder
@@ -82,6 +85,12 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
     // anywhere *within* the selected area to check its contents without disturbing the start/end
     // points they already set.
     var previewPositionMs by remember { mutableStateOf(0f) }
+    // Playback speed baked into the exported file (not just this screen's own preview) -- 1x
+    // leaves the export untouched (and eligible for the near-lossless trim path below); any other
+    // value re-times both the video frames and, unless muted, the audio by the same factor so
+    // they stay in sync.
+    var editSpeed by remember { mutableStateOf(1f) }
+    var muteAudio by remember { mutableStateOf(false) }
     // null while not saving; 0..100 while an export is running, so the overlay can show real
     // progress instead of an indeterminate spinner the user has no way to gauge the length of.
     var saveProgress by remember { mutableStateOf<Int?>(null) }
@@ -125,6 +134,8 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                 trimRange.endInclusive.toLong(),
                 durationMs,
                 removeSelection = trimMode == TrimMode.REMOVE_SELECTION,
+                speed = editSpeed,
+                muteAudio = muteAudio,
                 outputPath,
                 onProgress = { saveProgress = it },
             )
@@ -220,6 +231,32 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                         label = { Text("Remove selection") },
                     )
                 }
+                Text(
+                    "Speed: ${formatSpeed(editSpeed)}",
+                    modifier = Modifier.padding(top = 12.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Slider(
+                    value = editSpeed,
+                    onValueChange = { editSpeed = it },
+                    valueRange = 0.25f..10f,
+                )
+                Row(
+                    modifier = Modifier.padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    FilterChip(
+                        selected = !muteAudio,
+                        onClick = { muteAudio = false },
+                        label = { Text("Keep original audio") },
+                    )
+                    FilterChip(
+                        selected = muteAudio,
+                        onClick = { muteAudio = true },
+                        label = { Text("Mute") },
+                    )
+                }
                 val selectedDurationMs = (trimRange.endInclusive - trimRange.start).toLong()
                 Text(
                     if (trimMode == TrimMode.KEEP_SELECTION) {
@@ -230,11 +267,22 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                 )
                 Text(
                     if (trimMode == TrimMode.KEEP_SELECTION) {
-                        "Selected duration: ${formatMs(selectedDurationMs)}"
+                        val atSpeedMs = (selectedDurationMs / editSpeed).toLong()
+                        if (editSpeed == 1f) {
+                            "Selected duration: ${formatMs(selectedDurationMs)}"
+                        } else {
+                            "Selected duration: ${formatMs(selectedDurationMs)} -- ${formatMs(atSpeedMs)} at ${formatSpeed(editSpeed)}"
+                        }
                     } else if (removesEverything) {
                         "This would remove the entire video -- adjust the selection first."
                     } else {
-                        "Result duration: ${formatMs(durationMs - selectedDurationMs)}"
+                        val resultMs = durationMs - selectedDurationMs
+                        val atSpeedMs = (resultMs / editSpeed).toLong()
+                        if (editSpeed == 1f) {
+                            "Result duration: ${formatMs(resultMs)}"
+                        } else {
+                            "Result duration: ${formatMs(resultMs)} -- ${formatMs(atSpeedMs)} at ${formatSpeed(editSpeed)}"
+                        }
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = if (removesEverything) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -306,15 +354,21 @@ private fun formatMs(ms: Long): String {
     return "%d:%02d".format(totalSec / 60, totalSec % 60)
 }
 
+private fun formatSpeed(speed: Float): String {
+    if (speed == speed.toLong().toFloat()) return "${speed.toLong()}x"
+    val trimmed = "%.2f".format(speed).trimEnd('0').trimEnd('.')
+    return "${trimmed}x"
+}
+
 /**
  * Must run on a thread with a Looper (the caller's Main dispatcher) -- Transformer requires one.
  *
- * When [removeSelection] is false (keep the selection, the ordinary trim), this is a single clip
- * and [experimentalSetTrimOptimizationEnabled] keeps it as close to lossless as a cut can
- * physically be: a video can only be split cleanly at a keyframe, so Transformer re-encodes just
- * the short group of pictures around the trim start (aligning it to the nearest keyframe) and
- * stream-copies -- byte for byte, same resolution, same bitrate, no quality loss -- every frame
- * after that.
+ * When [removeSelection] is false (keep the selection, the ordinary trim) AND [speed] is 1x, this
+ * is a single, untouched clip and [experimentalSetTrimOptimizationEnabled] keeps it as close to
+ * lossless as a cut can physically be: a video can only be split cleanly at a keyframe, so
+ * Transformer re-encodes just the short group of pictures around the trim start (aligning it to
+ * the nearest keyframe) and stream-copies -- byte for byte, same resolution, same bitrate, no
+ * quality loss -- every frame after that.
  *
  * When [removeSelection] is true (cut the selection out, keep everything else), the output is
  * built from the two remaining pieces -- [0, startMs) and (endMs, totalDurationMs] -- concatenated
@@ -323,6 +377,14 @@ private fun formatMs(ms: Long): String {
  * multi-segment composition), since splicing two previously non-adjacent points together isn't a
  * straight byte copy the way a single cut's untouched remainder is -- the whole output is
  * re-encoded. That's an unavoidable consequence of removing a middle section, not a shortcut.
+ *
+ * A [speed] other than 1x always forces a full re-encode too, for both branches: every frame's
+ * timestamp has to be rewritten ([SpeedChangeEffect]), which is exactly what the near-lossless
+ * trim path above depends on NOT happening to any frame it stream-copies. [muteAudio] drops the
+ * audio track entirely rather than just silencing it (silence would still be decoded, time-
+ * stretched and re-encoded for nothing); otherwise the audio is time-stretched by the same factor
+ * as the video via [SonicAudioProcessor] so picture and sound stay in sync, keeping its original
+ * pitch rather than the chipmunk/slow-motion-voice effect a plain resample would give.
  */
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 private suspend fun transformVideo(
@@ -332,6 +394,8 @@ private suspend fun transformVideo(
     endMs: Long,
     totalDurationMs: Long,
     removeSelection: Boolean,
+    speed: Float,
+    muteAudio: Boolean,
     outputPath: String,
     onProgress: (Int) -> Unit,
 ): Boolean = coroutineScope {
@@ -358,20 +422,24 @@ private suspend fun transformVideo(
                 }
             }
 
-            if (!removeSelection) {
-                val mediaItem = clippedMediaItem(sourceUri, startMs, endMs)
-                val editedMediaItem = EditedMediaItem.Builder(mediaItem).build()
-                val transformer = Transformer.Builder(context)
-                    .experimentalSetTrimOptimizationEnabled(true)
-                    .addListener(listener)
+            fun buildPiece(pieceStartMs: Long, pieceEndMs: Long): EditedMediaItem =
+                EditedMediaItem.Builder(clippedMediaItem(sourceUri, pieceStartMs, pieceEndMs))
+                    .setRemoveAudio(muteAudio)
+                    .setEffects(speedEffects(speed, muteAudio))
                     .build()
+
+            if (!removeSelection) {
+                val editedMediaItem = buildPiece(startMs, endMs)
+                val transformerBuilder = Transformer.Builder(context).addListener(listener)
+                if (speed == 1f) transformerBuilder.experimentalSetTrimOptimizationEnabled(true)
+                val transformer = transformerBuilder.build()
                 transformerRef = transformer
                 cont.invokeOnCancellation { transformer.cancel() }
                 transformer.start(editedMediaItem, outputPath)
             } else {
                 val pieces = buildList {
-                    if (startMs > 0) add(EditedMediaItem.Builder(clippedMediaItem(sourceUri, 0, startMs)).build())
-                    if (endMs < totalDurationMs) add(EditedMediaItem.Builder(clippedMediaItem(sourceUri, endMs, totalDurationMs)).build())
+                    if (startMs > 0) add(buildPiece(0, startMs))
+                    if (endMs < totalDurationMs) add(buildPiece(endMs, totalDurationMs))
                 }
                 if (pieces.isEmpty()) {
                     cont.resume(false, onCancellation = null)
@@ -399,6 +467,24 @@ private fun clippedMediaItem(sourceUri: Uri, startMs: Long, endMs: Long): ExoMed
                 .build(),
         )
         .build()
+
+/**
+ * [SpeedChangeEffect] re-times the video frames; [SonicAudioProcessor.setSpeed] re-times the
+ * audio by the same factor (its pitch stays at the class default of 1x, so speeding up or slowing
+ * down doesn't chipmunk or drawl the audio) so picture and sound stay in sync. Skipped entirely at
+ * 1x (a no-op that would otherwise still force a full re-encode) and whenever [muteAudio] drops
+ * the audio track anyway.
+ */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+private fun speedEffects(speed: Float, muteAudio: Boolean): Effects {
+    val videoEffects = if (speed != 1f) listOf(SpeedChangeEffect(speed)) else emptyList()
+    val audioProcessors = if (speed != 1f && !muteAudio) {
+        listOf(SonicAudioProcessor().apply { setSpeed(speed) })
+    } else {
+        emptyList()
+    }
+    return Effects(audioProcessors, videoEffects)
+}
 
 private suspend fun saveTrimmedVideo(context: Context, outputPath: String, original: MediaItem, replace: Boolean) =
     withContext(Dispatchers.IO) {
