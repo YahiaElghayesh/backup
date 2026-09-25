@@ -334,15 +334,31 @@ private fun ZoomableMediaBox(
                 var pendingTapJob: Job? = null
                 val tapSlopPx = 24.dp.toPx()
                 val doubleTapTimeoutMs = 300L
+                // Real double-tap fingers don't land on the exact same pixel twice -- 3x the
+                // ordinary tap slop was still too tight and let a slightly-off second tap fall
+                // through as a separate single tap instead of being recognized as the seek.
+                val doubleTapDistancePx = 100.dp.toPx()
                 val swipeThresholdPx = 72.dp.toPx()
                 awaitEachGesture {
-                    awaitFirstDown(requireUnconsumed = false)
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    // A control drawn on top (mute/speed/play/seek bar -- see VideoControlsOverlay,
+                    // a sibling Box over this one) can consume this same touch via its own
+                    // clickable/drag handling, either on the down event or mid-gesture once it
+                    // resolves the touch as its own tap. Compose still delivers the raw event to us
+                    // too (sibling pointerInput trees aren't mutually exclusive the way an ancestor
+                    // and descendant are), and without checking this we'd process it as an ordinary
+                    // tap on the video -- toggling play/pause a moment later for a touch that was
+                    // actually "cycle speed" or "drag the progress bar", which read as the video
+                    // randomly pausing itself. Re-checked every loop iteration below too, since
+                    // consumption can happen after the initial down.
+                    var consumedElsewhere = down.isConsumed
                     var totalPan = 0f
                     var edgeOverscrollX = 0f
                     var lastEvent: PointerEvent
                     do {
                         val event = awaitPointerEvent()
                         lastEvent = event
+                        if (event.changes.any { it.isConsumed }) consumedElsewhere = true
                         val pointerCount = event.changes.size
                         val zoomChange = event.calculateZoom()
                         val panChange = event.calculatePan()
@@ -380,7 +396,10 @@ private fun ZoomableMediaBox(
                         }
                     } while (event.changes.any { it.pressed })
 
-                    if (edgeOverscrollX <= -swipeThresholdPx) {
+                    if (consumedElsewhere) {
+                        // Already handled by a control drawn on top (mute, speed, play/pause,
+                        // seek bar) -- don't also react to it here.
+                    } else if (edgeOverscrollX <= -swipeThresholdPx) {
                         onSwipeNext()
                     } else if (edgeOverscrollX >= swipeThresholdPx) {
                         onSwipePrevious()
@@ -388,7 +407,7 @@ private fun ZoomableMediaBox(
                         val upPosition = lastEvent.changes.first().position
                         val now = System.currentTimeMillis()
                         val isDoubleTap = now - lastTapUpTimeMs < doubleTapTimeoutMs &&
-                            (upPosition - lastTapPosition).getDistance() < tapSlopPx * 3
+                            (upPosition - lastTapPosition).getDistance() < doubleTapDistancePx
                         if (isDoubleTap) {
                             // Cancel the first tap's delayed onTap() (see below) -- otherwise it
                             // would still fire and, for video, pause playback right as the seek
@@ -512,7 +531,10 @@ private fun rememberVideoPlayerState(item: MediaItem): VideoPlayerState {
                 state.durationMs = exoPlayer.duration.coerceAtLeast(0)
             }
             state.isPlaying = exoPlayer.isPlaying
-            delay(300)
+            // 100ms (a tenth of a second) rather than 300ms -- the progress bar and its time
+            // labels only move as often as this poll runs, and 300ms read as sluggish/steppy
+            // rather than a smoothly advancing bar.
+            delay(100)
         }
     }
     return state
@@ -689,8 +711,10 @@ private fun SpeedButton(speed: Float, onClick: () -> Unit) {
 }
 
 private fun formatVideoTime(ms: Long): String {
-    val totalSec = TimeUnit.MILLISECONDS.toSeconds(ms.coerceAtLeast(0))
+    val clampedMs = ms.coerceAtLeast(0)
+    val totalSec = TimeUnit.MILLISECONDS.toSeconds(clampedMs)
     val min = totalSec / 60
     val sec = totalSec % 60
-    return "%d:%02d".format(min, sec)
+    val tenths = (clampedMs % 1000) / 100
+    return "%d:%02d.%d".format(min, sec, tenths)
 }
