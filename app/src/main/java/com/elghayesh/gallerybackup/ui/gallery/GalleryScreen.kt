@@ -298,7 +298,13 @@ fun GalleryScreen(
     // (even if content-equal) folders/media list instances.
     val currentFolders = rememberUpdatedState(folders)
     val currentMedia = rememberUpdatedState(media)
-    val selectedItems = media.filter { it.id in selectedMediaIds }
+    // In selection order (selectedMediaIds is a LinkedHashSet under the hood -- Kotlin's Set +/-
+    // always goes through toMutableSet(), which is a LinkedHashSet -- so iterating it directly
+    // preserves the order items were tapped in), not gallery display order like a plain filter
+    // over `media` would give -- matters for collage/merge, where the order picked is the order
+    // used.
+    val mediaById = media.associateBy { it.id }
+    val selectedItems = selectedMediaIds.mapNotNull { mediaById[it] }
     val selectedFolderNodes = folders.filter { it.path in selectedFolderPaths }
     val pendingNameConflict by viewModel.pendingNameConflict.collectAsState()
     val isSelectionMode = selectedMediaIds.isNotEmpty() || selectedFolderPaths.isNotEmpty()
