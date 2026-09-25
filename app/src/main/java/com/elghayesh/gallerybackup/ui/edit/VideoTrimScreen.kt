@@ -44,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
@@ -228,9 +229,15 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                 RangeSlider(
                     value = trimRange,
                     onValueChange = { newRange ->
-                        // Seek the player live to whichever handle actually moved, so the preview
-                        // shows the exact frame at that point while it's being dragged -- rather
-                        // than only updating after the user lifts their finger.
+                        // CLOSEST_SYNC seeks to the nearest keyframe instead of decoding forward
+                        // from one to reach an exact frame -- that decode is what actually made
+                        // dragging feel dead: an exact seek takes long enough that a fast drag's
+                        // next seekTo() (fired on the very next onValueChange) supersedes it
+                        // before a single frame finishes decoding, over and over, so nothing
+                        // renders until the drag stops and the last seek is finally left alone
+                        // long enough to complete. A keyframe-only seek has nothing to decode, so
+                        // it keeps up with the drag instead.
+                        exoPlayer.setSeekParameters(SeekParameters.CLOSEST_SYNC)
                         val movedStart = newRange.start != trimRange.start
                         val movedEnd = newRange.endInclusive != trimRange.endInclusive
                         trimRange = newRange
@@ -245,6 +252,12 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                             }
                         }
                         previewPositionMs = previewPositionMs.coerceIn(newRange.start, newRange.endInclusive)
+                    },
+                    onValueChangeFinished = {
+                        // Land exactly on the chosen frame once the drag settles -- CLOSEST_SYNC
+                        // only approximated a nearby keyframe while dragging.
+                        exoPlayer.setSeekParameters(SeekParameters.EXACT)
+                        exoPlayer.seekTo(previewPositionMs.toLong())
                     },
                     valueRange = 0f..durationMs.toFloat(),
                 )
@@ -261,7 +274,12 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                     value = previewPositionMs.coerceIn(trimRange.start, trimRange.endInclusive),
                     onValueChange = { position ->
                         previewPositionMs = position
+                        exoPlayer.setSeekParameters(SeekParameters.CLOSEST_SYNC)
                         exoPlayer.seekTo(position.toLong())
+                    },
+                    onValueChangeFinished = {
+                        exoPlayer.setSeekParameters(SeekParameters.EXACT)
+                        exoPlayer.seekTo(previewPositionMs.toLong())
                     },
                     valueRange = trimRange,
                 )
