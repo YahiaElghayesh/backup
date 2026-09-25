@@ -44,6 +44,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -264,6 +265,9 @@ fun MediaViewerScreen(
                         },
                         onSwipeNext = onSwipeNext,
                         onSwipePrevious = onSwipePrevious,
+                        onDoubleTapSeek = { isRightHalf ->
+                            videoState.seekRelative(if (isRightHalf) 10_000 else -10_000)
+                        },
                     ) {
                         VideoSurface(videoState.exoPlayer, modifier = Modifier.fillMaxSize())
                     }
@@ -308,6 +312,9 @@ private fun ZoomableMediaBox(
     onTap: () -> Unit = {},
     onSwipeNext: () -> Unit = {},
     onSwipePrevious: () -> Unit = {},
+    // When set (video only), a double-tap seeks instead of the default zoom-toggle -- true when
+    // the tap landed on the right half of the box, false for the left half.
+    onDoubleTapSeek: ((isRightHalf: Boolean) -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
     var scale by remember { mutableFloatStateOf(1f) }
@@ -377,13 +384,21 @@ private fun ZoomableMediaBox(
                         val now = System.currentTimeMillis()
                         val isDoubleTap = now - lastTapUpTimeMs < 300 &&
                             (upPosition - lastTapPosition).getDistance() < tapSlopPx * 3
-                        onTap()
                         if (isDoubleTap) {
-                            scale = if (scale > 1f) 1f else 3f
-                            offset = Offset.Zero
-                            onScaleChanged(scale)
+                            // onTap() is deliberately NOT called here when seeking -- toggling
+                            // play/pause and the controls' visibility on every double-tap-to-seek
+                            // read as jittery and wasn't wanted alongside the seek itself.
+                            if (onDoubleTapSeek != null) {
+                                onDoubleTapSeek(upPosition.x > boxSize.width / 2f)
+                            } else {
+                                onTap()
+                                scale = if (scale > 1f) 1f else 3f
+                                offset = Offset.Zero
+                                onScaleChanged(scale)
+                            }
                             lastTapUpTimeMs = 0L
                         } else {
+                            onTap()
                             lastTapUpTimeMs = now
                             lastTapPosition = upPosition
                         }
@@ -418,6 +433,21 @@ private class VideoPlayerState(val exoPlayer: ExoPlayer) {
     fun toggleMute() {
         isMuted = !isMuted
         exoPlayer.volume = if (isMuted) 0f else 1f
+    }
+
+    /** Shown briefly by a double-tap seek (see [seekRelative]) -- null hides the flash, true/false
+     * picks which arrow/direction to show. Distinct from [controlsVisible]: double-tapping to seek
+     * shouldn't also reveal or hide the main play/pause/skip controls. [seekFeedbackToken] bumps on
+     * every call (even two in the same direction in a row) so the auto-hide LaunchedEffect keyed on
+     * it always restarts its timer instead of only reacting to a direction change. */
+    var seekFeedbackForward by mutableStateOf<Boolean?>(null)
+    var seekFeedbackToken by mutableIntStateOf(0)
+
+    fun seekRelative(deltaMs: Long) {
+        val target = (exoPlayer.currentPosition + deltaMs).coerceIn(0, exoPlayer.duration.coerceAtLeast(0))
+        exoPlayer.seekTo(target)
+        seekFeedbackForward = deltaMs > 0
+        seekFeedbackToken++
     }
 
     /** Cycles 0.5x -> 1x -> 1.5x -> 2x -> back to 0.5x on each tap, rather than a slider or menu
@@ -500,27 +530,53 @@ private fun VideoSurface(exoPlayer: ExoPlayer, modifier: Modifier = Modifier) {
 private fun VideoControlsOverlay(state: VideoPlayerState) {
     val exoPlayer = state.exoPlayer
     Box(Modifier.fillMaxSize()) {
-        if (state.controlsVisible) {
+        // Mute and speed stay visible regardless of controlsVisible -- like a voice note's own
+        // speed button, they're meant to be reachable at a glance, not hidden behind a tap first.
+        Row(
+            Modifier.align(Alignment.TopEnd).padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            SpeedButton(speed = state.speed, onClick = { state.cycleSpeed() })
+            PlayerControlButton(
+                icon = if (state.isMuted) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
+                contentDescription = if (state.isMuted) "Unmute" else "Mute",
+                size = 40.dp,
+            ) {
+                state.toggleMute()
+            }
+        }
+        // Flashed briefly by a double-tap seek (see ZoomableMediaBox's onDoubleTapSeek below) --
+        // separate from controlsVisible so double-tapping to seek never also reveals/hides the
+        // main play/pause/skip row.
+        state.seekFeedbackForward?.let { forward ->
+            LaunchedEffect(state.seekFeedbackToken) {
+                delay(500)
+                state.seekFeedbackForward = null
+            }
             Row(
-                Modifier.align(Alignment.TopEnd).padding(16.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                Modifier
+                    .align(if (forward) Alignment.CenterEnd else Alignment.CenterStart)
+                    .padding(horizontal = 32.dp)
+                    .background(Color.Black.copy(alpha = 0.45f), CircleShape)
+                    .padding(12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                SpeedButton(speed = state.speed, onClick = { state.cycleSpeed() })
-                PlayerControlButton(
-                    icon = if (state.isMuted) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
-                    contentDescription = if (state.isMuted) "Unmute" else "Mute",
-                    size = 40.dp,
-                ) {
-                    state.toggleMute()
-                }
+                Icon(
+                    if (forward) Icons.Filled.Forward10 else Icons.Filled.Replay10,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(32.dp),
+                )
             }
+        }
+        if (state.controlsVisible) {
             Row(
                 Modifier.align(Alignment.Center),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 PlayerControlButton(Icons.Filled.Replay10, "Rewind 10 seconds") {
-                    exoPlayer.seekTo((exoPlayer.currentPosition - 10_000).coerceAtLeast(0))
+                    state.seekRelative(-10_000)
                 }
                 PlayerControlButton(
                     icon = if (state.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
@@ -530,7 +586,7 @@ private fun VideoControlsOverlay(state: VideoPlayerState) {
                     state.togglePlayPause()
                 }
                 PlayerControlButton(Icons.Filled.Forward10, "Forward 10 seconds") {
-                    exoPlayer.seekTo((exoPlayer.currentPosition + 10_000).coerceAtMost(exoPlayer.duration.coerceAtLeast(0)))
+                    state.seekRelative(10_000)
                 }
             }
         }
