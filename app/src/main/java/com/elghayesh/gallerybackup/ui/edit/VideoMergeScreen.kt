@@ -51,6 +51,7 @@ import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
+import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
 import coil.compose.AsyncImage
 import com.elghayesh.gallerybackup.data.media.MediaItem
@@ -58,6 +59,9 @@ import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
 import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -76,7 +80,8 @@ fun VideoMergeScreen(items: List<MediaItem>, viewModel: GalleryViewModel, onDone
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var orderedItems by remember(items) { mutableStateOf(items) }
-    var isSaving by remember { mutableStateOf(false) }
+    // null while not saving; 0..100 while an export is running.
+    var saveProgress by remember { mutableStateOf<Int?>(null) }
 
     fun moveItem(index: Int, delta: Int) {
         val target = index + delta
@@ -93,15 +98,20 @@ fun VideoMergeScreen(items: List<MediaItem>, viewModel: GalleryViewModel, onDone
 
     fun performMerge() {
         if (orderedItems.size < 2) return
-        isSaving = true
+        saveProgress = 0
         scope.launch {
             val outputPath = File(context.cacheDir, "merge_${System.currentTimeMillis()}.mp4").absolutePath
-            val success = mergeVideos(context, orderedItems.map { it.uri }, outputPath)
+            val success = mergeVideos(
+                context,
+                orderedItems.map { it.uri },
+                outputPath,
+                onProgress = { saveProgress = it },
+            )
             if (success) {
                 saveMergedVideo(context, outputPath, orderedItems.first())
                 viewModel.refresh()
             }
-            isSaving = false
+            saveProgress = null
             onDone()
         }
     }
@@ -117,7 +127,7 @@ fun VideoMergeScreen(items: List<MediaItem>, viewModel: GalleryViewModel, onDone
                 },
                 actions = {
                     TextButton(
-                        enabled = !isSaving && orderedItems.size >= 2,
+                        enabled = saveProgress == null && orderedItems.size >= 2,
                         onClick = { performMerge() },
                     ) {
                         Text("Merge")
@@ -149,12 +159,20 @@ fun VideoMergeScreen(items: List<MediaItem>, viewModel: GalleryViewModel, onDone
                     }
                 }
             }
-            if (isSaving) {
+            saveProgress?.let { progress ->
                 Box(
                     Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f)),
                     contentAlignment = Alignment.Center,
                 ) {
-                    CircularProgressIndicator()
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(progress = { progress / 100f })
+                        Text(
+                            "$progress%",
+                            modifier = Modifier.padding(top = 8.dp),
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
                 }
             }
         }
@@ -227,24 +245,43 @@ private suspend fun mergeVideos(
     context: Context,
     uris: List<android.net.Uri>,
     outputPath: String,
-): Boolean = suspendCancellableCoroutine { cont ->
-    val pieces = uris.map { EditedMediaItem.Builder(ExoMediaItem.fromUri(it)).build() }
-    val composition = Composition.Builder(EditedMediaItemSequence(pieces)).build()
-
-    val transformer = Transformer.Builder(context)
-        .addListener(object : Transformer.Listener {
-            override fun onCompleted(composition: Composition, exportResult: ExportResult) {
-                if (cont.isActive) cont.resume(true, onCancellation = null)
+    onProgress: (Int) -> Unit,
+): Boolean = coroutineScope {
+    var transformerRef: Transformer? = null
+    val progressJob = launch {
+        val progressHolder = ProgressHolder()
+        while (isActive) {
+            delay(200)
+            val transformer = transformerRef ?: continue
+            if (transformer.getProgress(progressHolder) == Transformer.PROGRESS_STATE_AVAILABLE) {
+                onProgress(progressHolder.progress)
             }
+        }
+    }
+    try {
+        suspendCancellableCoroutine { cont ->
+            val pieces = uris.map { EditedMediaItem.Builder(ExoMediaItem.fromUri(it)).build() }
+            val composition = Composition.Builder(EditedMediaItemSequence(pieces)).build()
 
-            override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
-                if (cont.isActive) cont.resume(false, onCancellation = null)
-            }
-        })
-        .build()
+            val transformer = Transformer.Builder(context)
+                .addListener(object : Transformer.Listener {
+                    override fun onCompleted(composition: Composition, exportResult: ExportResult) {
+                        if (cont.isActive) cont.resume(true, onCancellation = null)
+                    }
 
-    cont.invokeOnCancellation { transformer.cancel() }
-    transformer.start(composition, outputPath)
+                    override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
+                        if (cont.isActive) cont.resume(false, onCancellation = null)
+                    }
+                })
+                .build()
+
+            transformerRef = transformer
+            cont.invokeOnCancellation { transformer.cancel() }
+            transformer.start(composition, outputPath)
+        }
+    } finally {
+        progressJob.cancel()
+    }
 }
 
 private suspend fun saveMergedVideo(context: Context, outputPath: String, referenceItem: MediaItem) =
@@ -256,6 +293,8 @@ private suspend fun saveMergedVideo(context: Context, outputPath: String, refere
         val values = ContentValues().apply {
             put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
             put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+            put(MediaStore.Video.Media.DATE_TAKEN, referenceItem.dateTakenSec * 1000)
+            put(MediaStore.Video.Media.DATE_MODIFIED, referenceItem.dateModifiedSec)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 put(
                     MediaStore.Video.Media.RELATIVE_PATH,

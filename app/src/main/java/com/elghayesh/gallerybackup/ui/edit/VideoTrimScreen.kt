@@ -50,6 +50,7 @@ import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
+import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
 import androidx.media3.ui.PlayerView
 import com.elghayesh.gallerybackup.data.media.MediaItem
@@ -57,6 +58,7 @@ import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
 import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -80,7 +82,9 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
     // anywhere *within* the selected area to check its contents without disturbing the start/end
     // points they already set.
     var previewPositionMs by remember { mutableStateOf(0f) }
-    var isSaving by remember { mutableStateOf(false) }
+    // null while not saving; 0..100 while an export is running, so the overlay can show real
+    // progress instead of an indeterminate spinner the user has no way to gauge the length of.
+    var saveProgress by remember { mutableStateOf<Int?>(null) }
     var showSaveChoiceDialog by remember { mutableStateOf(false) }
 
     val exoPlayer = remember(item.id) {
@@ -111,7 +115,7 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
     }
 
     fun performSave(replace: Boolean) {
-        isSaving = true
+        saveProgress = 0
         scope.launch {
             val outputPath = File(context.cacheDir, "trim_${System.currentTimeMillis()}.mp4").absolutePath
             val success = transformVideo(
@@ -122,13 +126,14 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                 durationMs,
                 removeSelection = trimMode == TrimMode.REMOVE_SELECTION,
                 outputPath,
+                onProgress = { saveProgress = it },
             )
             if (success) {
                 saveTrimmedVideo(context, outputPath, item, replace)
                 if (replace) viewModel.deleteMediaItems(listOf(item), skipTrash = false)
                 viewModel.refresh()
             }
-            isSaving = false
+            saveProgress = null
             onDone()
         }
     }
@@ -165,7 +170,7 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                 },
                 actions = {
                     TextButton(
-                        enabled = !isSaving && !removesEverything,
+                        enabled = saveProgress == null && !removesEverything,
                         onClick = { showSaveChoiceDialog = true },
                     ) {
                         Text("Save")
@@ -185,12 +190,20 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                     },
                     modifier = Modifier.fillMaxSize(),
                 )
-                if (isSaving) {
+                saveProgress?.let { progress ->
                     Box(
                         Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f)),
                         contentAlignment = Alignment.Center,
                     ) {
-                        CircularProgressIndicator()
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CircularProgressIndicator(progress = { progress / 100f })
+                            Text(
+                                "$progress%",
+                                modifier = Modifier.padding(top = 8.dp),
+                                color = Color.White,
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
                     }
                 }
             }
@@ -320,39 +333,59 @@ private suspend fun transformVideo(
     totalDurationMs: Long,
     removeSelection: Boolean,
     outputPath: String,
-): Boolean = suspendCancellableCoroutine { cont ->
-    val listener = object : Transformer.Listener {
-        override fun onCompleted(composition: Composition, exportResult: ExportResult) {
-            if (cont.isActive) cont.resume(true, onCancellation = null)
-        }
-
-        override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
-            if (cont.isActive) cont.resume(false, onCancellation = null)
+    onProgress: (Int) -> Unit,
+): Boolean = coroutineScope {
+    var transformerRef: Transformer? = null
+    val progressJob = launch {
+        val progressHolder = ProgressHolder()
+        while (isActive) {
+            delay(200)
+            val transformer = transformerRef ?: continue
+            if (transformer.getProgress(progressHolder) == Transformer.PROGRESS_STATE_AVAILABLE) {
+                onProgress(progressHolder.progress)
+            }
         }
     }
+    try {
+        suspendCancellableCoroutine { cont ->
+            val listener = object : Transformer.Listener {
+                override fun onCompleted(composition: Composition, exportResult: ExportResult) {
+                    if (cont.isActive) cont.resume(true, onCancellation = null)
+                }
 
-    if (!removeSelection) {
-        val mediaItem = clippedMediaItem(sourceUri, startMs, endMs)
-        val editedMediaItem = EditedMediaItem.Builder(mediaItem).build()
-        val transformer = Transformer.Builder(context)
-            .experimentalSetTrimOptimizationEnabled(true)
-            .addListener(listener)
-            .build()
-        cont.invokeOnCancellation { transformer.cancel() }
-        transformer.start(editedMediaItem, outputPath)
-    } else {
-        val pieces = buildList {
-            if (startMs > 0) add(EditedMediaItem.Builder(clippedMediaItem(sourceUri, 0, startMs)).build())
-            if (endMs < totalDurationMs) add(EditedMediaItem.Builder(clippedMediaItem(sourceUri, endMs, totalDurationMs)).build())
+                override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
+                    if (cont.isActive) cont.resume(false, onCancellation = null)
+                }
+            }
+
+            if (!removeSelection) {
+                val mediaItem = clippedMediaItem(sourceUri, startMs, endMs)
+                val editedMediaItem = EditedMediaItem.Builder(mediaItem).build()
+                val transformer = Transformer.Builder(context)
+                    .experimentalSetTrimOptimizationEnabled(true)
+                    .addListener(listener)
+                    .build()
+                transformerRef = transformer
+                cont.invokeOnCancellation { transformer.cancel() }
+                transformer.start(editedMediaItem, outputPath)
+            } else {
+                val pieces = buildList {
+                    if (startMs > 0) add(EditedMediaItem.Builder(clippedMediaItem(sourceUri, 0, startMs)).build())
+                    if (endMs < totalDurationMs) add(EditedMediaItem.Builder(clippedMediaItem(sourceUri, endMs, totalDurationMs)).build())
+                }
+                if (pieces.isEmpty()) {
+                    cont.resume(false, onCancellation = null)
+                    return@suspendCancellableCoroutine
+                }
+                val composition = Composition.Builder(EditedMediaItemSequence(pieces)).build()
+                val transformer = Transformer.Builder(context).addListener(listener).build()
+                transformerRef = transformer
+                cont.invokeOnCancellation { transformer.cancel() }
+                transformer.start(composition, outputPath)
+            }
         }
-        if (pieces.isEmpty()) {
-            cont.resume(false, onCancellation = null)
-            return@suspendCancellableCoroutine
-        }
-        val composition = Composition.Builder(EditedMediaItemSequence(pieces)).build()
-        val transformer = Transformer.Builder(context).addListener(listener).build()
-        cont.invokeOnCancellation { transformer.cancel() }
-        transformer.start(composition, outputPath)
+    } finally {
+        progressJob.cancel()
     }
 }
 
@@ -377,6 +410,10 @@ private suspend fun saveTrimmedVideo(context: Context, outputPath: String, origi
         val values = ContentValues().apply {
             put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
             put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+            // Without these, a freshly-inserted MediaStore row defaults its dates to "now" -- the
+            // trimmed video would look like a brand-new file instead of keeping the original's.
+            put(MediaStore.Video.Media.DATE_TAKEN, original.dateTakenSec * 1000)
+            put(MediaStore.Video.Media.DATE_MODIFIED, original.dateModifiedSec)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 put(
                     MediaStore.Video.Media.RELATIVE_PATH,
