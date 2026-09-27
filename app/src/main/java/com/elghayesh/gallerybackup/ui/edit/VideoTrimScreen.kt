@@ -42,6 +42,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem as ExoMediaItem
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.ui.PlayerView
@@ -108,6 +109,17 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
         }
     }
     DisposableEffect(exoPlayer) { onDispose { exoPlayer.release() } }
+
+    // Applies the chosen export speed/mute to the LIVE preview too, not just the file that gets
+    // written out on Save -- without this, the speed slider visibly did nothing while previewing,
+    // even though it was already correctly baked into the export. PlaybackParameters only
+    // time-stretches (pitch stays natural) rather than resampling, matching the SonicAudioProcessor
+    // behavior speedEffects() applies at export time, so the preview's audio pitch matches what
+    // gets saved too.
+    LaunchedEffect(exoPlayer, editSpeed, muteAudio) {
+        exoPlayer.setPlaybackParameters(PlaybackParameters(editSpeed))
+        exoPlayer.volume = if (muteAudio) 0f else 1f
+    }
 
     // Keeps the preview scrubber in sync with actual playback position, and loops playback back
     // to the trim start the moment it reaches the trim end -- so pressing play previews exactly
@@ -346,7 +358,7 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                 Slider(
                     value = editSpeed,
                     onValueChange = { editSpeed = it },
-                    valueRange = 0.25f..10f,
+                    valueRange = 0.05f..20f,
                 )
                 Row(
                     modifier = Modifier.padding(top = 4.dp),
