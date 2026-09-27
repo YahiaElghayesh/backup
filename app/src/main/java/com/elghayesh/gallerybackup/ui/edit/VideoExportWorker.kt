@@ -10,6 +10,7 @@ import androidx.work.CoroutineWorker
 import androidx.work.Data
 import androidx.work.ForegroundInfo
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import java.io.File
@@ -35,10 +36,20 @@ import kotlinx.coroutines.withContext
  */
 class VideoExportWorker(appContext: Context, params: WorkerParameters) : CoroutineWorker(appContext, params) {
 
+    // Expedited work (see enqueueTrim/enqueueMerge) makes WorkManager call this BEFORE doWork()
+    // even starts running, promoting to a foreground service as part of dispatching the job
+    // itself rather than waiting for doWork() to get around to calling setForeground(). That gap
+    // was the real bug: tapping Save and immediately backgrounding the app (the home button,
+    // right after) could beat doWork() to the punch, so the export briefly ran as an ordinary
+    // background coroutine with no foreground protection yet -- exactly the window where the OS
+    // can reclaim the process, which is what made a save started right before minimizing vanish
+    // without a trace instead of surviving.
+    override suspend fun getForegroundInfo(): ForegroundInfo = foregroundInfo()
+
     override suspend fun doWork(): Result {
-        // See SyncWorker's own doc comment on the identical call -- a refused foreground-service
-        // start (e.g. Android 12+ background-start restrictions) must not crash the whole app
-        // process; the export below still proceeds, just without the progress notification.
+        // Belt-and-suspenders alongside getForegroundInfo() above -- also see SyncWorker's own
+        // doc comment on the identical call: a refused foreground-service start must not crash
+        // the whole app process; the export below still proceeds either way.
         try {
             setForeground(foregroundInfo())
         } catch (e: Exception) {
@@ -186,7 +197,15 @@ class VideoExportWorker(appContext: Context, params: WorkerParameters) : Corouti
                 .putLong(KEY_ORIGINAL_DATE_TAKEN_SEC, originalDateTakenSec)
                 .putLong(KEY_ORIGINAL_DATE_MODIFIED_SEC, originalDateModifiedSec)
                 .build()
-            val request = OneTimeWorkRequestBuilder<VideoExportWorker>().setInputData(data).build()
+            val request = OneTimeWorkRequestBuilder<VideoExportWorker>()
+                .setInputData(data)
+                // Runs it immediately and with high priority instead of at WorkManager's own
+                // discretion, and (see getForegroundInfo() above) promotes to a foreground service
+                // as part of starting the job rather than only once doWork() itself gets there --
+                // falls back to an ordinary (non-expedited) work request if the app is out of
+                // expedited-job quota, rather than the job being dropped outright.
+                .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                .build()
             WorkManager.getInstance(context).enqueue(request)
             return request.id
         }
@@ -207,7 +226,10 @@ class VideoExportWorker(appContext: Context, params: WorkerParameters) : Corouti
                 .putLong(KEY_ORIGINAL_DATE_TAKEN_SEC, firstItemDateTakenSec)
                 .putLong(KEY_ORIGINAL_DATE_MODIFIED_SEC, firstItemDateModifiedSec)
                 .build()
-            val request = OneTimeWorkRequestBuilder<VideoExportWorker>().setInputData(data).build()
+            val request = OneTimeWorkRequestBuilder<VideoExportWorker>()
+                .setInputData(data)
+                .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                .build()
             WorkManager.getInstance(context).enqueue(request)
             return request.id
         }
