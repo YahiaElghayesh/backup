@@ -1,10 +1,6 @@
 package com.elghayesh.gallerybackup.ui.edit
 
-import android.content.ContentValues
-import android.content.Context
-import android.net.Uri
-import android.os.Build
-import android.provider.MediaStore
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -43,30 +39,17 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem as ExoMediaItem
-import androidx.media3.common.audio.SonicAudioProcessor
-import androidx.media3.effect.SpeedChangeEffect
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
-import androidx.media3.transformer.Composition
-import androidx.media3.transformer.EditedMediaItem
-import androidx.media3.transformer.EditedMediaItemSequence
-import androidx.media3.transformer.Effects
-import androidx.media3.transformer.ExportException
-import androidx.media3.transformer.ExportResult
-import androidx.media3.transformer.ProgressHolder
-import androidx.media3.transformer.Transformer
 import androidx.media3.ui.PlayerView
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import com.elghayesh.gallerybackup.data.media.MediaItem
 import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
-import java.io.File
 import java.util.concurrent.TimeUnit
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withContext
 
 private enum class TrimMode { KEEP_SELECTION, REMOVE_SELECTION }
 
@@ -123,29 +106,51 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
         }
     }
 
+    // Blocks leaving mid-save via the back button/gesture -- not via minimizing the app, which
+    // this whole feature is meant to allow. The export itself runs in VideoExportWorker regardless
+    // of whether this screen stays around to see it finish, but "replace original" still needs a
+    // live Activity for the trash confirmation dialog (see VideoExportWorker's own doc comment),
+    // which only the code below -- once it observes the export finish -- runs. Navigating away
+    // early would skip that step, leaving the original never trashed.
+    BackHandler(enabled = saveProgress != null) {}
+
     fun performSave(replace: Boolean) {
         saveProgress = 0
+        val workId = VideoExportWorker.enqueueTrim(
+            context = context,
+            sourceUri = item.uri,
+            startMs = trimRange.start.toLong(),
+            endMs = trimRange.endInclusive.toLong(),
+            totalDurationMs = durationMs,
+            removeSelection = trimMode == TrimMode.REMOVE_SELECTION,
+            speed = editSpeed,
+            muteAudio = muteAudio,
+            replace = replace,
+            originalDisplayName = item.displayName,
+            originalFolderPath = item.folderPath,
+            originalDateTakenSec = item.dateTakenSec,
+            originalDateModifiedSec = item.dateModifiedSec,
+        )
         scope.launch {
-            val outputPath = File(context.cacheDir, "trim_${System.currentTimeMillis()}.mp4").absolutePath
-            val success = transformVideo(
-                context,
-                item.uri,
-                trimRange.start.toLong(),
-                trimRange.endInclusive.toLong(),
-                durationMs,
-                removeSelection = trimMode == TrimMode.REMOVE_SELECTION,
-                speed = editSpeed,
-                muteAudio = muteAudio,
-                outputPath,
-                onProgress = { saveProgress = it },
-            )
-            if (success) {
-                saveTrimmedVideo(context, outputPath, item, replace)
-                if (replace) viewModel.deleteMediaItems(listOf(item), skipTrash = false)
-                viewModel.refresh()
+            // Runs as a foreground-service-backed WorkManager job (see VideoExportWorker) so it
+            // keeps going even if this screen -- and the app along with it -- gets backgrounded;
+            // this loop just reflects its progress back into the UI while it's still around to.
+            WorkManager.getInstance(context).getWorkInfoByIdFlow(workId).collect { info ->
+                // saveProgress == null is also this collector's own "already handled completion"
+                // guard -- the flow can go on emitting the same finished WorkInfo again (e.g. once
+                // WorkManager prunes it), and onDone()/deleteMediaItems must run at most once.
+                if (info == null || saveProgress == null) return@collect
+                if (info.state.isFinished) {
+                    if (info.state == WorkInfo.State.SUCCEEDED && replace) {
+                        viewModel.deleteMediaItems(listOf(item), skipTrash = false)
+                    }
+                    viewModel.refresh()
+                    saveProgress = null
+                    onDone()
+                } else {
+                    saveProgress = info.progress.getInt(VideoExportWorker.KEY_PROGRESS, saveProgress ?: 0)
+                }
             }
-            saveProgress = null
-            onDone()
         }
     }
 
@@ -177,7 +182,9 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
             TopAppBar(
                 title = { Text("Trim video") },
                 navigationIcon = {
-                    IconButton(onClick = onDone) { Icon(Icons.Filled.ArrowBack, contentDescription = "Cancel") }
+                    IconButton(onClick = onDone, enabled = saveProgress == null) {
+                        Icon(Icons.Filled.ArrowBack, contentDescription = "Cancel")
+                    }
                 },
                 actions = {
                     TextButton(
@@ -213,6 +220,12 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                                 modifier = Modifier.padding(top = 8.dp),
                                 color = Color.White,
                                 style = MaterialTheme.typography.bodyMedium,
+                            )
+                            Text(
+                                "You can minimize the app -- this will keep saving in the background.",
+                                modifier = Modifier.padding(top = 8.dp, start = 24.dp, end = 24.dp),
+                                color = Color.White,
+                                style = MaterialTheme.typography.bodySmall,
                             )
                         }
                     }
@@ -359,163 +372,3 @@ private fun formatSpeed(speed: Float): String {
     val trimmed = "%.2f".format(speed).trimEnd('0').trimEnd('.')
     return "${trimmed}x"
 }
-
-/**
- * Must run on a thread with a Looper (the caller's Main dispatcher) -- Transformer requires one.
- *
- * When [removeSelection] is false (keep the selection, the ordinary trim) AND [speed] is 1x, this
- * is a single, untouched clip and [experimentalSetTrimOptimizationEnabled] keeps it as close to
- * lossless as a cut can physically be: a video can only be split cleanly at a keyframe, so
- * Transformer re-encodes just the short group of pictures around the trim start (aligning it to
- * the nearest keyframe) and stream-copies -- byte for byte, same resolution, same bitrate, no
- * quality loss -- every frame after that.
- *
- * When [removeSelection] is true (cut the selection out, keep everything else), the output is
- * built from the two remaining pieces -- [0, startMs) and (endMs, totalDurationMs] -- concatenated
- * into one [EditedMediaItemSequence]. This can't get the same near-lossless treatment: trim
- * optimization only ever applies to a single clip (Transformer disables it automatically for a
- * multi-segment composition), since splicing two previously non-adjacent points together isn't a
- * straight byte copy the way a single cut's untouched remainder is -- the whole output is
- * re-encoded. That's an unavoidable consequence of removing a middle section, not a shortcut.
- *
- * A [speed] other than 1x always forces a full re-encode too, for both branches: every frame's
- * timestamp has to be rewritten ([SpeedChangeEffect]), which is exactly what the near-lossless
- * trim path above depends on NOT happening to any frame it stream-copies. [muteAudio] drops the
- * audio track entirely rather than just silencing it (silence would still be decoded, time-
- * stretched and re-encoded for nothing); otherwise the audio is time-stretched by the same factor
- * as the video via [SonicAudioProcessor] so picture and sound stay in sync, keeping its original
- * pitch rather than the chipmunk/slow-motion-voice effect a plain resample would give.
- */
-@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-private suspend fun transformVideo(
-    context: Context,
-    sourceUri: Uri,
-    startMs: Long,
-    endMs: Long,
-    totalDurationMs: Long,
-    removeSelection: Boolean,
-    speed: Float,
-    muteAudio: Boolean,
-    outputPath: String,
-    onProgress: (Int) -> Unit,
-): Boolean = coroutineScope {
-    var transformerRef: Transformer? = null
-    val progressJob = launch {
-        val progressHolder = ProgressHolder()
-        while (isActive) {
-            delay(200)
-            val transformer = transformerRef ?: continue
-            if (transformer.getProgress(progressHolder) == Transformer.PROGRESS_STATE_AVAILABLE) {
-                onProgress(progressHolder.progress)
-            }
-        }
-    }
-    try {
-        suspendCancellableCoroutine { cont ->
-            val listener = object : Transformer.Listener {
-                override fun onCompleted(composition: Composition, exportResult: ExportResult) {
-                    if (cont.isActive) cont.resume(true, onCancellation = null)
-                }
-
-                override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
-                    if (cont.isActive) cont.resume(false, onCancellation = null)
-                }
-            }
-
-            fun buildPiece(pieceStartMs: Long, pieceEndMs: Long): EditedMediaItem =
-                EditedMediaItem.Builder(clippedMediaItem(sourceUri, pieceStartMs, pieceEndMs))
-                    .setRemoveAudio(muteAudio)
-                    .setEffects(speedEffects(speed, muteAudio))
-                    .build()
-
-            if (!removeSelection) {
-                val editedMediaItem = buildPiece(startMs, endMs)
-                val transformerBuilder = Transformer.Builder(context).addListener(listener)
-                if (speed == 1f) transformerBuilder.experimentalSetTrimOptimizationEnabled(true)
-                val transformer = transformerBuilder.build()
-                transformerRef = transformer
-                cont.invokeOnCancellation { transformer.cancel() }
-                transformer.start(editedMediaItem, outputPath)
-            } else {
-                val pieces = buildList {
-                    if (startMs > 0) add(buildPiece(0, startMs))
-                    if (endMs < totalDurationMs) add(buildPiece(endMs, totalDurationMs))
-                }
-                if (pieces.isEmpty()) {
-                    cont.resume(false, onCancellation = null)
-                    return@suspendCancellableCoroutine
-                }
-                val composition = Composition.Builder(EditedMediaItemSequence(pieces)).build()
-                val transformer = Transformer.Builder(context).addListener(listener).build()
-                transformerRef = transformer
-                cont.invokeOnCancellation { transformer.cancel() }
-                transformer.start(composition, outputPath)
-            }
-        }
-    } finally {
-        progressJob.cancel()
-    }
-}
-
-private fun clippedMediaItem(sourceUri: Uri, startMs: Long, endMs: Long): ExoMediaItem =
-    ExoMediaItem.Builder()
-        .setUri(sourceUri)
-        .setClippingConfiguration(
-            ExoMediaItem.ClippingConfiguration.Builder()
-                .setStartPositionMs(startMs)
-                .setEndPositionMs(endMs)
-                .build(),
-        )
-        .build()
-
-/**
- * [SpeedChangeEffect] re-times the video frames; [SonicAudioProcessor.setSpeed] re-times the
- * audio by the same factor (its pitch stays at the class default of 1x, so speeding up or slowing
- * down doesn't chipmunk or drawl the audio) so picture and sound stay in sync. Skipped entirely at
- * 1x (a no-op that would otherwise still force a full re-encode) and whenever [muteAudio] drops
- * the audio track anyway.
- */
-@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-private fun speedEffects(speed: Float, muteAudio: Boolean): Effects {
-    val videoEffects = if (speed != 1f) listOf(SpeedChangeEffect(speed)) else emptyList()
-    val audioProcessors = if (speed != 1f && !muteAudio) {
-        listOf(SonicAudioProcessor().apply { setSpeed(speed) })
-    } else {
-        emptyList()
-    }
-    return Effects(audioProcessors, videoEffects)
-}
-
-private suspend fun saveTrimmedVideo(context: Context, outputPath: String, original: MediaItem, replace: Boolean) =
-    withContext(Dispatchers.IO) {
-        val tempFile = File(outputPath)
-        if (!tempFile.exists()) return@withContext
-
-        val baseName = original.displayName.substringBeforeLast('.', original.displayName)
-        val fileName = if (replace) "$baseName.mp4" else "${baseName}_trimmed_${System.currentTimeMillis() / 1000}.mp4"
-        val values = ContentValues().apply {
-            put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
-            put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-            // Without these, a freshly-inserted MediaStore row defaults its dates to "now" -- the
-            // trimmed video would look like a brand-new file instead of keeping the original's.
-            put(MediaStore.Video.Media.DATE_TAKEN, original.dateTakenSec * 1000)
-            put(MediaStore.Video.Media.DATE_MODIFIED, original.dateModifiedSec)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(
-                    MediaStore.Video.Media.RELATIVE_PATH,
-                    if (original.folderPath.isEmpty()) "Movies" else original.folderPath,
-                )
-                put(MediaStore.Video.Media.IS_PENDING, 1)
-            }
-        }
-        val resolver = context.contentResolver
-        val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
-        if (uri != null) {
-            resolver.openOutputStream(uri)?.use { out -> tempFile.inputStream().use { it.copyTo(out) } }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val doneValues = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
-                resolver.update(uri, doneValues, null, null)
-            }
-        }
-        tempFile.delete()
-    }

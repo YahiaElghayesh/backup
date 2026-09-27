@@ -76,13 +76,24 @@ class GalleryBackupApp : Application(), ImageLoaderFactory {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val channel = NotificationChannel(
-            SyncWorker.CHANNEL_ID,
-            "Backup sync",
-            NotificationManager.IMPORTANCE_LOW,
-        ).apply {
-            description = "Shows progress while your photos and videos are backed up to Drive."
-        }
-        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(
+            NotificationChannel(
+                SyncWorker.CHANNEL_ID,
+                "Backup sync",
+                NotificationManager.IMPORTANCE_LOW,
+            ).apply {
+                description = "Shows progress while your photos and videos are backed up to Drive."
+            },
+        )
+        manager.createNotificationChannel(
+            NotificationChannel(
+                com.elghayesh.gallerybackup.ui.edit.VideoExportWorker.CHANNEL_ID,
+                "Video editing",
+                NotificationManager.IMPORTANCE_LOW,
+            ).apply {
+                description = "Shows progress while a trimmed or merged video is being saved."
+            },
+        )
     }
 }

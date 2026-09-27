@@ -1,9 +1,6 @@
 package com.elghayesh.gallerybackup.ui.edit
 
-import android.content.ContentValues
-import android.content.Context
-import android.os.Build
-import android.provider.MediaStore
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -45,26 +42,13 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.media3.common.MediaItem as ExoMediaItem
-import androidx.media3.transformer.Composition
-import androidx.media3.transformer.EditedMediaItem
-import androidx.media3.transformer.EditedMediaItemSequence
-import androidx.media3.transformer.ExportException
-import androidx.media3.transformer.ExportResult
-import androidx.media3.transformer.ProgressHolder
-import androidx.media3.transformer.Transformer
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import coil.compose.AsyncImage
 import com.elghayesh.gallerybackup.data.media.MediaItem
 import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
-import java.io.File
 import java.util.concurrent.TimeUnit
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withContext
 
 /**
  * Picks the merge order for a set of already-selected videos (arrow buttons rather than a drag
@@ -96,23 +80,41 @@ fun VideoMergeScreen(items: List<MediaItem>, viewModel: GalleryViewModel, onDone
         orderedItems = orderedItems.toMutableList().apply { removeAt(index) }
     }
 
+    // Blocks leaving mid-save via the back button/gesture -- not via minimizing the app. A merge
+    // never touches its source videos (no "replace" choice), so unlike VideoTrimScreen there's no
+    // consent-dialog step this is protecting; it's here purely so the screen (and its progress
+    // overlay) doesn't just vanish out from under an in-progress save the user is watching.
+    BackHandler(enabled = saveProgress != null) {}
+
     fun performMerge() {
         if (orderedItems.size < 2) return
         saveProgress = 0
+        val referenceItem = orderedItems.first()
+        val workId = VideoExportWorker.enqueueMerge(
+            context = context,
+            uris = orderedItems.map { it.uri },
+            firstItemDisplayName = referenceItem.displayName,
+            firstItemFolderPath = referenceItem.folderPath,
+            firstItemDateTakenSec = referenceItem.dateTakenSec,
+            firstItemDateModifiedSec = referenceItem.dateModifiedSec,
+        )
         scope.launch {
-            val outputPath = File(context.cacheDir, "merge_${System.currentTimeMillis()}.mp4").absolutePath
-            val success = mergeVideos(
-                context,
-                orderedItems.map { it.uri },
-                outputPath,
-                onProgress = { saveProgress = it },
-            )
-            if (success) {
-                saveMergedVideo(context, outputPath, orderedItems.first())
-                viewModel.refresh()
+            // Runs as a foreground-service-backed WorkManager job (see VideoExportWorker) so it
+            // keeps going even if this screen -- and the app along with it -- gets backgrounded;
+            // this loop just reflects its progress back into the UI while it's still around to.
+            WorkManager.getInstance(context).getWorkInfoByIdFlow(workId).collect { info ->
+                // saveProgress == null is also this collector's own "already handled completion"
+                // guard -- the flow can go on emitting the same finished WorkInfo again (e.g. once
+                // WorkManager prunes it), and onDone() must run at most once.
+                if (info == null || saveProgress == null) return@collect
+                if (info.state.isFinished) {
+                    if (info.state == WorkInfo.State.SUCCEEDED) viewModel.refresh()
+                    saveProgress = null
+                    onDone()
+                } else {
+                    saveProgress = info.progress.getInt(VideoExportWorker.KEY_PROGRESS, saveProgress ?: 0)
+                }
             }
-            saveProgress = null
-            onDone()
         }
     }
 
@@ -123,7 +125,9 @@ fun VideoMergeScreen(items: List<MediaItem>, viewModel: GalleryViewModel, onDone
             TopAppBar(
                 title = { Text("Merge videos") },
                 navigationIcon = {
-                    IconButton(onClick = onDone) { Icon(Icons.Filled.ArrowBack, contentDescription = "Cancel") }
+                    IconButton(onClick = onDone, enabled = saveProgress == null) {
+                        Icon(Icons.Filled.ArrowBack, contentDescription = "Cancel")
+                    }
                 },
                 actions = {
                     TextButton(
@@ -171,6 +175,12 @@ fun VideoMergeScreen(items: List<MediaItem>, viewModel: GalleryViewModel, onDone
                             modifier = Modifier.padding(top = 8.dp),
                             color = Color.White,
                             style = MaterialTheme.typography.bodyMedium,
+                        )
+                        Text(
+                            "You can minimize the app -- this will keep saving in the background.",
+                            modifier = Modifier.padding(top = 8.dp, start = 24.dp, end = 24.dp),
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodySmall,
                         )
                     }
                 }
@@ -231,89 +241,3 @@ private fun formatMergeMs(ms: Long): String {
     val totalSec = TimeUnit.MILLISECONDS.toSeconds(ms.coerceAtLeast(0))
     return "%d:%02d".format(totalSec / 60, totalSec % 60)
 }
-
-/**
- * Must run on a thread with a Looper (the caller's Main dispatcher) -- Transformer requires one.
- *
- * Joins [uris], in that exact order, into a single [EditedMediaItemSequence]. Like Remove-selection
- * trimming, this is a multi-segment composition -- Transformer's trim optimization never applies
- * to one, so the whole output is re-encoded; there's no way around that when combining separate
- * source files into one.
- */
-@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-private suspend fun mergeVideos(
-    context: Context,
-    uris: List<android.net.Uri>,
-    outputPath: String,
-    onProgress: (Int) -> Unit,
-): Boolean = coroutineScope {
-    var transformerRef: Transformer? = null
-    val progressJob = launch {
-        val progressHolder = ProgressHolder()
-        while (isActive) {
-            delay(200)
-            val transformer = transformerRef ?: continue
-            if (transformer.getProgress(progressHolder) == Transformer.PROGRESS_STATE_AVAILABLE) {
-                onProgress(progressHolder.progress)
-            }
-        }
-    }
-    try {
-        suspendCancellableCoroutine { cont ->
-            val pieces = uris.map { EditedMediaItem.Builder(ExoMediaItem.fromUri(it)).build() }
-            val composition = Composition.Builder(EditedMediaItemSequence(pieces)).build()
-
-            val transformer = Transformer.Builder(context)
-                .addListener(object : Transformer.Listener {
-                    override fun onCompleted(composition: Composition, exportResult: ExportResult) {
-                        if (cont.isActive) cont.resume(true, onCancellation = null)
-                    }
-
-                    override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
-                        if (cont.isActive) cont.resume(false, onCancellation = null)
-                    }
-                })
-                .build()
-
-            transformerRef = transformer
-            cont.invokeOnCancellation { transformer.cancel() }
-            transformer.start(composition, outputPath)
-        }
-    } finally {
-        progressJob.cancel()
-    }
-}
-
-private suspend fun saveMergedVideo(context: Context, outputPath: String, referenceItem: MediaItem) =
-    withContext(Dispatchers.IO) {
-        val tempFile = File(outputPath)
-        if (!tempFile.exists()) return@withContext
-
-        // Named and dated after the first video in the merge order, like a "save as new" edit of
-        // it, rather than an anonymous "merged_<timestamp>".
-        val baseName = referenceItem.displayName.substringBeforeLast('.', referenceItem.displayName)
-        val fileName = "${baseName}_merged_${System.currentTimeMillis() / 1000}.mp4"
-        val values = ContentValues().apply {
-            put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
-            put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-            put(MediaStore.Video.Media.DATE_TAKEN, referenceItem.dateTakenSec * 1000)
-            put(MediaStore.Video.Media.DATE_MODIFIED, referenceItem.dateModifiedSec)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(
-                    MediaStore.Video.Media.RELATIVE_PATH,
-                    referenceItem.folderPath.ifEmpty { "Movies" },
-                )
-                put(MediaStore.Video.Media.IS_PENDING, 1)
-            }
-        }
-        val resolver = context.contentResolver
-        val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
-        if (uri != null) {
-            resolver.openOutputStream(uri)?.use { out -> tempFile.inputStream().use { it.copyTo(out) } }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val doneValues = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
-                resolver.update(uri, doneValues, null, null)
-            }
-        }
-        tempFile.delete()
-    }

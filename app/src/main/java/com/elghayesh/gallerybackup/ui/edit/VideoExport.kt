@@ -1,0 +1,313 @@
+package com.elghayesh.gallerybackup.ui.edit
+
+import android.content.ContentValues
+import android.content.Context
+import android.net.Uri
+import android.os.Build
+import android.provider.MediaStore
+import androidx.media3.common.MediaItem as ExoMediaItem
+import androidx.media3.common.audio.SonicAudioProcessor
+import androidx.media3.effect.SpeedChangeEffect
+import androidx.media3.transformer.Composition
+import androidx.media3.transformer.EditedMediaItem
+import androidx.media3.transformer.EditedMediaItemSequence
+import androidx.media3.transformer.Effects
+import androidx.media3.transformer.ExportException
+import androidx.media3.transformer.ExportResult
+import androidx.media3.transformer.InAppMuxer
+import androidx.media3.transformer.ProgressHolder
+import androidx.media3.transformer.Transformer
+import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+
+/**
+ * The actual Media3 Transformer/MediaStore work behind trimming, removing a selection, changing
+ * speed/audio, and merging -- shared between [VideoTrimScreen]/[VideoMergeScreen] (running it
+ * live while the editor screen is open) and [VideoExportWorker] (running the identical code as a
+ * foreground-service-backed background job, so a long export survives the app being minimized).
+ * Kept in one place specifically so there's exactly one copy of this logic to get right.
+ */
+
+/**
+ * Must run on a thread with a Looper (the caller's Main dispatcher) -- Transformer requires one.
+ *
+ * When [removeSelection] is false (keep the selection, the ordinary trim) AND [speed] is 1x, this
+ * is a single, untouched clip and [experimentalSetTrimOptimizationEnabled] keeps it as close to
+ * lossless as a cut can physically be: a video can only be split cleanly at a keyframe, so
+ * Transformer re-encodes just the short group of pictures around the trim start (aligning it to
+ * the nearest keyframe) and stream-copies -- byte for byte, same resolution, same bitrate, no
+ * quality loss -- every frame after that.
+ *
+ * When [removeSelection] is true (cut the selection out, keep everything else), the output is
+ * built from the two remaining pieces -- [0, startMs) and (endMs, totalDurationMs] -- concatenated
+ * into one [EditedMediaItemSequence]. This can't get the same near-lossless treatment: trim
+ * optimization only ever applies to a single clip (Transformer disables it automatically for a
+ * multi-segment composition), since splicing two previously non-adjacent points together isn't a
+ * straight byte copy the way a single cut's untouched remainder is -- the whole output is
+ * re-encoded. That's an unavoidable consequence of removing a middle section, not a shortcut.
+ *
+ * A [speed] other than 1x always forces a full re-encode too, for both branches: every frame's
+ * timestamp has to be rewritten ([SpeedChangeEffect]), which is exactly what the near-lossless
+ * trim path above depends on NOT happening to any frame it stream-copies. [muteAudio] drops the
+ * audio track entirely rather than just silencing it (silence would still be decoded, time-
+ * stretched and re-encoded for nothing); otherwise the audio is time-stretched by the same factor
+ * as the video via [SonicAudioProcessor] so picture and sound stay in sync, keeping its original
+ * pitch rather than the chipmunk/slow-motion-voice effect a plain resample would give.
+ */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+internal suspend fun transformVideo(
+    context: Context,
+    sourceUri: Uri,
+    startMs: Long,
+    endMs: Long,
+    totalDurationMs: Long,
+    removeSelection: Boolean,
+    speed: Float,
+    muteAudio: Boolean,
+    outputPath: String,
+    onProgress: (Int) -> Unit,
+): Boolean = coroutineScope {
+    var transformerRef: Transformer? = null
+    val progressJob = launch {
+        val progressHolder = ProgressHolder()
+        while (isActive) {
+            delay(200)
+            val transformer = transformerRef ?: continue
+            if (transformer.getProgress(progressHolder) == Transformer.PROGRESS_STATE_AVAILABLE) {
+                onProgress(progressHolder.progress)
+            }
+        }
+    }
+    try {
+        suspendCancellableCoroutine { cont ->
+            val listener = object : Transformer.Listener {
+                override fun onCompleted(composition: Composition, exportResult: ExportResult) {
+                    if (cont.isActive) cont.resume(true, onCancellation = null)
+                }
+
+                override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
+                    if (cont.isActive) cont.resume(false, onCancellation = null)
+                }
+            }
+
+            fun buildPiece(pieceStartMs: Long, pieceEndMs: Long): EditedMediaItem =
+                EditedMediaItem.Builder(clippedMediaItem(sourceUri, pieceStartMs, pieceEndMs))
+                    .setRemoveAudio(muteAudio)
+                    .setEffects(speedEffects(speed, muteAudio))
+                    .build()
+
+            if (!removeSelection) {
+                val editedMediaItem = buildPiece(startMs, endMs)
+                val transformerBuilder = Transformer.Builder(context)
+                    .setMuxerFactory(originalTimestampPreservingMuxerFactory())
+                    .addListener(listener)
+                if (speed == 1f) transformerBuilder.experimentalSetTrimOptimizationEnabled(true)
+                val transformer = transformerBuilder.build()
+                transformerRef = transformer
+                cont.invokeOnCancellation { transformer.cancel() }
+                transformer.start(editedMediaItem, outputPath)
+            } else {
+                val pieces = buildList {
+                    if (startMs > 0) add(buildPiece(0, startMs))
+                    if (endMs < totalDurationMs) add(buildPiece(endMs, totalDurationMs))
+                }
+                if (pieces.isEmpty()) {
+                    cont.resume(false, onCancellation = null)
+                    return@suspendCancellableCoroutine
+                }
+                val composition = Composition.Builder(EditedMediaItemSequence(pieces)).build()
+                val transformer = Transformer.Builder(context)
+                    .setMuxerFactory(originalTimestampPreservingMuxerFactory())
+                    .addListener(listener)
+                    .build()
+                transformerRef = transformer
+                cont.invokeOnCancellation { transformer.cancel() }
+                transformer.start(composition, outputPath)
+            }
+        }
+    } finally {
+        progressJob.cancel()
+    }
+}
+
+/**
+ * Must run on a thread with a Looper (the caller's Main dispatcher) -- Transformer requires one.
+ *
+ * Joins [uris], in that exact order, into a single [EditedMediaItemSequence]. Like Remove-selection
+ * trimming, this is a multi-segment composition -- Transformer's trim optimization never applies
+ * to one, so the whole output is re-encoded; there's no way around that when combining separate
+ * source files into one.
+ */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+internal suspend fun mergeVideos(
+    context: Context,
+    uris: List<Uri>,
+    outputPath: String,
+    onProgress: (Int) -> Unit,
+): Boolean = coroutineScope {
+    var transformerRef: Transformer? = null
+    val progressJob = launch {
+        val progressHolder = ProgressHolder()
+        while (isActive) {
+            delay(200)
+            val transformer = transformerRef ?: continue
+            if (transformer.getProgress(progressHolder) == Transformer.PROGRESS_STATE_AVAILABLE) {
+                onProgress(progressHolder.progress)
+            }
+        }
+    }
+    try {
+        suspendCancellableCoroutine { cont ->
+            val pieces = uris.map { EditedMediaItem.Builder(ExoMediaItem.fromUri(it)).build() }
+            val composition = Composition.Builder(EditedMediaItemSequence(pieces)).build()
+
+            val transformer = Transformer.Builder(context)
+                // See originalTimestampPreservingMuxerFactory's doc comment -- carries the first
+                // clip's original creation time (already forwarded from the source file
+                // automatically) into the merged file's own container metadata.
+                .setMuxerFactory(originalTimestampPreservingMuxerFactory())
+                .addListener(object : Transformer.Listener {
+                    override fun onCompleted(composition: Composition, exportResult: ExportResult) {
+                        if (cont.isActive) cont.resume(true, onCancellation = null)
+                    }
+
+                    override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
+                        if (cont.isActive) cont.resume(false, onCancellation = null)
+                    }
+                })
+                .build()
+
+            transformerRef = transformer
+            cont.invokeOnCancellation { transformer.cancel() }
+            transformer.start(composition, outputPath)
+        }
+    } finally {
+        progressJob.cancel()
+    }
+}
+
+/**
+ * Transformer's default muxer (Android's platform [android.media.MediaMuxer], wrapped by
+ * `DefaultMuxer`) always stamps the output file's own creation/modification time as "now" --
+ * that's a limitation of the platform muxer itself, which has no API to set it to anything else.
+ * This is true even though the original creation time IS already being read correctly: the MP4
+ * extractor parses it from the source file's own `mvhd` box into an `Mp4TimestampData` entry, and
+ * Transformer's `MuxerWrapper` already forwards that same entry to whichever muxer is in use --
+ * the platform muxer just silently ignores it (it only acts on GPS-location entries), so the
+ * value never reached the file. Media3's own `InAppMuxer` (backed by `androidx.media3.muxer.
+ * Mp4Muxer`) DOES act on it, writing it into both the creation_time and modification_time fields
+ * of the output's own `mvhd`/`tkhd` boxes -- so the exported file's own embedded metadata carries
+ * the original date, not just the MediaStore row we separately set below. Supports H.264/H.265/
+ * AV1 video and AAC audio, which covers ordinary phone-recorded video.
+ */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+private fun originalTimestampPreservingMuxerFactory() = InAppMuxer.Factory.Builder().build()
+
+private fun clippedMediaItem(sourceUri: Uri, startMs: Long, endMs: Long): ExoMediaItem =
+    ExoMediaItem.Builder()
+        .setUri(sourceUri)
+        .setClippingConfiguration(
+            ExoMediaItem.ClippingConfiguration.Builder()
+                .setStartPositionMs(startMs)
+                .setEndPositionMs(endMs)
+                .build(),
+        )
+        .build()
+
+/**
+ * [SpeedChangeEffect] re-times the video frames; [SonicAudioProcessor.setSpeed] re-times the
+ * audio by the same factor (its pitch stays at the class default of 1x, so speeding up or slowing
+ * down doesn't chipmunk or drawl the audio) so picture and sound stay in sync. Skipped entirely at
+ * 1x (a no-op that would otherwise still force a full re-encode) and whenever [muteAudio] drops
+ * the audio track anyway.
+ */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+private fun speedEffects(speed: Float, muteAudio: Boolean): Effects {
+    val videoEffects = if (speed != 1f) listOf(SpeedChangeEffect(speed)) else emptyList()
+    val audioProcessors = if (speed != 1f && !muteAudio) {
+        listOf(SonicAudioProcessor().apply { setSpeed(speed) })
+    } else {
+        emptyList()
+    }
+    return Effects(audioProcessors, videoEffects)
+}
+
+/**
+ * Inserts the exported file at [outputPath] into MediaStore, named and dated like an edit of
+ * [displayName] (the original's) rather than an anonymous new file -- [replace] controls only the
+ * filename (reuse the original's base name vs. append a suffix); trashing the actual original row,
+ * where that needs to happen, is the caller's job (it needs a live Activity for the system consent
+ * dialog on Android 11+, which this function -- callable from a background worker -- can't assume).
+ */
+internal suspend fun saveTrimmedVideo(
+    context: Context,
+    outputPath: String,
+    displayName: String,
+    folderPath: String,
+    dateTakenSec: Long,
+    dateModifiedSec: Long,
+    replace: Boolean,
+) = withContext(Dispatchers.IO) {
+    val tempFile = File(outputPath)
+    if (!tempFile.exists()) return@withContext
+
+    val baseName = displayName.substringBeforeLast('.', displayName)
+    val fileName = if (replace) "$baseName.mp4" else "${baseName}_trimmed_${System.currentTimeMillis() / 1000}.mp4"
+    saveVideoToMediaStore(context, tempFile, fileName, folderPath, dateTakenSec, dateModifiedSec)
+}
+
+/** See [saveTrimmedVideo] -- same insert, but always named/suffixed like a new file since a merge
+ * never replaces any of its source videos. */
+internal suspend fun saveMergedVideo(
+    context: Context,
+    outputPath: String,
+    displayName: String,
+    folderPath: String,
+    dateTakenSec: Long,
+    dateModifiedSec: Long,
+) = withContext(Dispatchers.IO) {
+    val tempFile = File(outputPath)
+    if (!tempFile.exists()) return@withContext
+
+    val baseName = displayName.substringBeforeLast('.', displayName)
+    val fileName = "${baseName}_merged_${System.currentTimeMillis() / 1000}.mp4"
+    saveVideoToMediaStore(context, tempFile, fileName, folderPath, dateTakenSec, dateModifiedSec)
+}
+
+private fun saveVideoToMediaStore(
+    context: Context,
+    tempFile: File,
+    fileName: String,
+    folderPath: String,
+    dateTakenSec: Long,
+    dateModifiedSec: Long,
+) {
+    val values = ContentValues().apply {
+        put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
+        put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+        // Belt-and-suspenders alongside the muxer-level fix above: without these, a freshly-
+        // inserted MediaStore row defaults its dates to "now" even before any rescan.
+        put(MediaStore.Video.Media.DATE_TAKEN, dateTakenSec * 1000)
+        put(MediaStore.Video.Media.DATE_MODIFIED, dateModifiedSec)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            put(MediaStore.Video.Media.RELATIVE_PATH, folderPath.ifEmpty { "Movies" })
+            put(MediaStore.Video.Media.IS_PENDING, 1)
+        }
+    }
+    val resolver = context.contentResolver
+    val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+    if (uri != null) {
+        resolver.openOutputStream(uri)?.use { out -> tempFile.inputStream().use { it.copyTo(out) } }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val doneValues = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
+            resolver.update(uri, doneValues, null, null)
+        }
+    }
+    tempFile.delete()
+}

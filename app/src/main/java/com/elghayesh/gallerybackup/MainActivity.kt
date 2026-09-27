@@ -211,6 +211,21 @@ class MainActivity : FragmentActivity() {
                         onDispose { lifecycle.removeObserver(observer) }
                     }
 
+                    DisposableEffect(Unit) {
+                        // Picks up whatever changed in MediaStore while the app was backgrounded --
+                        // in particular a video trim/merge finishing in VideoExportWorker after the
+                        // user minimized the app rather than waiting for it in the editor screen.
+                        // The gallery has no content observer of its own (see GalleryViewModel),
+                        // only ever refreshing after its own explicit mutations, so without this,
+                        // returning to the app could still show stale data until a manual pull-to-
+                        // refresh.
+                        val observer = LifecycleEventObserver { _, event ->
+                            if (event == Lifecycle.Event.ON_START) galleryViewModel.refresh()
+                        }
+                        lifecycle.addObserver(observer)
+                        onDispose { lifecycle.removeObserver(observer) }
+                    }
+
                     // Mounted unconditionally (not just while the gate itself is showing) --
                     // folder-lock and hidden-items-lock checks from deep inside AppNavHost call
                     // GalleryViewModel.requestAuth too, and need this host available to actually
