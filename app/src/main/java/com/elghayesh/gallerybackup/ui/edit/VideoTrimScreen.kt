@@ -11,6 +11,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.NavigateBefore
+import androidx.compose.material.icons.filled.NavigateNext
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -53,6 +56,9 @@ import kotlinx.coroutines.launch
 
 private enum class TrimMode { KEEP_SELECTION, REMOVE_SELECTION }
 
+/** Which trim handle the frame-step buttons currently move. */
+private enum class TrimHandle { START, END }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
@@ -79,6 +85,21 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
     var saveProgress by remember { mutableStateOf<Int?>(null) }
     var showSaveChoiceDialog by remember { mutableStateOf(false) }
 
+    // Which handle the frame-step buttons below the trim range move, and the video's own frame
+    // rate (kept updated from the player itself once its format loads, in the position-polling
+    // effect below) -- needed to know how many milliseconds "one frame" actually is, since that's
+    // not fixed across videos. Falls back to a plausible default until the real value loads.
+    var adjustingHandle by remember { mutableStateOf(TrimHandle.START) }
+    var frameRateFps by remember { mutableStateOf(30f) }
+    var isSavingFrame by remember { mutableStateOf(false) }
+    var frameSavedMessage by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(frameSavedMessage) {
+        if (frameSavedMessage != null) {
+            delay(2000)
+            frameSavedMessage = null
+        }
+    }
+
     val exoPlayer = remember(item.id) {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(ExoMediaItem.fromUri(item.uri))
@@ -93,6 +114,10 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
     // the selected area, on repeat, instead of running past it into the part being cut.
     LaunchedEffect(exoPlayer) {
         while (isActive) {
+            // Not gated on isPlaying (unlike the seek logic below it) -- the format, and so the
+            // frame rate, is available as soon as the player has read the file, whether or not
+            // it's actually playing.
+            exoPlayer.videoFormat?.frameRate?.let { fps -> if (fps > 0f) frameRateFps = fps }
             if (exoPlayer.isPlaying) {
                 val position = exoPlayer.currentPosition.toFloat()
                 if (position >= trimRange.endInclusive) {
@@ -103,6 +128,48 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                 }
             }
             delay(100)
+        }
+    }
+
+    // Moves whichever handle is selected above by exactly one frame -- an exact (not
+    // CLOSEST_SYNC) seek, since this is a single deliberate step rather than a fast drag, and
+    // landing on the precise requested frame is the entire point of a frame-step control.
+    fun stepFrame(direction: Int) {
+        val frameMs = 1000f / frameRateFps
+        val delta = direction * frameMs
+        val newRange = when (adjustingHandle) {
+            TrimHandle.START -> {
+                val maxStart = (trimRange.endInclusive - frameMs).coerceAtLeast(0f)
+                (trimRange.start + delta).coerceIn(0f, maxStart)..trimRange.endInclusive
+            }
+            TrimHandle.END -> {
+                val minEnd = (trimRange.start + frameMs).coerceAtMost(durationMs.toFloat())
+                trimRange.start..(trimRange.endInclusive + delta).coerceIn(minEnd, durationMs.toFloat())
+            }
+        }
+        trimRange = newRange
+        val seekTarget = if (adjustingHandle == TrimHandle.START) newRange.start else newRange.endInclusive
+        exoPlayer.setSeekParameters(SeekParameters.EXACT)
+        exoPlayer.seekTo(seekTarget.toLong())
+        previewPositionMs = seekTarget.coerceIn(newRange.start, newRange.endInclusive)
+    }
+
+    fun performSaveFrame() {
+        if (isSavingFrame) return
+        isSavingFrame = true
+        scope.launch {
+            val savedName = saveFrameAsPhoto(
+                context = context,
+                sourceUri = item.uri,
+                atMs = previewPositionMs.toLong(),
+                displayName = item.displayName,
+                folderPath = item.folderPath,
+                dateTakenSec = item.dateTakenSec,
+                dateModifiedSec = item.dateModifiedSec,
+            )
+            if (savedName != null) viewModel.refresh()
+            frameSavedMessage = if (savedName != null) "Saved as $savedName" else "Couldn't save this frame"
+            isSavingFrame = false
         }
     }
 
@@ -187,6 +254,12 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                     }
                 },
                 actions = {
+                    IconButton(
+                        onClick = { performSaveFrame() },
+                        enabled = !isSavingFrame && saveProgress == null,
+                    ) {
+                        Icon(Icons.Filled.PhotoCamera, contentDescription = "Save this frame as a photo")
+                    }
                     TextButton(
                         enabled = saveProgress == null && !removesEverything,
                         onClick = { showSaveChoiceDialog = true },
@@ -228,6 +301,26 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                                 style = MaterialTheme.typography.bodySmall,
                             )
                         }
+                    }
+                }
+                if (isSavingFrame) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator()
+                    }
+                }
+                frameSavedMessage?.let { message ->
+                    Box(
+                        Modifier.fillMaxWidth().align(Alignment.BottomCenter).padding(16.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            message,
+                            modifier = Modifier
+                                .background(Color.Black.copy(alpha = 0.7f), MaterialTheme.shapes.small)
+                                .padding(horizontal = 16.dp, vertical = 8.dp),
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
                     }
                 }
             }
@@ -300,6 +393,43 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                     style = MaterialTheme.typography.bodySmall,
                     color = if (removesEverything) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                Row(
+                    modifier = Modifier.padding(top = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Adjust:", style = MaterialTheme.typography.bodySmall)
+                    FilterChip(
+                        selected = adjustingHandle == TrimHandle.START,
+                        onClick = { adjustingHandle = TrimHandle.START },
+                        label = { Text("Start") },
+                    )
+                    FilterChip(
+                        selected = adjustingHandle == TrimHandle.END,
+                        onClick = { adjustingHandle = TrimHandle.END },
+                        label = { Text("End") },
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = { stepFrame(-1) }) {
+                        Icon(Icons.Filled.NavigateBefore, contentDescription = "Previous frame")
+                    }
+                    Text(
+                        "${if (adjustingHandle == TrimHandle.START) "Start" else "End"}: " +
+                            formatMsPrecise(
+                                if (adjustingHandle == TrimHandle.START) trimRange.start.toLong() else trimRange.endInclusive.toLong(),
+                            ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    IconButton(onClick = { stepFrame(1) }) {
+                        Icon(Icons.Filled.NavigateNext, contentDescription = "Next frame")
+                    }
+                }
                 RangeSlider(
                     value = trimRange,
                     onValueChange = { newRange ->
@@ -365,6 +495,15 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
 private fun formatMs(ms: Long): String {
     val totalSec = TimeUnit.MILLISECONDS.toSeconds(ms)
     return "%d:%02d".format(totalSec / 60, totalSec % 60)
+}
+
+/** Tenths-of-a-second precision -- formatMs alone can't show a single frame-step actually moving
+ * anything, since one frame is usually well under a tenth of a second's own rounding either way. */
+private fun formatMsPrecise(ms: Long): String {
+    val clamped = ms.coerceAtLeast(0)
+    val totalSec = TimeUnit.MILLISECONDS.toSeconds(clamped)
+    val tenths = (clamped % 1000) / 100
+    return "%d:%02d.%d".format(totalSec / 60, totalSec % 60, tenths)
 }
 
 private fun formatSpeed(speed: Float): String {

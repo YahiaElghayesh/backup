@@ -2,9 +2,12 @@ package com.elghayesh.gallerybackup.ui.edit
 
 import android.content.ContentValues
 import android.content.Context
+import android.graphics.Bitmap
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import androidx.exifinterface.media.ExifInterface
 import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.common.audio.SonicAudioProcessor
 import androidx.media3.effect.SpeedChangeEffect
@@ -18,6 +21,9 @@ import androidx.media3.transformer.InAppMuxer
 import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -310,4 +316,105 @@ private fun saveVideoToMediaStore(
         }
     }
     tempFile.delete()
+}
+
+/**
+ * Grabs the exact frame at [atMs] from [sourceUri] (a video) and saves it as a new JPEG in the
+ * same folder as the video, named "<video's base name> Screenshot <n>.jpg" -- n is the first
+ * number not already used by an earlier screenshot saved from this same video, so saving several
+ * frames in one session doesn't overwrite the previous ones. Carries over the video's own date
+ * onto both the MediaStore row and the new JPEG's own EXIF DateTimeOriginal/DateTime tags -- a
+ * video has no literal EXIF segment the way a JPEG does, so there's nothing to copy the way a
+ * photo edit copies its original's EXIF bytes; the date is the part of "same exif data" that
+ * actually carries over.
+ *
+ * OPTION_CLOSEST decodes forward to the exact requested frame rather than snapping to the nearest
+ * keyframe (OPTION_CLOSEST_SYNC) -- slower, but this is a one-off save of a frame the user
+ * specifically chose, not a scrub preview, so landing on precisely that frame matters more than
+ * speed here. Falls back to OPTION_CLOSEST_SYNC on API 26 (this app's minSdk), one version below
+ * where OPTION_CLOSEST was added.
+ *
+ * Returns the saved file's display name, or null if the frame couldn't be decoded or the insert
+ * failed.
+ */
+internal suspend fun saveFrameAsPhoto(
+    context: Context,
+    sourceUri: Uri,
+    atMs: Long,
+    displayName: String,
+    folderPath: String,
+    dateTakenSec: Long,
+    dateModifiedSec: Long,
+): String? = withContext(Dispatchers.IO) {
+    val retriever = MediaMetadataRetriever()
+    val bitmap = try {
+        retriever.setDataSource(context, sourceUri)
+        val option = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            MediaMetadataRetriever.OPTION_CLOSEST
+        } else {
+            MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+        }
+        retriever.getFrameAtTime(atMs * 1000, option)
+    } catch (e: Exception) {
+        null
+    } finally {
+        retriever.release()
+    }
+    if (bitmap == null) return@withContext null
+
+    val baseName = displayName.substringBeforeLast('.', displayName)
+    val fileName = nextScreenshotFileName(context, baseName)
+    val values = ContentValues().apply {
+        put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+        put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+        put(MediaStore.Images.Media.DATE_TAKEN, dateTakenSec * 1000)
+        put(MediaStore.Images.Media.DATE_MODIFIED, dateModifiedSec)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            put(MediaStore.Images.Media.RELATIVE_PATH, folderPath.ifEmpty { "Pictures" })
+            put(MediaStore.Images.Media.IS_PENDING, 1)
+        }
+    }
+    val resolver = context.contentResolver
+    val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+    if (uri == null) {
+        bitmap.recycle()
+        return@withContext null
+    }
+    resolver.openOutputStream(uri)?.use { out -> bitmap.compress(Bitmap.CompressFormat.JPEG, 100, out) }
+    bitmap.recycle()
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        resolver.update(uri, ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }, null, null)
+    }
+    try {
+        resolver.openFileDescriptor(uri, "rw")?.use { pfd ->
+            val exif = ExifInterface(pfd.fileDescriptor)
+            val dateStr = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US).format(Date(dateTakenSec * 1000))
+            exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, dateStr)
+            exif.setAttribute(ExifInterface.TAG_DATETIME, dateStr)
+            exif.saveAttributes()
+        }
+    } catch (e: Exception) {
+        // Best-effort -- the file and its MediaStore date are already correct either way.
+    }
+    fileName
+}
+
+private fun nextScreenshotFileName(context: Context, baseName: String): String {
+    val existingNumbers = mutableSetOf<Int>()
+    val pattern = Regex("^${Regex.escape(baseName)} Screenshot (\\d+)\\.jpg$", RegexOption.IGNORE_CASE)
+    context.contentResolver.query(
+        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+        arrayOf(MediaStore.Images.Media.DISPLAY_NAME),
+        "${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?",
+        arrayOf("$baseName Screenshot %"),
+        null,
+    )?.use { cursor ->
+        val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
+        while (cursor.moveToNext()) {
+            pattern.find(cursor.getString(nameCol))?.groupValues?.get(1)?.toIntOrNull()?.let { existingNumbers.add(it) }
+        }
+    }
+    var n = 1
+    while (n in existingNumbers) n++
+    return "$baseName Screenshot $n.jpg"
 }
