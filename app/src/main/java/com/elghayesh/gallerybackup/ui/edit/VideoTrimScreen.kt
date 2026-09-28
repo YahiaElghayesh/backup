@@ -2,6 +2,8 @@ package com.elghayesh.gallerybackup.ui.edit
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,13 +12,19 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.NavigateBefore
 import androidx.compose.material.icons.filled.NavigateNext
 import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -41,7 +49,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem as ExoMediaItem
@@ -63,6 +73,15 @@ private enum class TrimMode { KEEP_SELECTION, REMOVE_SELECTION }
 /** Which trim handle the frame-step buttons currently move. */
 private enum class TrimHandle { START, END }
 
+/**
+ * The secondary controls below the always-visible timeline are grouped behind these tabs (Trim /
+ * Speed / Audio), the way most dedicated video editors (CapCut, InShot, Google Photos' own editor)
+ * keep a big canvas and a single tool panel at a time instead of stacking every control on screen
+ * at once -- only one group is ever taking up space below the preview, so the preview stays large
+ * regardless of how many editing features this screen grows to have.
+ */
+private enum class EditTab { TRIM, SPEED, AUDIO }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
@@ -73,10 +92,10 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
 
     var trimMode by remember { mutableStateOf(TrimMode.KEEP_SELECTION) }
     var trimRange by remember { mutableStateOf(0f..durationMs.toFloat()) }
-    // Where the preview scrubber (below the trim range) currently sits -- always kept inside
-    // trimRange, separately from the range's own two handles, so the user can freely scrub
-    // anywhere *within* the selected area to check its contents without disturbing the start/end
-    // points they already set.
+    // Where the preview scrubber (in the Trim tab) currently sits -- always kept inside trimRange,
+    // separately from the range's own two handles, so the user can freely scrub anywhere *within*
+    // the selected area to check its contents without disturbing the start/end points they already
+    // set.
     var previewPositionMs by remember { mutableStateOf(0f) }
     // Playback speed baked into the exported file (not just this screen's own preview) -- 1x
     // leaves the export untouched (and eligible for the near-lossless trim path below); any other
@@ -88,15 +107,22 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
     // progress instead of an indeterminate spinner the user has no way to gauge the length of.
     var saveProgress by remember { mutableStateOf<Int?>(null) }
     var showSaveChoiceDialog by remember { mutableStateOf(false) }
+    var selectedTab by remember { mutableStateOf(EditTab.TRIM) }
 
-    // Which handle the frame-step buttons below the trim range move, and the video's own frame
-    // rate (kept updated from the player itself once its format loads, in the position-polling
-    // effect below) -- needed to know how many milliseconds "one frame" actually is, since that's
-    // not fixed across videos. Falls back to a plausible default until the real value loads.
+    // Which handle the frame-step buttons in the Trim tab move, and the video's own frame rate
+    // (kept updated from the player itself once its format loads, in the position-polling effect
+    // below) -- needed to know how many milliseconds "one frame" actually is, since that's not
+    // fixed across videos. Falls back to a plausible default until the real value loads.
     var adjustingHandle by remember { mutableStateOf(TrimHandle.START) }
     var frameRateFps by remember { mutableStateOf(30f) }
     var isSavingFrame by remember { mutableStateOf(false) }
     var frameSavedMessage by remember { mutableStateOf<String?>(null) }
+    // Drives the play/pause overlay -- ExoPlayer's own stock transport controls (play/pause plus
+    // skip-back-10s/skip-forward-10s) are turned off entirely (useController = false below) since
+    // they sat permanently on top of the preview and duplicated the frame-accurate trim controls
+    // this screen already has; this is the minimal replacement, a single icon that only appears
+    // while paused.
+    var isPlaying by remember { mutableStateOf(false) }
     LaunchedEffect(frameSavedMessage) {
         if (frameSavedMessage != null) {
             delay(2000)
@@ -124,15 +150,17 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
         exoPlayer.volume = if (muteAudio) 0f else 1f
     }
 
-    // Keeps the preview scrubber in sync with actual playback position, and loops playback back
-    // to the trim start the moment it reaches the trim end -- so pressing play previews exactly
-    // the selected area, on repeat, instead of running past it into the part being cut.
+    // Keeps the preview scrubber in sync with actual playback position and the play/pause overlay
+    // in sync with the player's real state, and loops playback back to the trim start the moment
+    // it reaches the trim end -- so pressing play previews exactly the selected area, on repeat,
+    // instead of running past it into the part being cut.
     LaunchedEffect(exoPlayer) {
         while (isActive) {
             // Not gated on isPlaying (unlike the seek logic below it) -- the format, and so the
             // frame rate, is available as soon as the player has read the file, whether or not
             // it's actually playing.
             exoPlayer.videoFormat?.frameRate?.let { fps -> if (fps > 0f) frameRateFps = fps }
+            isPlaying = exoPlayer.isPlaying
             if (exoPlayer.isPlaying) {
                 val position = exoPlayer.currentPosition.toFloat()
                 if (position >= trimRange.endInclusive) {
@@ -143,6 +171,17 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                 }
             }
             delay(100)
+        }
+    }
+
+    fun togglePlayPause() {
+        if (exoPlayer.isPlaying) {
+            exoPlayer.pause()
+        } else {
+            if (exoPlayer.currentPosition.toFloat() >= trimRange.endInclusive) {
+                exoPlayer.seekTo(trimRange.start.toLong())
+            }
+            exoPlayer.play()
         }
     }
 
@@ -259,6 +298,28 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
     val removesEverything = trimMode == TrimMode.REMOVE_SELECTION &&
         trimRange.start <= 0f && trimRange.endInclusive >= durationMs.toFloat()
 
+    val selectedDurationMs = (trimRange.endInclusive - trimRange.start).toLong()
+    val summaryText = when {
+        trimMode == TrimMode.KEEP_SELECTION && editSpeed == 1f ->
+            "${formatMs(trimRange.start.toLong())} - ${formatMs(trimRange.endInclusive.toLong())}  ·  " +
+                formatMs(selectedDurationMs)
+        trimMode == TrimMode.KEEP_SELECTION ->
+            "${formatMs(trimRange.start.toLong())} - ${formatMs(trimRange.endInclusive.toLong())}  ·  " +
+                "${formatMs(selectedDurationMs)} → ${formatMs((selectedDurationMs / editSpeed).toLong())} " +
+                "at ${formatSpeed(editSpeed)}"
+        removesEverything -> "Removing the entire video -- adjust the selection first"
+        else -> {
+            val resultMs = durationMs - selectedDurationMs
+            val removing = "Removing ${formatMs(trimRange.start.toLong())} - ${formatMs(trimRange.endInclusive.toLong())}"
+            if (editSpeed == 1f) {
+                "$removing  ·  result ${formatMs(resultMs)}"
+            } else {
+                "$removing  ·  result ${formatMs(resultMs)} → ${formatMs((resultMs / editSpeed).toLong())} " +
+                    "at ${formatSpeed(editSpeed)}"
+            }
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -286,16 +347,49 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
+            // The preview: as big as the screen allows, since everything below it is now capped
+            // to only what its currently-selected tab needs (see EditTab above) instead of every
+            // control being stacked underneath at once.
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 AndroidView(
                     factory = { ctx ->
                         PlayerView(ctx).apply {
                             player = exoPlayer
-                            useController = true
+                            // Stock ExoPlayer transport controls (play/pause, skip -10s/+10s) are
+                            // replaced by the single tap-to-toggle layer below -- they used to sit
+                            // permanently on top of the video and duplicated the frame-accurate
+                            // scrubbing controls this screen already has underneath the preview.
+                            useController = false
                         }
                     },
                     modifier = Modifier.fillMaxSize(),
                 )
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            enabled = saveProgress == null && !isSavingFrame,
+                        ) { togglePlayPause() },
+                )
+                if (!isPlaying && saveProgress == null && !isSavingFrame) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Box(
+                            Modifier
+                                .size(64.dp)
+                                .background(Color.Black.copy(alpha = 0.45f), CircleShape),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                Icons.Filled.PlayArrow,
+                                contentDescription = "Play",
+                                tint = Color.White,
+                                modifier = Modifier.size(36.dp),
+                            )
+                        }
+                    }
+                }
                 saveProgress?.let { progress ->
                     Box(
                         Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f)),
@@ -339,124 +433,18 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                     }
                 }
             }
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    // Capped and scrollable instead of growing to fit every control (trim mode,
-                    // speed, mute, duration labels, frame-step, the range slider, the in-selection
-                    // scrubber) -- that unbounded height is exactly what was squeezing the video
-                    // preview above down to almost nothing, since it only gets whatever's left over
-                    // (weight(1f)) after this column takes what it needs. Matches the same fix
-                    // already applied to the collage panel.
-                    .heightIn(max = 300.dp)
-                    .verticalScroll(rememberScrollState())
-                    .padding(16.dp),
-            ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(
-                        selected = trimMode == TrimMode.KEEP_SELECTION,
-                        onClick = { trimMode = TrimMode.KEEP_SELECTION },
-                        label = { Text("Keep selection") },
-                    )
-                    FilterChip(
-                        selected = trimMode == TrimMode.REMOVE_SELECTION,
-                        onClick = { trimMode = TrimMode.REMOVE_SELECTION },
-                        label = { Text("Remove selection") },
-                    )
-                }
+
+            // The timeline: always visible right under the preview, the way a trim/scrub bar
+            // always is in dedicated video editors -- this is the one control group that stays on
+            // screen regardless of which tab below is selected.
+            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, top = 8.dp)) {
                 Text(
-                    "Speed: ${formatSpeed(editSpeed)}",
-                    modifier = Modifier.padding(top = 12.dp),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Slider(
-                    value = editSpeed,
-                    onValueChange = { editSpeed = it },
-                    valueRange = 0.05f..20f,
-                )
-                Row(
-                    modifier = Modifier.padding(top = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    FilterChip(
-                        selected = !muteAudio,
-                        onClick = { muteAudio = false },
-                        label = { Text("Keep original audio") },
-                    )
-                    FilterChip(
-                        selected = muteAudio,
-                        onClick = { muteAudio = true },
-                        label = { Text("Mute") },
-                    )
-                }
-                val selectedDurationMs = (trimRange.endInclusive - trimRange.start).toLong()
-                Text(
-                    if (trimMode == TrimMode.KEEP_SELECTION) {
-                        "Trim: ${formatMs(trimRange.start.toLong())} - ${formatMs(trimRange.endInclusive.toLong())}"
-                    } else {
-                        "Removing: ${formatMs(trimRange.start.toLong())} - ${formatMs(trimRange.endInclusive.toLong())}"
-                    },
-                )
-                Text(
-                    if (trimMode == TrimMode.KEEP_SELECTION) {
-                        val atSpeedMs = (selectedDurationMs / editSpeed).toLong()
-                        if (editSpeed == 1f) {
-                            "Selected duration: ${formatMs(selectedDurationMs)}"
-                        } else {
-                            "Selected duration: ${formatMs(selectedDurationMs)} -- ${formatMs(atSpeedMs)} at ${formatSpeed(editSpeed)}"
-                        }
-                    } else if (removesEverything) {
-                        "This would remove the entire video -- adjust the selection first."
-                    } else {
-                        val resultMs = durationMs - selectedDurationMs
-                        val atSpeedMs = (resultMs / editSpeed).toLong()
-                        if (editSpeed == 1f) {
-                            "Result duration: ${formatMs(resultMs)}"
-                        } else {
-                            "Result duration: ${formatMs(resultMs)} -- ${formatMs(atSpeedMs)} at ${formatSpeed(editSpeed)}"
-                        }
-                    },
+                    summaryText,
                     style = MaterialTheme.typography.bodySmall,
                     color = if (removesEverything) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                 )
-                Row(
-                    modifier = Modifier.padding(top = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("Adjust:", style = MaterialTheme.typography.bodySmall)
-                    FilterChip(
-                        selected = adjustingHandle == TrimHandle.START,
-                        onClick = { adjustingHandle = TrimHandle.START },
-                        label = { Text("Start") },
-                    )
-                    FilterChip(
-                        selected = adjustingHandle == TrimHandle.END,
-                        onClick = { adjustingHandle = TrimHandle.END },
-                        label = { Text("End") },
-                    )
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    IconButton(onClick = { stepFrame(-1) }) {
-                        Icon(Icons.Filled.NavigateBefore, contentDescription = "Previous frame")
-                    }
-                    Text(
-                        "${if (adjustingHandle == TrimHandle.START) "Start" else "End"}: " +
-                            formatMsPrecise(
-                                if (adjustingHandle == TrimHandle.START) trimRange.start.toLong() else trimRange.endInclusive.toLong(),
-                            ),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    IconButton(onClick = { stepFrame(1) }) {
-                        Icon(Icons.Filled.NavigateNext, contentDescription = "Next frame")
-                    }
-                }
                 RangeSlider(
                     value = trimRange,
                     onValueChange = { newRange ->
@@ -492,30 +480,169 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                     },
                     valueRange = 0f..durationMs.toFloat(),
                 )
-                Text(
-                    "Preview within selection: ${formatMs(previewPositionMs.toLong())}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+            }
+
+            // The tool panel: an icon tab row plus whichever one group of secondary controls is
+            // currently selected -- everything that isn't the timeline above lives behind one of
+            // these three tabs instead of being stacked on screen all at once.
+            Row(Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                EditTabButton(
+                    icon = Icons.Filled.ContentCut,
+                    label = "Trim",
+                    selected = selectedTab == EditTab.TRIM,
+                    onClick = { selectedTab = EditTab.TRIM },
+                    modifier = Modifier.weight(1f),
                 )
-                // A separate scrubber spanning only the selected area -- lets the user freely
-                // move through everything they've selected (not just its two endpoints) to
-                // confirm nothing they want got left out, without that drag also moving the trim
-                // start/end above.
-                Slider(
-                    value = previewPositionMs.coerceIn(trimRange.start, trimRange.endInclusive),
-                    onValueChange = { position ->
-                        previewPositionMs = position
-                        exoPlayer.setSeekParameters(SeekParameters.CLOSEST_SYNC)
-                        exoPlayer.seekTo(position.toLong())
-                    },
-                    onValueChangeFinished = {
-                        exoPlayer.setSeekParameters(SeekParameters.EXACT)
-                        exoPlayer.seekTo(previewPositionMs.toLong())
-                    },
-                    valueRange = trimRange,
+                EditTabButton(
+                    icon = Icons.Filled.Speed,
+                    label = "Speed",
+                    selected = selectedTab == EditTab.SPEED,
+                    onClick = { selectedTab = EditTab.SPEED },
+                    modifier = Modifier.weight(1f),
+                )
+                EditTabButton(
+                    icon = Icons.Filled.VolumeUp,
+                    label = "Audio",
+                    selected = selectedTab == EditTab.AUDIO,
+                    onClick = { selectedTab = EditTab.AUDIO },
+                    modifier = Modifier.weight(1f),
                 )
             }
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    // A safety net, not the normal case -- each tab's own content is short enough
+                    // to fit well under this on any phone, but large font-scale settings could
+                    // still push it over, so it scrolls rather than squeezing the preview above.
+                    .heightIn(max = 170.dp)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            ) {
+                when (selectedTab) {
+                    EditTab.TRIM -> {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilterChip(
+                                selected = trimMode == TrimMode.KEEP_SELECTION,
+                                onClick = { trimMode = TrimMode.KEEP_SELECTION },
+                                label = { Text("Keep selection") },
+                            )
+                            FilterChip(
+                                selected = trimMode == TrimMode.REMOVE_SELECTION,
+                                onClick = { trimMode = TrimMode.REMOVE_SELECTION },
+                                label = { Text("Remove selection") },
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.padding(top = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("Adjust:", style = MaterialTheme.typography.bodySmall)
+                            FilterChip(
+                                selected = adjustingHandle == TrimHandle.START,
+                                onClick = { adjustingHandle = TrimHandle.START },
+                                label = { Text("Start") },
+                            )
+                            FilterChip(
+                                selected = adjustingHandle == TrimHandle.END,
+                                onClick = { adjustingHandle = TrimHandle.END },
+                                label = { Text("End") },
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            IconButton(onClick = { stepFrame(-1) }) {
+                                Icon(Icons.Filled.NavigateBefore, contentDescription = "Previous frame")
+                            }
+                            Text(
+                                "${if (adjustingHandle == TrimHandle.START) "Start" else "End"}: " +
+                                    formatMsPrecise(
+                                        if (adjustingHandle == TrimHandle.START) trimRange.start.toLong() else trimRange.endInclusive.toLong(),
+                                    ),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            IconButton(onClick = { stepFrame(1) }) {
+                                Icon(Icons.Filled.NavigateNext, contentDescription = "Next frame")
+                            }
+                        }
+                        // A separate scrubber spanning only the selected area -- lets the user
+                        // freely move through everything they've selected (not just its two
+                        // endpoints) to confirm nothing they want got left out, without that drag
+                        // also moving the trim start/end above.
+                        Slider(
+                            value = previewPositionMs.coerceIn(trimRange.start, trimRange.endInclusive),
+                            onValueChange = { position ->
+                                previewPositionMs = position
+                                exoPlayer.setSeekParameters(SeekParameters.CLOSEST_SYNC)
+                                exoPlayer.seekTo(position.toLong())
+                            },
+                            onValueChangeFinished = {
+                                exoPlayer.setSeekParameters(SeekParameters.EXACT)
+                                exoPlayer.seekTo(previewPositionMs.toLong())
+                            },
+                            valueRange = trimRange,
+                        )
+                    }
+                    EditTab.SPEED -> {
+                        Text(
+                            "Speed: ${formatSpeed(editSpeed)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Slider(
+                            value = editSpeed,
+                            onValueChange = { editSpeed = it },
+                            valueRange = 0.05f..20f,
+                        )
+                    }
+                    EditTab.AUDIO -> {
+                        Row(
+                            modifier = Modifier.padding(top = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            FilterChip(
+                                selected = !muteAudio,
+                                onClick = { muteAudio = false },
+                                label = { Text("Keep original audio") },
+                            )
+                            FilterChip(
+                                selected = muteAudio,
+                                onClick = { muteAudio = true },
+                                label = { Text("Mute") },
+                            )
+                        }
+                    }
+                }
+            }
         }
+    }
+}
+
+@Composable
+private fun EditTabButton(
+    icon: ImageVector,
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+    Column(
+        modifier = modifier
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
+            )
+            .padding(vertical = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Icon(icon, contentDescription = label, tint = color)
+        Text(label, style = MaterialTheme.typography.labelSmall, color = color)
     }
 }
 
