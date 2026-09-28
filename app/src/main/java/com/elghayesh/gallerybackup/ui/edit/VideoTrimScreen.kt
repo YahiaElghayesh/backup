@@ -8,7 +8,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.NavigateBefore
@@ -336,7 +339,19 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                     }
                 }
             }
-            Column(Modifier.fillMaxWidth().padding(16.dp)) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    // Capped and scrollable instead of growing to fit every control (trim mode,
+                    // speed, mute, duration labels, frame-step, the range slider, the in-selection
+                    // scrubber) -- that unbounded height is exactly what was squeezing the video
+                    // preview above down to almost nothing, since it only gets whatever's left over
+                    // (weight(1f)) after this column takes what it needs. Matches the same fix
+                    // already applied to the collage panel.
+                    .heightIn(max = 300.dp)
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp),
+            ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(
                         selected = trimMode == TrimMode.KEEP_SELECTION,
