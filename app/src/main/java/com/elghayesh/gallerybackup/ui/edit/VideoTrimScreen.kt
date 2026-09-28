@@ -80,7 +80,7 @@ private enum class TrimHandle { START, END }
  * at once -- only one group is ever taking up space below the preview, so the preview stays large
  * regardless of how many editing features this screen grows to have.
  */
-private enum class EditTab { TRIM, SPEED, AUDIO }
+private enum class TrimTab { TRIM, SPEED, AUDIO }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
@@ -107,7 +107,7 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
     // progress instead of an indeterminate spinner the user has no way to gauge the length of.
     var saveProgress by remember { mutableStateOf<Int?>(null) }
     var showSaveChoiceDialog by remember { mutableStateOf(false) }
-    var selectedTab by remember { mutableStateOf(EditTab.TRIM) }
+    var selectedTab by remember { mutableStateOf(TrimTab.TRIM) }
 
     // Which handle the frame-step buttons in the Trim tab move, and the video's own frame rate
     // (kept updated from the player itself once its format loads, in the position-polling effect
@@ -348,7 +348,7 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
             // The preview: as big as the screen allows, since everything below it is now capped
-            // to only what its currently-selected tab needs (see EditTab above) instead of every
+            // to only what its currently-selected tab needs (see TrimTab above) instead of every
             // control being stacked underneath at once.
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 AndroidView(
@@ -437,7 +437,7 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
             // The timeline: always visible right under the preview, the way a trim/scrub bar
             // always is in dedicated video editors -- this is the one control group that stays on
             // screen regardless of which tab below is selected.
-            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, top = 8.dp)) {
+            Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp)) {
                 Text(
                     summaryText,
                     style = MaterialTheme.typography.bodySmall,
@@ -486,25 +486,25 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
             // currently selected -- everything that isn't the timeline above lives behind one of
             // these three tabs instead of being stacked on screen all at once.
             Row(Modifier.fillMaxWidth().padding(top = 4.dp)) {
-                EditTabButton(
+                TrimTabButton(
                     icon = Icons.Filled.ContentCut,
                     label = "Trim",
-                    selected = selectedTab == EditTab.TRIM,
-                    onClick = { selectedTab = EditTab.TRIM },
+                    selected = selectedTab == TrimTab.TRIM,
+                    onClick = { selectedTab = TrimTab.TRIM },
                     modifier = Modifier.weight(1f),
                 )
-                EditTabButton(
+                TrimTabButton(
                     icon = Icons.Filled.Speed,
                     label = "Speed",
-                    selected = selectedTab == EditTab.SPEED,
-                    onClick = { selectedTab = EditTab.SPEED },
+                    selected = selectedTab == TrimTab.SPEED,
+                    onClick = { selectedTab = TrimTab.SPEED },
                     modifier = Modifier.weight(1f),
                 )
-                EditTabButton(
+                TrimTabButton(
                     icon = Icons.Filled.VolumeUp,
                     label = "Audio",
-                    selected = selectedTab == EditTab.AUDIO,
-                    onClick = { selectedTab = EditTab.AUDIO },
+                    selected = selectedTab == TrimTab.AUDIO,
+                    onClick = { selectedTab = TrimTab.AUDIO },
                     modifier = Modifier.weight(1f),
                 )
             }
@@ -519,7 +519,7 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                     .padding(horizontal = 16.dp, vertical = 8.dp),
             ) {
                 when (selectedTab) {
-                    EditTab.TRIM -> {
+                    TrimTab.TRIM -> {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             FilterChip(
                                 selected = trimMode == TrimMode.KEEP_SELECTION,
@@ -587,7 +587,7 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                             valueRange = trimRange,
                         )
                     }
-                    EditTab.SPEED -> {
+                    TrimTab.SPEED -> {
                         Text(
                             "Speed: ${formatSpeed(editSpeed)}",
                             style = MaterialTheme.typography.bodySmall,
@@ -599,7 +599,7 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                             valueRange = 0.05f..20f,
                         )
                     }
-                    EditTab.AUDIO -> {
+                    TrimTab.AUDIO -> {
                         Row(
                             modifier = Modifier.padding(top = 4.dp),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -623,7 +623,7 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
 }
 
 @Composable
-private fun EditTabButton(
+private fun TrimTabButton(
     icon: ImageVector,
     label: String,
     selected: Boolean,
