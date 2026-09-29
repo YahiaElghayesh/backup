@@ -1,5 +1,8 @@
 package com.elghayesh.gallerybackup.ui.viewer
 
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -537,6 +540,41 @@ private fun rememberVideoPlayerState(item: MediaItem): VideoPlayerState {
             delay(100)
         }
     }
+
+    // Pauses whatever music was already playing elsewhere on the phone while this video is
+    // actually audible, and lets go of that hold -- letting that music resume -- the moment the
+    // video is muted or paused, rather than tying it to just "a video is open" regardless of
+    // whether it's making any sound. AUDIOFOCUS_GAIN_TRANSIENT (rather than the permanent GAIN)
+    // is what tells the system/other apps this hold is temporary, which is what makes most of
+    // them auto-resume once it's abandoned instead of just staying stopped.
+    val audioManager = remember { context.getSystemService(AudioManager::class.java) }
+    val audioFocusRequest = remember {
+        AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+                    .build(),
+            )
+            .build()
+    }
+    var hasAudioFocus by remember { mutableStateOf(false) }
+    LaunchedEffect(state.isPlaying, state.isMuted) {
+        val manager = audioManager ?: return@LaunchedEffect
+        val shouldHaveFocus = state.isPlaying && !state.isMuted
+        if (shouldHaveFocus && !hasAudioFocus) {
+            hasAudioFocus = manager.requestAudioFocus(audioFocusRequest) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        } else if (!shouldHaveFocus && hasAudioFocus) {
+            manager.abandonAudioFocusRequest(audioFocusRequest)
+            hasAudioFocus = false
+        }
+    }
+    DisposableEffect(exoPlayer) {
+        onDispose {
+            if (hasAudioFocus) audioManager?.abandonAudioFocusRequest(audioFocusRequest)
+        }
+    }
+
     return state
 }
 
