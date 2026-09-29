@@ -128,6 +128,7 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
     // progress instead of an indeterminate spinner the user has no way to gauge the length of.
     var saveProgress by remember { mutableStateOf<Int?>(null) }
     var showSaveChoiceDialog by remember { mutableStateOf(false) }
+    var showDiscardDialog by remember { mutableStateOf(false) }
     var selectedTab by remember { mutableStateOf(TrimTab.TRIM) }
 
     // Which handle the frame-step buttons in the Trim tab move, and the video's own frame rate and
@@ -286,13 +287,26 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
         }
     }
 
+    // Leaving with pending, unsaved edits asks first -- trimRange/speed/mute/rotation/crop only
+    // live in memory until Save actually runs, so a stray back tap used to discard real work with
+    // no way back.
+    val hasPendingEdits = trimRange.start > 0f || trimRange.endInclusive < durationMs.toFloat() ||
+        trimMode != TrimMode.KEEP_SELECTION || editSpeed != 1f || muteAudio ||
+        rotationDegrees != 0 || cropRect != NormRect.FULL
+    fun requestExit() {
+        if (hasPendingEdits) showDiscardDialog = true else onDone()
+    }
+
     // Blocks leaving mid-save via the back button/gesture -- not via minimizing the app, which
     // this whole feature is meant to allow. The export itself runs in VideoExportWorker regardless
     // of whether this screen stays around to see it finish, but "replace original" still needs a
     // live Activity for the trash confirmation dialog (see VideoExportWorker's own doc comment),
     // which only the code below -- once it observes the export finish -- runs. Navigating away
-    // early would skip that step, leaving the original never trashed.
-    BackHandler(enabled = saveProgress != null) {}
+    // early would skip that step, leaving the original never trashed. Otherwise (not mid-save),
+    // back goes through requestExit() above instead of leaving immediately.
+    BackHandler {
+        if (saveProgress == null) requestExit()
+    }
 
     fun performSave(replace: Boolean) {
         saveProgress = 0
@@ -354,6 +368,24 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
         )
     }
 
+    if (showDiscardDialog) {
+        AlertDialog(
+            onDismissRequest = { showDiscardDialog = false },
+            title = { Text("Discard changes?") },
+            text = { Text("You'll lose your edits to this video if you leave now.") },
+            confirmButton = {
+                TextButton(onClick = { showDiscardDialog = false; onDone() }) {
+                    Text("Discard")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDiscardDialog = false }) {
+                    Text("Keep editing")
+                }
+            },
+        )
+    }
+
     // Removing the selection when it spans the whole video would leave nothing to save --
     // disable Save rather than silently produce (or fail to produce) an empty file.
     val removesEverything = trimMode == TrimMode.REMOVE_SELECTION &&
@@ -393,7 +425,7 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
             TopAppBar(
                 title = { Text("Trim video") },
                 navigationIcon = {
-                    IconButton(onClick = onDone, enabled = saveProgress == null) {
+                    IconButton(onClick = { requestExit() }, enabled = saveProgress == null) {
                         Icon(Icons.Filled.ArrowBack, contentDescription = "Cancel")
                     }
                 },

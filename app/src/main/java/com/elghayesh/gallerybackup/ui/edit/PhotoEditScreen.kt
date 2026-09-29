@@ -261,6 +261,7 @@ fun PhotoEditScreen(
     var isLoading by remember { mutableStateOf(true) }
     var isSaving by remember { mutableStateOf(false) }
     var showSaveChoiceDialog by remember { mutableStateOf(false) }
+    var showDiscardDialog by remember { mutableStateOf(false) }
 
     // Nullable -- null means no tool panel is open (every panel's "Done" button, or tapping the
     // already-active tool's own dock icon, collapses back to this neutral state), distinct from
@@ -387,6 +388,12 @@ fun PhotoEditScreen(
         editingStickerId = null
     }
 
+    // Leaving with pending edits (anything undo can still revert) asks first -- undo/redo only
+    // lives in memory, so a stray back tap used to discard real work with no way back.
+    fun requestExit() {
+        if (undoStack.isNotEmpty()) showDiscardDialog = true else onDone()
+    }
+
     // Without this, system back (button or gesture) always closed the whole editor immediately,
     // no matter what was open inside it -- a selected sticker mid-edit, or a tool tab other than
     // Transform. One back press now only steps out one level at a time (deselects the sticker, or
@@ -395,7 +402,7 @@ fun PhotoEditScreen(
         when {
             editingStickerId != null -> deselectSticker()
             tab != null -> tab = null
-            else -> onDone()
+            else -> requestExit()
         }
     }
 
@@ -444,6 +451,24 @@ fun PhotoEditScreen(
         )
     }
 
+    if (showDiscardDialog) {
+        AlertDialog(
+            onDismissRequest = { showDiscardDialog = false },
+            title = { Text("Discard changes?") },
+            text = { Text("You'll lose your edits to this photo if you leave now.") },
+            confirmButton = {
+                TextButton(onClick = { showDiscardDialog = false; onDone() }) {
+                    Text("Discard")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDiscardDialog = false }) {
+                    Text("Keep editing")
+                }
+            },
+        )
+    }
+
     val panelBg = Color(0xFF1C1C1C)
 
     // What's actually shown/measured against everywhere the crop tools need a reference frame --
@@ -463,7 +488,7 @@ fun PhotoEditScreen(
             TopAppBar(
                 title = {},
                 navigationIcon = {
-                    IconButton(onClick = onDone) {
+                    IconButton(onClick = { requestExit() }) {
                         Icon(Icons.Filled.Close, contentDescription = "Cancel", tint = Color.White)
                     }
                 },
