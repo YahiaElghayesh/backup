@@ -3,6 +3,7 @@ package com.elghayesh.gallerybackup.ui.edit
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -15,7 +16,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.NavigateBefore
 import androidx.compose.material.icons.filled.NavigateNext
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -53,9 +54,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -65,6 +68,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.common.PlaybackParameters
+import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.ui.PlayerView
@@ -203,15 +207,32 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
         }
     }
 
+    // Once ExoPlayer reaches the true end of the video it sits in STATE_ENDED, where play() alone
+    // is a no-op (there's nothing left to play from the end position) -- seeking back to 0 first
+    // is what actually restarts it. The trim-selection loop (looping back to trimRange.start once
+    // playback reaches trimRange.endInclusive) is handled separately by the position-polling
+    // effect above while actively playing, so this doesn't need its own special case for it -- a
+    // resume from a pause sitting past trimRange.endInclusive gets caught by that same poll within
+    // its next 100ms tick.
     fun togglePlayPause() {
         if (exoPlayer.isPlaying) {
             exoPlayer.pause()
         } else {
-            if (exoPlayer.currentPosition.toFloat() >= trimRange.endInclusive) {
-                exoPlayer.seekTo(trimRange.start.toLong())
-            }
+            if (exoPlayer.playbackState == Player.STATE_ENDED) exoPlayer.seekTo(0)
             exoPlayer.play()
         }
+        isPlaying = exoPlayer.isPlaying
+    }
+
+    // General-purpose scrubbing, independent of the trim handles -- reachable from every tab (not
+    // just Trim's own handle-specific stepFrame below), so the whole video can be inspected frame
+    // by frame while adjusting crop/rotate/speed too, not just the current trim selection.
+    fun stepPreviewFrame(direction: Int) {
+        val frameMs = 1000f / frameRateFps
+        val target = (previewPositionMs + direction * frameMs).coerceIn(0f, durationMs.toFloat())
+        previewPositionMs = target
+        exoPlayer.setSeekParameters(SeekParameters.EXACT)
+        exoPlayer.seekTo(target.toLong())
     }
 
     // A crop drawn relative to one rotation no longer lines up once the frame is rotated further,
@@ -423,51 +444,36 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                         .size(boxWidthDp, boxHeightDp)
                         .onSizeChanged { videoBoxSize = it },
                 ) {
-                    AndroidView(
-                        factory = { ctx ->
-                            // TextureView (via this layout), not the default SurfaceView -- a
-                            // SurfaceView is its own OS-composited layer positioned by absolute
-                            // screen coordinates, which does NOT reliably follow a Compose
-                            // graphicsLayer transform (exactly what the rotate button applies
-                            // below): the rotation this screen computes never actually reached the
-                            // screen because the surface being rotated wasn't the one actually
-                            // drawing pixels. TextureView draws as a normal View layer, so it
-                            // always follows Compose's measured bounds and transforms -- same fix
-                            // MediaViewerScreen already uses for its own pinch-zoom transform.
-                            (android.view.LayoutInflater.from(ctx).inflate(R.layout.player_view_texture, null) as PlayerView).apply {
-                                player = exoPlayer
-                            }
-                        },
+                    // Pinch-zoom is only meaningful (and only kept enabled) outside the Crop tab --
+                    // CropOverlay's drag handles are positioned against this same, UN-zoomed
+                    // videoBoxSize, so zooming while cropping would drift the handles out of sync
+                    // with a picture that's actually panned/scaled underneath them.
+                    VideoZoomBox(
+                        zoomEnabled = selectedTab != TrimTab.CROP,
                         modifier = Modifier
                             .align(Alignment.Center)
-                            .size(viewWidthDp, viewHeightDp)
-                            .graphicsLayer { rotationZ = rotationDegrees.toFloat() },
-                    )
-                    Box(
-                        Modifier
-                            .fillMaxSize()
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null,
-                                enabled = saveProgress == null && !isSavingFrame,
-                            ) { togglePlayPause() },
-                    )
-                    if (!isPlaying && saveProgress == null && !isSavingFrame) {
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Box(
-                                Modifier
-                                    .size(64.dp)
-                                    .background(Color.Black.copy(alpha = 0.45f), CircleShape),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Icon(
-                                    Icons.Filled.PlayArrow,
-                                    contentDescription = "Play",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(36.dp),
-                                )
-                            }
-                        }
+                            .size(viewWidthDp, viewHeightDp),
+                    ) {
+                        AndroidView(
+                            factory = { ctx ->
+                                // TextureView (via this layout), not the default SurfaceView -- a
+                                // SurfaceView is its own OS-composited layer positioned by absolute
+                                // screen coordinates, which does NOT reliably follow a Compose
+                                // graphicsLayer transform (exactly what the rotate button, and now
+                                // pinch-zoom, both apply): the rotation this screen computes never
+                                // actually reached the screen because the surface being rotated
+                                // wasn't the one actually drawing pixels. TextureView draws as a
+                                // normal View layer, so it always follows Compose's measured bounds
+                                // and transforms -- same fix MediaViewerScreen already uses for its
+                                // own pinch-zoom transform.
+                                (android.view.LayoutInflater.from(ctx).inflate(R.layout.player_view_texture, null) as PlayerView).apply {
+                                    player = exoPlayer
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .graphicsLayer { rotationZ = rotationDegrees.toFloat() },
+                        )
                     }
                     if (selectedTab == TrimTab.CROP) {
                         CropOverlay(
@@ -576,6 +582,30 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                     },
                     valueRange = 0f..durationMs.toFloat(),
                 )
+                // Always reachable regardless of which tab is open below -- previously play/pause
+                // only worked by tapping the video itself, which fought with the Crop tab's own
+                // drag handles for the same touch area (a tap inside the crop rect never reached
+                // it, consumed by the crop-move gesture instead). This scrubs/plays the WHOLE
+                // video (see stepPreviewFrame), not just the current trim selection, so cropping or
+                // rotating can be checked against any part of it, not only what's currently selected.
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = { stepPreviewFrame(-1) }) {
+                        Icon(Icons.Filled.NavigateBefore, contentDescription = "Previous frame")
+                    }
+                    IconButton(onClick = { togglePlayPause() }) {
+                        Icon(
+                            if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                            contentDescription = if (isPlaying) "Pause" else "Play",
+                        )
+                    }
+                    IconButton(onClick = { stepPreviewFrame(1) }) {
+                        Icon(Icons.Filled.NavigateNext, contentDescription = "Next frame")
+                    }
+                }
             }
 
             // The tool panel: an icon tab row plus whichever one group of secondary controls is
@@ -749,6 +779,56 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                 }
             }
         }
+    }
+}
+
+/**
+ * Pinch to zoom (1x-8x) and drag to pan once zoomed -- lets the frame be inspected closely while
+ * trimming/adjusting speed/rotating, the same kind of pinch-zoom [MediaViewerScreen] already gives
+ * its own viewer. Disabled (and snapped back to 1x) whenever [zoomEnabled] is false: the Crop tab
+ * needs that, since [CropOverlay]'s drag handles are positioned against the UN-zoomed [content]'s
+ * own measured size, and would drift out of sync with a picture that's actually panned/scaled
+ * underneath them.
+ */
+@Composable
+private fun VideoZoomBox(zoomEnabled: Boolean, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    var scale by remember { mutableStateOf(1f) }
+    var offset by remember { mutableStateOf(Offset.Zero) }
+    var boxSize by remember { mutableStateOf(IntSize.Zero) }
+    LaunchedEffect(zoomEnabled) {
+        if (!zoomEnabled) {
+            scale = 1f
+            offset = Offset.Zero
+        }
+    }
+    Box(
+        modifier
+            .onSizeChanged { boxSize = it }
+            .pointerInput(zoomEnabled) {
+                if (!zoomEnabled) return@pointerInput
+                detectTransformGestures { _, pan, zoom, _ ->
+                    val newScale = (scale * zoom).coerceIn(1f, 8f)
+                    scale = newScale
+                    offset = if (newScale > 1f) {
+                        val maxOffsetX = boxSize.width * (newScale - 1f) / 2f
+                        val maxOffsetY = boxSize.height * (newScale - 1f) / 2f
+                        Offset(
+                            (offset.x + pan.x).coerceIn(-maxOffsetX, maxOffsetX),
+                            (offset.y + pan.y).coerceIn(-maxOffsetY, maxOffsetY),
+                        )
+                    } else {
+                        Offset.Zero
+                    }
+                }
+            }
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+                translationX = offset.x
+                translationY = offset.y
+            },
+    ) {
+        content()
     }
 }
 

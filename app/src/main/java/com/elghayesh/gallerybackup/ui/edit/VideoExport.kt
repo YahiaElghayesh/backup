@@ -394,8 +394,15 @@ internal suspend fun saveFrameAsPhoto(
     dateModifiedSec: Long,
 ): String? = withContext(Dispatchers.IO) {
     val retriever = MediaMetadataRetriever()
+    var sourceLatLong: DoubleArray? = null
     val bitmap = try {
         retriever.setDataSource(context, sourceUri)
+        // METADATA_KEY_LOCATION reads the video container's own location atom (ISO 6709 text,
+        // e.g. "+37.5090-122.2660/") when the source was recorded with location tagging on --
+        // the only "EXIF data" a video actually carries that a screenshot can meaningfully
+        // inherit beyond its date, which was already being copied.
+        sourceLatLong = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_LOCATION)
+            ?.let { parseIsoLocation(it) }
         val option = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             MediaMetadataRetriever.OPTION_CLOSEST
         } else {
@@ -438,12 +445,23 @@ internal suspend fun saveFrameAsPhoto(
             val dateStr = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US).format(Date(dateTakenSec * 1000))
             exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, dateStr)
             exif.setAttribute(ExifInterface.TAG_DATETIME, dateStr)
+            sourceLatLong?.let { exif.setLatLong(it[0], it[1]) }
             exif.saveAttributes()
         }
     } catch (e: Exception) {
         // Best-effort -- the file and its MediaStore date are already correct either way.
     }
     fileName
+}
+
+/** Parses an ISO 6709 location string (what [MediaMetadataRetriever.METADATA_KEY_LOCATION]
+ * returns, e.g. "+37.5090-122.2660/" or "+37.5090-122.2660+010.000/" with altitude) into
+ * [latitude, longitude], or null if it doesn't match that format. */
+private fun parseIsoLocation(location: String): DoubleArray? {
+    val match = Regex("^([+-][0-9.]+)([+-][0-9.]+)").find(location.trim()) ?: return null
+    val lat = match.groupValues[1].toDoubleOrNull() ?: return null
+    val lon = match.groupValues[2].toDoubleOrNull() ?: return null
+    return doubleArrayOf(lat, lon)
 }
 
 private fun nextScreenshotFileName(context: Context, baseName: String): String {
