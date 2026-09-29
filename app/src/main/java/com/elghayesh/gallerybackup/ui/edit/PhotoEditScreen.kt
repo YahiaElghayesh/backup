@@ -117,7 +117,7 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
 
-private enum class CropAspect(val label: String, val ratio: Float) {
+internal enum class CropAspect(val label: String, val ratio: Float) {
     FREE("Free", 0f),
     SQUARE("1:1", 1f),
     FOUR_THREE("4:3", 4f / 3f),
@@ -133,14 +133,17 @@ private enum class EditTab(val label: String, val icon: ImageVector) {
     STICKER("Sticker", Icons.Filled.TextFields),
 }
 
-/** A crop rectangle normalized to 0..1 of the working bitmap's current width/height. */
-private data class NormRect(val left: Float, val top: Float, val right: Float, val bottom: Float) {
+/** A crop rectangle normalized to 0..1 of the working bitmap's current width/height. Also reused
+ * by [VideoTrimScreen]'s Crop tab, normalized to the video's currently-displayed (post-rotation)
+ * frame instead -- the same rectangle shape and the same [CropOverlay]/drag-handle mechanics apply
+ * to either a photo or a video frame identically. */
+internal data class NormRect(val left: Float, val top: Float, val right: Float, val bottom: Float) {
     companion object {
         val FULL = NormRect(0f, 0f, 1f, 1f)
     }
 }
 
-private enum class CropCorner { TOP_LEFT, TOP_RIGHT, BOTTOM_LEFT, BOTTOM_RIGHT }
+internal enum class CropCorner { TOP_LEFT, TOP_RIGHT, BOTTOM_LEFT, BOTTOM_RIGHT }
 
 private data class NormPoint(val x: Float, val y: Float)
 
@@ -1326,8 +1329,10 @@ private suspend fun PointerInputScope.detectDragImmediate(
     }
 }
 
+/** Reused as-is by [VideoTrimScreen]'s Crop tab -- the same drag-handle rectangle over a video
+ * frame works identically to over a photo, so there's no separate video-specific copy of this. */
 @Composable
-private fun CropOverlay(
+internal fun CropOverlay(
     rect: NormRect,
     boxSize: IntSize,
     density: androidx.compose.ui.unit.Density,
@@ -1722,7 +1727,7 @@ private fun rotateBitmapArbitrary(bitmap: Bitmap, degrees: Float): Bitmap {
     return output
 }
 
-private fun updatedCropRect(rect: NormRect, corner: CropCorner, dxNorm: Float, dyNorm: Float): NormRect {
+internal fun updatedCropRect(rect: NormRect, corner: CropCorner, dxNorm: Float, dyNorm: Float): NormRect {
     val minSize = 0.08f
     return when (corner) {
         CropCorner.TOP_LEFT -> rect.copy(
@@ -1746,7 +1751,7 @@ private fun updatedCropRect(rect: NormRect, corner: CropCorner, dxNorm: Float, d
 
 /** Shifts the whole rect by the same amount on both axes -- moving the selection over the photo
  * rather than resizing it -- clamped so it never leaves the 0..1 image bounds. */
-private fun translatedRect(rect: NormRect, dxNorm: Float, dyNorm: Float): NormRect {
+internal fun translatedRect(rect: NormRect, dxNorm: Float, dyNorm: Float): NormRect {
     val width = rect.right - rect.left
     val height = rect.bottom - rect.top
     val newLeft = (rect.left + dxNorm).coerceIn(0f, 1f - width)
@@ -1755,7 +1760,7 @@ private fun translatedRect(rect: NormRect, dxNorm: Float, dyNorm: Float): NormRe
 }
 
 /** Re-derives an aspect-locked rect centered on [rect]'s current center, sized to fit within it. */
-private fun applyAspectLock(rect: NormRect, ratio: Float, bitmapW: Int, bitmapH: Int): NormRect {
+internal fun applyAspectLock(rect: NormRect, ratio: Float, bitmapW: Int, bitmapH: Int): NormRect {
     val cx = (rect.left + rect.right) / 2f
     val cy = (rect.top + rect.bottom) / 2f
     val wPx = (rect.right - rect.left) * bitmapW

@@ -75,6 +75,10 @@ class VideoExportWorker(appContext: Context, params: WorkerParameters) : Corouti
                     // come from that SAME thread -- CoroutineWorker.doWork() otherwise runs on a
                     // plain background dispatcher thread with no Looper of its own at all, which
                     // Transformer would reject.
+                    val cropLeft = inputData.getFloat(KEY_CROP_LEFT, 0f)
+                    val cropTop = inputData.getFloat(KEY_CROP_TOP, 0f)
+                    val cropRight = inputData.getFloat(KEY_CROP_RIGHT, 1f)
+                    val cropBottom = inputData.getFloat(KEY_CROP_BOTTOM, 1f)
                     val exported = withContext(Dispatchers.Main) {
                         transformVideo(
                             context = applicationContext,
@@ -85,6 +89,8 @@ class VideoExportWorker(appContext: Context, params: WorkerParameters) : Corouti
                             removeSelection = inputData.getBoolean(KEY_REMOVE_SELECTION, false),
                             speed = inputData.getFloat(KEY_SPEED, 1f),
                             muteAudio = inputData.getBoolean(KEY_MUTE_AUDIO, false),
+                            rotationDegrees = inputData.getInt(KEY_ROTATION_DEGREES, 0),
+                            cropRect = NormRect(cropLeft, cropTop, cropRight, cropBottom),
                             outputPath = outputPath,
                             onProgress = onProgress,
                         )
@@ -160,6 +166,11 @@ class VideoExportWorker(appContext: Context, params: WorkerParameters) : Corouti
         private const val KEY_REMOVE_SELECTION = "remove_selection"
         private const val KEY_SPEED = "speed"
         private const val KEY_MUTE_AUDIO = "mute_audio"
+        private const val KEY_ROTATION_DEGREES = "rotation_degrees"
+        private const val KEY_CROP_LEFT = "crop_left"
+        private const val KEY_CROP_TOP = "crop_top"
+        private const val KEY_CROP_RIGHT = "crop_right"
+        private const val KEY_CROP_BOTTOM = "crop_bottom"
         private const val KEY_REPLACE = "replace"
         private const val KEY_MERGE_URIS = "merge_uris"
         private const val KEY_ORIGINAL_DISPLAY_NAME = "original_display_name"
@@ -176,6 +187,8 @@ class VideoExportWorker(appContext: Context, params: WorkerParameters) : Corouti
             removeSelection: Boolean,
             speed: Float,
             muteAudio: Boolean,
+            rotationDegrees: Int,
+            cropRect: NormRect,
             replace: Boolean,
             originalDisplayName: String,
             originalFolderPath: String,
@@ -191,6 +204,11 @@ class VideoExportWorker(appContext: Context, params: WorkerParameters) : Corouti
                 .putBoolean(KEY_REMOVE_SELECTION, removeSelection)
                 .putFloat(KEY_SPEED, speed)
                 .putBoolean(KEY_MUTE_AUDIO, muteAudio)
+                .putInt(KEY_ROTATION_DEGREES, rotationDegrees)
+                .putFloat(KEY_CROP_LEFT, cropRect.left)
+                .putFloat(KEY_CROP_TOP, cropRect.top)
+                .putFloat(KEY_CROP_RIGHT, cropRect.right)
+                .putFloat(KEY_CROP_BOTTOM, cropRect.bottom)
                 .putBoolean(KEY_REPLACE, replace)
                 .putString(KEY_ORIGINAL_DISPLAY_NAME, originalDisplayName)
                 .putString(KEY_ORIGINAL_FOLDER_PATH, originalFolderPath)

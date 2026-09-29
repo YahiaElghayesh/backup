@@ -9,7 +9,10 @@ import android.os.Build
 import android.provider.MediaStore
 import androidx.exifinterface.media.ExifInterface
 import androidx.media3.common.MediaItem as ExoMediaItem
+import androidx.media3.common.Effect
 import androidx.media3.common.audio.SonicAudioProcessor
+import androidx.media3.effect.Crop
+import androidx.media3.effect.ScaleAndRotateTransformation
 import androidx.media3.effect.SpeedChangeEffect
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.EditedMediaItem
@@ -58,13 +61,15 @@ import kotlinx.coroutines.withContext
  * straight byte copy the way a single cut's untouched remainder is -- the whole output is
  * re-encoded. That's an unavoidable consequence of removing a middle section, not a shortcut.
  *
- * A [speed] other than 1x always forces a full re-encode too, for both branches: every frame's
- * timestamp has to be rewritten ([SpeedChangeEffect]), which is exactly what the near-lossless
- * trim path above depends on NOT happening to any frame it stream-copies. [muteAudio] drops the
- * audio track entirely rather than just silencing it (silence would still be decoded, time-
- * stretched and re-encoded for nothing); otherwise the audio is time-stretched by the same factor
- * as the video via [SonicAudioProcessor] so picture and sound stay in sync, keeping its original
- * pitch rather than the chipmunk/slow-motion-voice effect a plain resample would give.
+ * A [speed] other than 1x, a non-zero [rotationDegrees], or a [cropRect] narrower than the full
+ * frame all force a full re-encode too, for the same underlying reason: each rewrites every
+ * frame's timestamp or pixels ([SpeedChangeEffect]/[ScaleAndRotateTransformation]/[Crop]), which is
+ * exactly what the near-lossless trim path above depends on NOT happening to any frame it stream-
+ * copies. [muteAudio] drops the audio track entirely rather than just silencing it (silence would
+ * still be decoded, time-stretched and re-encoded for nothing); otherwise the audio is time-
+ * stretched by the same factor as the video via [SonicAudioProcessor] so picture and sound stay in
+ * sync, keeping its original pitch rather than the chipmunk/slow-motion-voice effect a plain
+ * resample would give.
  */
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 internal suspend fun transformVideo(
@@ -76,9 +81,15 @@ internal suspend fun transformVideo(
     removeSelection: Boolean,
     speed: Float,
     muteAudio: Boolean,
+    /** Clockwise, one of 0/90/180/270. */
+    rotationDegrees: Int,
+    /** Relative to the ALREADY-rotated frame (i.e. what [rotationDegrees] produces) -- null or
+     * [NormRect.FULL] means no crop. */
+    cropRect: NormRect?,
     outputPath: String,
     onProgress: (Int) -> Unit,
 ): Boolean = coroutineScope {
+    val hasCrop = cropRect != null && cropRect != NormRect.FULL
     var transformerRef: Transformer? = null
     val progressJob = launch {
         val progressHolder = ProgressHolder()
@@ -105,7 +116,7 @@ internal suspend fun transformVideo(
             fun buildPiece(pieceStartMs: Long, pieceEndMs: Long): EditedMediaItem =
                 EditedMediaItem.Builder(clippedMediaItem(sourceUri, pieceStartMs, pieceEndMs))
                     .setRemoveAudio(muteAudio)
-                    .setEffects(speedEffects(speed, muteAudio))
+                    .setEffects(videoEditEffects(speed, muteAudio, rotationDegrees, cropRect))
                     .build()
 
             if (!removeSelection) {
@@ -113,7 +124,12 @@ internal suspend fun transformVideo(
                 val transformerBuilder = Transformer.Builder(context)
                     .setMuxerFactory(originalTimestampPreservingMuxerFactory())
                     .addListener(listener)
-                if (speed == 1f) transformerBuilder.experimentalSetTrimOptimizationEnabled(true)
+                // Trim optimization stream-copies every frame outside the cut, which a rotate/crop
+                // effect can't do -- it needs to actually touch every frame's pixels, same as a
+                // non-1x speed already ruled this path out for.
+                if (speed == 1f && rotationDegrees == 0 && !hasCrop) {
+                    transformerBuilder.experimentalSetTrimOptimizationEnabled(true)
+                }
                 val transformer = transformerBuilder.build()
                 transformerRef = transformer
                 cont.invokeOnCancellation { transformer.cancel() }
@@ -227,21 +243,52 @@ private fun clippedMediaItem(sourceUri: Uri, startMs: Long, endMs: Long): ExoMed
         .build()
 
 /**
- * [SpeedChangeEffect] re-times the video frames; [SonicAudioProcessor.setSpeed] re-times the
- * audio by the same factor (its pitch stays at the class default of 1x, so speeding up or slowing
- * down doesn't chipmunk or drawl the audio) so picture and sound stay in sync. Skipped entirely at
- * 1x (a no-op that would otherwise still force a full re-encode) and whenever [muteAudio] drops
- * the audio track anyway.
+ * Rotation is applied BEFORE crop -- [cropRect] is defined relative to the already-rotated frame
+ * (what the Crop tab's overlay was drawn on top of in the live preview), and Media3 applies a
+ * [Effects.videoEffects] list in sequence, so putting rotation first in that list is what makes
+ * the two line up. [SpeedChangeEffect] re-times the video frames; [SonicAudioProcessor.setSpeed]
+ * re-times the audio by the same factor (its pitch stays at the class default of 1x, so speeding
+ * up or slowing down doesn't chipmunk or drawl the audio) so picture and sound stay in sync. Each
+ * piece is skipped entirely when it wouldn't do anything (a no-op that would otherwise still force
+ * a full re-encode), and the audio speed change is skipped whenever [muteAudio] drops the audio
+ * track anyway.
  */
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-private fun speedEffects(speed: Float, muteAudio: Boolean): Effects {
-    val videoEffects = if (speed != 1f) listOf(SpeedChangeEffect(speed)) else emptyList()
+private fun videoEditEffects(speed: Float, muteAudio: Boolean, rotationDegrees: Int, cropRect: NormRect?): Effects {
+    val videoEffects = buildList<Effect> {
+        if (rotationDegrees != 0) {
+            // ScaleAndRotateTransformation rotates counterclockwise; rotationDegrees here is the
+            // user-facing clockwise angle (matching the live preview's graphicsLayer.rotationZ,
+            // also clockwise-positive), so it's inverted going into the export effect.
+            add(
+                ScaleAndRotateTransformation.Builder()
+                    .setRotationDegrees((360 - rotationDegrees).toFloat() % 360f)
+                    .build(),
+            )
+        }
+        if (cropRect != null && cropRect != NormRect.FULL) add(cropEffectFor(cropRect))
+        if (speed != 1f) add(SpeedChangeEffect(speed))
+    }
     val audioProcessors = if (speed != 1f && !muteAudio) {
         listOf(SonicAudioProcessor().apply { setSpeed(speed) })
     } else {
         emptyList()
     }
     return Effects(audioProcessors, videoEffects)
+}
+
+/**
+ * [NormRect] is normalized 0..1 with y increasing downward (top < bottom, matching how
+ * [CropOverlay] draws it); [Crop] takes normalized device coordinates (-1..1, y increasing
+ * upward), so both axes need converting -- x is a straight rescale, y also flips direction.
+ */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+private fun cropEffectFor(rect: NormRect): Crop {
+    val leftNdc = rect.left * 2f - 1f
+    val rightNdc = rect.right * 2f - 1f
+    val topNdc = 1f - rect.top * 2f
+    val bottomNdc = 1f - rect.bottom * 2f
+    return Crop(leftNdc, rightNdc, bottomNdc, topNdc)
 }
 
 /**
