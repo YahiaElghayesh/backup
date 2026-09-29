@@ -70,6 +70,7 @@ import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.ui.PlayerView
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import com.elghayesh.gallerybackup.R
 import com.elghayesh.gallerybackup.data.media.MediaItem
 import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
 import java.util.concurrent.TimeUnit
@@ -424,14 +425,17 @@ fun VideoTrimScreen(item: MediaItem, viewModel: GalleryViewModel, onDone: () -> 
                 ) {
                     AndroidView(
                         factory = { ctx ->
-                            PlayerView(ctx).apply {
+                            // TextureView (via this layout), not the default SurfaceView -- a
+                            // SurfaceView is its own OS-composited layer positioned by absolute
+                            // screen coordinates, which does NOT reliably follow a Compose
+                            // graphicsLayer transform (exactly what the rotate button applies
+                            // below): the rotation this screen computes never actually reached the
+                            // screen because the surface being rotated wasn't the one actually
+                            // drawing pixels. TextureView draws as a normal View layer, so it
+                            // always follows Compose's measured bounds and transforms -- same fix
+                            // MediaViewerScreen already uses for its own pinch-zoom transform.
+                            (android.view.LayoutInflater.from(ctx).inflate(R.layout.player_view_texture, null) as PlayerView).apply {
                                 player = exoPlayer
-                                // Stock ExoPlayer transport controls (play/pause, skip -10s/+10s)
-                                // are replaced by the single tap-to-toggle layer below -- they used
-                                // to sit permanently on top of the video and duplicated the frame-
-                                // accurate scrubbing controls this screen already has underneath
-                                // the preview.
-                                useController = false
                             }
                         },
                         modifier = Modifier
