@@ -69,6 +69,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem as ExoMediaItem
+import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
@@ -506,9 +507,27 @@ private class VideoPlayerState(val exoPlayer: ExoPlayer) {
      * icon, as if still playing, before flipping to the correct play icon a moment later once the
      * poll caught up). Setting isPlaying here, synchronously with the toggle itself, closes that
      * window -- ExoPlayer's pause()/play() update playWhenReady (and so isPlaying) immediately on
-     * the calling thread, before this even returns. */
+     * the calling thread, before this even returns.
+     *
+     * Once playback reaches the end, ExoPlayer sits in STATE_ENDED with playWhenReady left however
+     * it was -- calling play() alone there does nothing (there's nothing left to play from the end
+     * position), which is why tapping Play after a video finished looked like it just didn't work.
+     * Seeking back to 0 first is what actually restarts it, matching how every other video player
+     * handles "play" being tapped again after the video has finished.
+     *
+     * Also hides the controls overlay on resuming (but not on pausing) -- tapping the dedicated
+     * play/pause button here, unlike tapping the video body, never otherwise touched
+     * [controlsVisible], so resuming via this button left the play/pause/skip row sitting on top
+     * of the video indefinitely instead of getting out of the way once you're actually watching
+     * again. */
     fun togglePlayPause() {
-        if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
+        if (exoPlayer.isPlaying) {
+            exoPlayer.pause()
+        } else {
+            if (exoPlayer.playbackState == Player.STATE_ENDED) exoPlayer.seekTo(0)
+            exoPlayer.play()
+            controlsVisible = false
+        }
         isPlaying = exoPlayer.isPlaying
     }
 }
