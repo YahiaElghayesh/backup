@@ -178,7 +178,9 @@ class VideoExportWorker(appContext: Context, params: WorkerParameters) : Corouti
         private const val KEY_ORIGINAL_DATE_TAKEN_SEC = "original_date_taken_sec"
         private const val KEY_ORIGINAL_DATE_MODIFIED_SEC = "original_date_modified_sec"
 
-        fun enqueueTrim(
+        // internal, not public -- cropRect's NormRect type is itself internal (PhotoEditScreen.kt),
+        // and a public function can't expose an internal type in its signature.
+        internal fun enqueueTrim(
             context: Context,
             sourceUri: Uri,
             startMs: Long,
