@@ -518,6 +518,25 @@ fun CollageScreen(
                     Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
+                    // A genuine pure-white swatch -- AccentColor.WHITE below is actually a warm
+                    // off-white (0xFFEBE7DF), an intentional app-wide accent tone shared with the
+                    // Settings theme picker, not literal white. A plain white canvas is a common,
+                    // expected collage background the shared accent palette doesn't itself offer.
+                    // Selection uses a BLACK ring (not white, like every other swatch below) since
+                    // a white ring on a white fill would be invisible.
+                    val pureWhite = 0xFFFFFFFFL
+                    Box(
+                        Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(Color(pureWhite))
+                            .border(
+                                width = if (backgroundColorSeed == pureWhite) 3.dp else 1.dp,
+                                color = if (backgroundColorSeed == pureWhite) Color.Black else Color.Black.copy(alpha = 0.2f),
+                                shape = CircleShape,
+                            )
+                            .clickable { backgroundColorSeed = pureWhite },
+                    )
                     AccentColor.entries.forEach { color ->
                         val isSelected = backgroundColorSeed == color.seed
                         Box(
