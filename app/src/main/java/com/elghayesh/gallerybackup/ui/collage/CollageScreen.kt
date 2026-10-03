@@ -72,6 +72,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -303,12 +304,23 @@ fun CollageScreen(
         effectiveCanvasRatio = canvasAspectPreset.ratio ?: (freeWidthValue / freeHeightValue)
     }
 
+    // Clamped to the cell's OWN current size, not a fixed range -- the old fixed -0.5f..1f range
+    // let a full-width cell (wNorm = 1, the common case for a Row/Column layout) be nudged
+    // sideways past the canvas edge with a single tap (e.g. xNorm = 0.04 already means
+    // xNorm + wNorm = 1.04, past the right edge). Nothing clipped that in the editor preview
+    // (Compose doesn't clip overflowing content by default), so the photo could slide a bit off
+    // the visible canvas there -- easy to not notice next to the real photo content -- while the
+    // saved bitmap (a fixed canvasW x canvasH Canvas) can only ever draw what's inside its own
+    // bounds, silently cropping that same overflow off one side. The result: a photo that looked
+    // basically fine while editing came out visibly shifted once saved. A cell this size literally
+    // cannot move without leaving the canvas, so the valid range has to account for its own width/
+    // height, not a one-size-fits-all constant.
     fun moveCell(itemIndex: Int, dxNorm: Float, dyNorm: Float) {
         cells = cells.map {
             if (it.itemIndex == itemIndex) {
                 it.copy(
-                    xNorm = (it.xNorm + dxNorm).coerceIn(-0.5f, 1f),
-                    yNorm = (it.yNorm + dyNorm).coerceIn(-0.5f, 1f),
+                    xNorm = (it.xNorm + dxNorm).coerceIn(0f, (1f - it.wNorm).coerceAtLeast(0f)),
+                    yNorm = (it.yNorm + dyNorm).coerceIn(0f, (1f - it.hNorm).coerceAtLeast(0f)),
                 )
             } else {
                 it
@@ -648,6 +660,14 @@ fun CollageScreen(
                         translationY = previewOffset.y,
                     )
                     .background(Color(backgroundColorSeed))
+                    // A cell can still legitimately extend past the canvas edge (e.g. resizeCell
+                    // allows wNorm/hNorm up to 1.5, well past the 1.0 that exactly fills it) --
+                    // saveCollage's Canvas can only ever draw within its own canvasW x canvasH
+                    // bitmap, silently cropping anything past that. Without clipping here too, this
+                    // preview (which doesn't clip overflowing content by default) could show a cell
+                    // spilling past the canvas that the saved file would actually crop, the same
+                    // kind of editor/saved-output mismatch moveCell's own fix above addresses.
+                    .clipToBounds()
                     .clickable(indication = null, interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }) {
                         selectedItemIndex = null
                     },
