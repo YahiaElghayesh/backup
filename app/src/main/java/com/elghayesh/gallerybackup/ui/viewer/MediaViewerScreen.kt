@@ -25,12 +25,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.outlined.CheckCircle as CheckCircleOutline
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -327,6 +329,12 @@ fun TrashViewerScreen(
 ) {
     val context = LocalContext.current
     val trashedItems by viewModel.trashedItems.collectAsState()
+    // Shared with TrashScreen's own grid (see GalleryViewModel) -- marking an item here (via the
+    // checkmark in the top bar below) is reflected there too, and vice versa. Restore/Delete
+    // forever act on whatever's marked, falling back to just the item currently on screen when
+    // nothing is -- the common case of opening a single item and immediately deciding its fate
+    // without marking it first still works in one tap, same as before.
+    val trashSelectedIds by viewModel.trashSelectedIds.collectAsState()
 
     if (trashedItems.isEmpty()) {
         onBack()
@@ -342,15 +350,18 @@ fun TrashViewerScreen(
     var confirmPermanentDelete by remember { mutableStateOf(false) }
 
     val currentItem = trashedItems.getOrNull(pagerState.currentPage)
+    val markedItems = trashedItems.filter { it.id in trashSelectedIds }
+    val actingItems = markedItems.ifEmpty { listOfNotNull(currentItem) }
 
-    if (confirmPermanentDelete && currentItem != null) {
+    if (confirmPermanentDelete && actingItems.isNotEmpty()) {
         AlertDialog(
             onDismissRequest = { confirmPermanentDelete = false },
             title = { Text("Delete forever?") },
-            text = { Text("This item will be permanently deleted. This cannot be undone.") },
+            text = { Text("${actingItems.size} item(s) will be permanently deleted. This cannot be undone.") },
             confirmButton = {
                 TextButton(onClick = {
-                    viewModel.deleteMediaItems(listOf(currentItem), skipTrash = true)
+                    viewModel.deleteMediaItems(actingItems, skipTrash = true)
+                    viewModel.setTrashSelection(trashSelectedIds - actingItems.map { it.id }.toSet())
                     confirmPermanentDelete = false
                 }) { Text("Delete forever") }
             },
@@ -364,10 +375,25 @@ fun TrashViewerScreen(
         containerColor = Color.Black,
         topBar = {
             TopAppBar(
-                title = {},
+                title = {
+                    if (markedItems.isNotEmpty()) Text("${markedItems.size} marked", color = Color.White)
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+                    }
+                },
+                actions = {
+                    val item = currentItem
+                    if (item != null) {
+                        val isMarked = item.id in trashSelectedIds
+                        IconButton(onClick = { viewModel.setTrashSelected(item.id, !isMarked) }) {
+                            Icon(
+                                if (isMarked) Icons.Filled.CheckCircle else Icons.Outlined.CheckCircleOutline,
+                                contentDescription = if (isMarked) "Unmark" else "Mark",
+                                tint = Color.White,
+                            )
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -377,18 +403,23 @@ fun TrashViewerScreen(
             )
         },
         bottomBar = {
-            val item = currentItem
-            if (item != null) {
+            if (actingItems.isNotEmpty()) {
                 BottomAppBar(containerColor = Color.Black) {
                     Row(
                         Modifier.fillMaxWidth().padding(horizontal = 24.dp),
                         horizontalArrangement = Arrangement.SpaceEvenly,
                     ) {
-                        TextButton(onClick = { viewModel.restoreFromTrash(listOf(item.id)) }) {
-                            Text("Restore", color = Color.White)
+                        TextButton(onClick = {
+                            viewModel.restoreFromTrash(actingItems.map { it.id })
+                            viewModel.setTrashSelection(trashSelectedIds - actingItems.map { it.id }.toSet())
+                        }) {
+                            Text(if (markedItems.size > 1) "Restore (${markedItems.size})" else "Restore", color = Color.White)
                         }
                         TextButton(onClick = { confirmPermanentDelete = true }) {
-                            Text("Delete forever", color = Color.White)
+                            Text(
+                                if (markedItems.size > 1) "Delete forever (${markedItems.size})" else "Delete forever",
+                                color = Color.White,
+                            )
                         }
                     }
                 }

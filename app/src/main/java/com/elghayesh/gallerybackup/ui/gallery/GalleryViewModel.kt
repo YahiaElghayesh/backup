@@ -462,6 +462,28 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         _selectedFolderPaths.value = emptySet()
     }
 
+    // Separate from _selectedMediaIds above -- the trash grid and TrashViewerScreen mark items
+    // from an entirely different list (trashedItems, not whatever folder is currently open), so
+    // sharing one selection set between them and the regular gallery grid/viewer could leave a
+    // stale id selected in the wrong screen once you've navigated elsewhere. Kept here (rather
+    // than as local state in TrashScreen alone) specifically so marking an item from inside
+    // TrashViewerScreen -- opened on a single item, with no grid of its own -- is reflected back
+    // in TrashScreen's grid, and vice versa.
+    private val _trashSelectedIds = MutableStateFlow<Set<Long>>(emptySet())
+    val trashSelectedIds: StateFlow<Set<Long>> = _trashSelectedIds.asStateFlow()
+
+    fun setTrashSelected(id: Long, selected: Boolean) {
+        _trashSelectedIds.value = if (selected) _trashSelectedIds.value + id else _trashSelectedIds.value - id
+    }
+
+    fun setTrashSelection(ids: Set<Long>) {
+        _trashSelectedIds.value = ids
+    }
+
+    fun clearTrashSelection() {
+        _trashSelectedIds.value = emptySet()
+    }
+
     fun setDontAskAgainDelete(value: Boolean) {
         _dontAskAgainDelete.value = value
     }

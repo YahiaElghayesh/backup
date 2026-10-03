@@ -68,7 +68,9 @@ fun TrashScreen(
     val trashedItems by viewModel.trashedItems.collectAsState()
     val trashedEntries by viewModel.trashedEntries.collectAsState()
     val retentionDays by viewModel.trashRetentionDays.collectAsState()
-    var selectedIds by remember { mutableStateOf(setOf<Long>()) }
+    // Lives in the ViewModel (not local state) so marking an item from inside TrashViewerScreen --
+    // opened on a single item, with no grid of its own -- is reflected back here too.
+    val selectedIds by viewModel.trashSelectedIds.collectAsState()
     var confirmPermanentDelete by remember { mutableStateOf(false) }
     var confirmEmptyTrash by remember { mutableStateOf(false) }
 
@@ -85,7 +87,7 @@ fun TrashScreen(
     // Back (system button or gesture) exits selection instead of leaving the screen entirely --
     // the on-screen arrow already did this via its own onClick, but that's a separate code path
     // from the hardware/gesture back button, which otherwise falls straight through to onBack().
-    BackHandler(enabled = selectedIds.isNotEmpty()) { selectedIds = emptySet() }
+    BackHandler(enabled = selectedIds.isNotEmpty()) { viewModel.clearTrashSelection() }
 
     LaunchedEffect(Unit) { viewModel.purgeExpiredTrash() }
 
@@ -99,7 +101,7 @@ fun TrashScreen(
             confirmButton = {
                 TextButton(onClick = {
                     viewModel.deleteMediaItems(selectedItems, skipTrash = true)
-                    selectedIds = emptySet()
+                    viewModel.clearTrashSelection()
                     confirmPermanentDelete = false
                 }) { Text("Delete forever") }
             },
@@ -117,7 +119,7 @@ fun TrashScreen(
             confirmButton = {
                 TextButton(onClick = {
                     viewModel.emptyTrash()
-                    selectedIds = emptySet()
+                    viewModel.clearTrashSelection()
                     confirmEmptyTrash = false
                 }) { Text("Empty") }
             },
@@ -132,7 +134,7 @@ fun TrashScreen(
             TopAppBar(
                 title = { Text(if (selectedIds.isEmpty()) "Trash" else "${selectedIds.size} / ${trashedItems.size} selected") },
                 navigationIcon = {
-                    IconButton(onClick = { if (selectedIds.isNotEmpty()) selectedIds = emptySet() else onBack() }) {
+                    IconButton(onClick = { if (selectedIds.isNotEmpty()) viewModel.clearTrashSelection() else onBack() }) {
                         Icon(
                             if (selectedIds.isNotEmpty()) Icons.Filled.Close else Icons.Filled.ArrowBack,
                             contentDescription = if (selectedIds.isNotEmpty()) "Cancel selection" else "Back",
@@ -143,11 +145,9 @@ fun TrashScreen(
                     if (selectedIds.isNotEmpty()) {
                         IconButton(
                             onClick = {
-                                selectedIds = if (selectedIds.size == trashedItems.size) {
-                                    emptySet()
-                                } else {
-                                    trashedItems.map { it.id }.toSet()
-                                }
+                                viewModel.setTrashSelection(
+                                    if (selectedIds.size == trashedItems.size) emptySet() else trashedItems.map { it.id }.toSet(),
+                                )
                             },
                         ) {
                             Icon(Icons.Filled.SelectAll, contentDescription = "Select all")
@@ -169,7 +169,7 @@ fun TrashScreen(
                     ) {
                         TextButton(onClick = {
                             viewModel.restoreFromTrash(selectedItems.map { it.id })
-                            selectedIds = emptySet()
+                            viewModel.clearTrashSelection()
                         }) { Text("Restore") }
                         TextButton(onClick = { confirmPermanentDelete = true }) { Text("Delete forever") }
                     }
@@ -206,7 +206,7 @@ fun TrashScreen(
                                     dragPath = dragPath.value,
                                     setDragPath = { dragPath.value = it },
                                     preExisting = preExistingSelection,
-                                    setSelectedIds = { selectedIds = it },
+                                    setSelectedIds = { viewModel.setTrashSelection(it) },
                                 )
                             },
                         )
@@ -222,7 +222,7 @@ fun TrashScreen(
                             isSelected = item.id in selectedIds,
                             onClick = {
                                 if (selectedIds.isNotEmpty()) {
-                                    selectedIds = if (item.id in selectedIds) selectedIds - item.id else selectedIds + item.id
+                                    viewModel.setTrashSelected(item.id, item.id !in selectedIds)
                                 } else {
                                     onOpenTrashedMedia(trashedItems.indexOf(item))
                                 }
@@ -230,7 +230,7 @@ fun TrashScreen(
                             onLongClick = {
                                 preExistingSelection = selectedIds
                                 dragPath.value = listOf(item.id)
-                                selectedIds = selectedIds + item.id
+                                viewModel.setTrashSelected(item.id, true)
                                 isDragSelecting = true
                             },
                         )
