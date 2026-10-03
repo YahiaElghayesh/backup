@@ -1926,7 +1926,18 @@ private fun WordWrapText(
     BoxWithConstraints(modifier) {
         val density = LocalDensity.current
         val maxWidthPx = with(density) { maxWidth.roundToPx() }
-        val wrapped = remember(text, style, maxWidthPx) {
+        // The budget actually used to decide line breaks -- starts equal to the real available
+        // width, but see the onTextLayout callback below: it's shrunk and the text repacked
+        // whenever the real, final render still overflows a line despite this pre-measurement
+        // saying it would fit. That self-correction is what actually matters here, not the
+        // pre-measurement itself -- a name that still truncated to one ellipsized line instead of
+        // wrapping (e.g. a 3-word name with plenty of width to spare) means this pre-measurement
+        // pass and the real layout pass disagreed about what fits, for whatever reason (differing
+        // font/metrics state between the two, a Compose text-layout quirk, etc.) -- rather than
+        // trying to chase down every possible cause of that disagreement, converge on a width this
+        // specific render actually fits at and use that.
+        var widthBudgetPx by remember(text, maxWidthPx) { mutableStateOf(maxWidthPx) }
+        val wrapped = remember(text, style, widthBudgetPx) {
             val words = text.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
             val lines = mutableListOf<String>()
             var current = ""
@@ -1942,7 +1953,7 @@ private fun WordWrapText(
                     softWrap = false,
                     maxLines = 1,
                 ).size.width
-                if (current.isEmpty() || candidateWidth <= maxWidthPx) {
+                if (current.isEmpty() || candidateWidth <= widthBudgetPx) {
                     current = candidate
                 } else {
                     lines += current
@@ -1967,6 +1978,17 @@ private fun WordWrapText(
             maxLines = if (lineCount > 1) maxLines else 1,
             overflow = TextOverflow.Ellipsis,
             softWrap = false,
+            modifier = Modifier.fillMaxWidth(),
+            onTextLayout = { result ->
+                // Still ellipsizing despite this composable's own packing saying it should fit --
+                // shrink the assumed width a bit and repack on the next frame, so words that
+                // seemed to fit together end up split onto separate lines instead of silently
+                // truncating. Floors at 0 (every word gets forced onto its own line, same as a
+                // genuinely unbreakable word) rather than looping forever.
+                if (result.hasVisualOverflow && widthBudgetPx > 0) {
+                    widthBudgetPx = (widthBudgetPx * 0.85f).roundToInt().coerceAtLeast(0)
+                }
+            },
         )
     }
 }
