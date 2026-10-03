@@ -1902,18 +1902,22 @@ private val ScrimBrush = Brush.verticalGradient(
     1f to Color.Black.copy(alpha = 0.78f),
 )
 
-/** Renders [text] wrapped strictly at word boundaries -- never mid-character -- across up to
- * [maxLines] lines, by greedily packing words onto lines up to the container's actually measured
- * width and joining the result with explicit line breaks, then rendering with [Text]'s own
- * automatic wrapping switched off ([TextLayoutResult]-based `softWrap = false`) so Compose can't
- * re-wrap (and potentially split a word) on top of that pre-computed layout. This is the fix for
- * a bug the previous approach (a plain [Text] with `maxLines` alone) could not actually solve:
- * Compose's default line breaking will split a single word across two lines whenever that word
- * alone is wider than the available width, regardless of `maxLines`/`overflow` -- and that can
- * happen to one long word inside an otherwise multi-word name, not just to a name that is a single
- * word in its entirety. Packing words onto lines up front means a word too wide to share a line
- * always gets a line of its own instead, and only ellipsizes (rather than splits) if it's still
- * too wide even alone. */
+/** Renders [text] wrapped at word boundaries across up to [maxLines] lines, trusting Android's own
+ * line breaking (plain automatic `softWrap`) to decide where -- a prior version of this composable
+ * hand-measured each candidate line with [rememberTextMeasurer] and pre-packed words onto explicit
+ * `"\n"`-joined lines itself, which turned out to measure differently from how the exact same text/
+ * style/width then actually laid out once rendered for real: a name like "Sahl Hashish" (two
+ * ordinary words, comfortable room to spare) could still come out as one truncated, un-wrapped line
+ * instead of two. Removed that whole hand-measurement pass -- nothing here recomputes what Android's
+ * own [Text] already computes correctly for the normal multi-word case.
+ *
+ * The one thing automatic wrapping gets wrong on its own: a single word wider than the available
+ * width has nowhere to break at a space, so Android splits it mid-character instead of wrapping it
+ * whole. [onTextLayout] below inspects the REAL rendered layout (so it can never disagree with what
+ * ends up on screen the way a separate pre-measurement pass could) for a line boundary that falls
+ * between two non-whitespace characters -- a mid-word split -- and only then falls back to a single
+ * ellipsized line, the one configuration guaranteed to never split a word (nothing to wrap into, so
+ * Android has no choice but to ellipsize instead). */
 @Composable
 private fun WordWrapText(
     text: String,
@@ -1922,75 +1926,26 @@ private fun WordWrapText(
     style: TextStyle = LocalTextStyle.current,
     maxLines: Int = 6,
 ) {
-    val textMeasurer = rememberTextMeasurer()
-    BoxWithConstraints(modifier) {
-        val density = LocalDensity.current
-        val maxWidthPx = with(density) { maxWidth.roundToPx() }
-        // The budget actually used to decide line breaks -- starts equal to the real available
-        // width, but see the onTextLayout callback below: it's shrunk and the text repacked
-        // whenever the real, final render still overflows a line despite this pre-measurement
-        // saying it would fit. That self-correction is what actually matters here, not the
-        // pre-measurement itself -- a name that still truncated to one ellipsized line instead of
-        // wrapping (e.g. a 3-word name with plenty of width to spare) means this pre-measurement
-        // pass and the real layout pass disagreed about what fits, for whatever reason (differing
-        // font/metrics state between the two, a Compose text-layout quirk, etc.) -- rather than
-        // trying to chase down every possible cause of that disagreement, converge on a width this
-        // specific render actually fits at and use that.
-        var widthBudgetPx by remember(text, maxWidthPx) { mutableStateOf(maxWidthPx) }
-        val wrapped = remember(text, style, widthBudgetPx) {
-            val words = text.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
-            val lines = mutableListOf<String>()
-            var current = ""
-            // Runs even for a single word -- current.isEmpty() always accepts the first/only
-            // word unconditionally (a lone word too wide to fit still gets its own line, never
-            // split), so this one loop handles both cases identically instead of a separate,
-            // untrimmed-text-returning special case for words.size <= 1.
-            for (word in words) {
-                val candidate = if (current.isEmpty()) word else "$current $word"
-                val candidateWidth = textMeasurer.measure(
-                    text = candidate,
-                    style = style,
-                    softWrap = false,
-                    maxLines = 1,
-                ).size.width
-                if (current.isEmpty() || candidateWidth <= widthBudgetPx) {
-                    current = candidate
-                } else {
-                    lines += current
-                    current = word
+    var forceSingleLine by remember(text) { mutableStateOf(false) }
+    Text(
+        text = text,
+        color = color,
+        style = style,
+        maxLines = if (forceSingleLine) 1 else maxLines,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier,
+        onTextLayout = { result ->
+            if (!forceSingleLine) {
+                for (lineIndex in 0 until result.lineCount) {
+                    val lineEnd = result.getLineEnd(lineIndex, visibleEnd = false)
+                    if (lineEnd in 1 until text.length && !text[lineEnd - 1].isWhitespace() && !text[lineEnd].isWhitespace()) {
+                        forceSingleLine = true
+                        break
+                    }
                 }
             }
-            if (current.isNotEmpty()) lines += current
-            lines.joinToString("\n")
-        }
-        // A single actual line -- the common case: most names fit on one line, or are one
-        // unbreakable word -- renders with maxLines = 1 rather than the full [maxLines] budget.
-        // Some Compose text-layout paths size/ellipsize a softWrap = false single line
-        // differently once a larger maxLines is in play (as if reserving room for lines that
-        // will never come), which can ellipsize a line early even though it would fit as the
-        // sole line. maxLines = 1 is the same well-exercised configuration a plain single-line
-        // Text with an ellipsis already used, before this composable existed.
-        val lineCount = wrapped.count { it == '\n' } + 1
-        Text(
-            text = wrapped,
-            color = color,
-            style = style,
-            maxLines = if (lineCount > 1) maxLines else 1,
-            overflow = TextOverflow.Ellipsis,
-            softWrap = false,
-            modifier = Modifier.fillMaxWidth(),
-            onTextLayout = { result ->
-                // Still ellipsizing despite this composable's own packing saying it should fit --
-                // shrink the assumed width a bit and repack on the next frame, so words that
-                // seemed to fit together end up split onto separate lines instead of silently
-                // truncating. Floors at 0 (every word gets forced onto its own line, same as a
-                // genuinely unbreakable word) rather than looping forever.
-                if (result.hasVisualOverflow && widthBudgetPx > 0) {
-                    widthBudgetPx = (widthBudgetPx * 0.85f).roundToInt().coerceAtLeast(0)
-                }
-            },
-        )
-    }
+        },
+    )
 }
 
 @OptIn(ExperimentalFoundationApi::class)
