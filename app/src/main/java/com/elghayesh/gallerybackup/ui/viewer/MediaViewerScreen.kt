@@ -31,6 +31,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -40,6 +41,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -214,11 +216,11 @@ fun MediaViewerScreen(
                         onDelete = { requestDelete(listOf(item)) },
                         isFavorite = item.id in favoriteMediaIds,
                         onToggleFavorite = { viewModel.setMediaFavorite(item.id, item.id !in favoriteMediaIds) },
+                        onMoveTo = { transferMode = ViewerTransferMode.MOVE },
+                        onCopyTo = { transferMode = ViewerTransferMode.COPY },
                         overflowActions = buildList {
                             add((if (isHidden) "Unhide" else "Hide") to { viewModel.setMediaHidden(item.id, !isHidden) })
                             add("Rename" to { showRenameDialog = true })
-                            add("Move to..." to { transferMode = ViewerTransferMode.MOVE })
-                            add("Copy to..." to { transferMode = ViewerTransferMode.COPY })
                             if (!item.isVideo) {
                                 add("Set as wallpaper" to { setAsWallpaper(context, item) })
                             }
@@ -292,6 +294,151 @@ fun MediaViewerScreen(
                         // bitmap instead of revealing real detail. The pager only composes the
                         // current page (no beyondViewportPageCount override), so this only holds
                         // one full-resolution decode in memory at a time, not the whole gallery.
+                        model = ImageRequest.Builder(context)
+                            .data(item.uri)
+                            .size(Size.ORIGINAL)
+                            .build(),
+                        contentDescription = item.displayName,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The trash's own equivalent of [MediaViewerScreen] -- opens a trashed photo/video full-screen
+ * (same pinch-zoom/video playback as the regular viewer) instead of leaving [TrashScreen]'s grid
+ * as the only way to look at a trashed item before deciding whether to restore or delete it.
+ * Deliberately a separate, simpler screen rather than a mode flag on [MediaViewerScreen]: a trashed
+ * item can't be edited, moved, copied, hidden, or have its cover/favorite status touched, so the
+ * action set here is just Restore and Delete forever, matching [TrashScreen]'s own bottom bar for
+ * a selection.
+ */
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+@Composable
+fun TrashViewerScreen(
+    startIndex: Int,
+    viewModel: GalleryViewModel,
+    onBack: () -> Unit,
+) {
+    val context = LocalContext.current
+    val trashedItems by viewModel.trashedItems.collectAsState()
+
+    if (trashedItems.isEmpty()) {
+        onBack()
+        return
+    }
+
+    val pagerState = rememberPagerState(
+        initialPage = startIndex.coerceIn(0, trashedItems.lastIndex),
+        pageCount = { trashedItems.size },
+    )
+    val pagerScope = rememberCoroutineScope()
+    var currentScale by remember { mutableFloatStateOf(1f) }
+    var confirmPermanentDelete by remember { mutableStateOf(false) }
+
+    val currentItem = trashedItems.getOrNull(pagerState.currentPage)
+
+    if (confirmPermanentDelete && currentItem != null) {
+        AlertDialog(
+            onDismissRequest = { confirmPermanentDelete = false },
+            title = { Text("Delete forever?") },
+            text = { Text("This item will be permanently deleted. This cannot be undone.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.deleteMediaItems(listOf(currentItem), skipTrash = true)
+                    confirmPermanentDelete = false
+                }) { Text("Delete forever") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmPermanentDelete = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    Scaffold(
+        containerColor = Color.Black,
+        topBar = {
+            TopAppBar(
+                title = {},
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = Color.Black,
+                    titleContentColor = Color.White,
+                ),
+            )
+        },
+        bottomBar = {
+            val item = currentItem
+            if (item != null) {
+                BottomAppBar(containerColor = Color.Black) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                    ) {
+                        TextButton(onClick = { viewModel.restoreFromTrash(listOf(item.id)) }) {
+                            Text("Restore", color = Color.White)
+                        }
+                        TextButton(onClick = { confirmPermanentDelete = true }) {
+                            Text("Delete forever", color = Color.White)
+                        }
+                    }
+                }
+            }
+        },
+    ) { padding ->
+        HorizontalPager(
+            state = pagerState,
+            userScrollEnabled = currentScale <= 1f,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .background(Color.Black),
+        ) { page ->
+            val item = trashedItems.getOrNull(page) ?: return@HorizontalPager
+            val isCurrent = pagerState.currentPage == page
+            val onSwipeNext: () -> Unit = {
+                currentScale = 1f
+                if (page < trashedItems.lastIndex) pagerScope.launch { pagerState.animateScrollToPage(page + 1) }
+            }
+            val onSwipePrevious: () -> Unit = {
+                currentScale = 1f
+                if (page > 0) pagerScope.launch { pagerState.animateScrollToPage(page - 1) }
+            }
+            if (item.isVideo && isCurrent) {
+                val videoState = rememberVideoPlayerState(item)
+                Box(Modifier.fillMaxSize()) {
+                    ZoomableMediaBox(
+                        onScaleChanged = { currentScale = it },
+                        onTap = {
+                            videoState.controlsVisible = !videoState.controlsVisible
+                            videoState.togglePlayPause()
+                        },
+                        onSwipeNext = onSwipeNext,
+                        onSwipePrevious = onSwipePrevious,
+                        onDoubleTapSeek = { isRightHalf ->
+                            videoState.seekRelative(if (isRightHalf) 10_000 else -10_000)
+                        },
+                    ) {
+                        VideoSurface(videoState.exoPlayer, modifier = Modifier.fillMaxSize())
+                    }
+                    VideoControlsOverlay(videoState)
+                }
+            } else {
+                ZoomableMediaBox(
+                    onScaleChanged = { if (isCurrent) currentScale = it },
+                    onSwipeNext = onSwipeNext,
+                    onSwipePrevious = onSwipePrevious,
+                ) {
+                    AsyncImage(
                         model = ImageRequest.Builder(context)
                             .data(item.uri)
                             .size(Size.ORIGINAL)

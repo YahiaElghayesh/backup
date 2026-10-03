@@ -62,6 +62,7 @@ import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
 @Composable
 fun TrashScreen(
     viewModel: GalleryViewModel,
+    onOpenTrashedMedia: (index: Int) -> Unit,
     onBack: () -> Unit,
 ) {
     val trashedItems by viewModel.trashedItems.collectAsState()
@@ -220,7 +221,11 @@ fun TrashScreen(
                             daysLeft = daysLeft,
                             isSelected = item.id in selectedIds,
                             onClick = {
-                                selectedIds = if (item.id in selectedIds) selectedIds - item.id else selectedIds + item.id
+                                if (selectedIds.isNotEmpty()) {
+                                    selectedIds = if (item.id in selectedIds) selectedIds - item.id else selectedIds + item.id
+                                } else {
+                                    onOpenTrashedMedia(trashedItems.indexOf(item))
+                                }
                             },
                             onLongClick = {
                                 preExistingSelection = selectedIds

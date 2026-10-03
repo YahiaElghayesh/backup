@@ -74,6 +74,7 @@ import com.elghayesh.gallerybackup.ui.theme.AppTheme
 import com.elghayesh.gallerybackup.ui.trash.TrashScreen
 import com.elghayesh.gallerybackup.ui.update.AppUpdateController
 import com.elghayesh.gallerybackup.ui.viewer.MediaViewerScreen
+import com.elghayesh.gallerybackup.ui.viewer.TrashViewerScreen
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -375,6 +376,18 @@ private fun AppNavHost(galleryViewModel: GalleryViewModel, backupViewModel: Back
         }
         composable("trash") {
             TrashScreen(
+                viewModel = galleryViewModel,
+                onOpenTrashedMedia = { index -> navController.navigateSafely("trashViewer/$index") },
+                onBack = { navController.popBackStack() },
+            )
+        }
+        composable(
+            route = "trashViewer/{index}",
+            arguments = listOf(navArgument("index") { type = NavType.IntType }),
+        ) { backStackEntry ->
+            val index = backStackEntry.arguments?.getInt("index") ?: 0
+            TrashViewerScreen(
+                startIndex = index,
                 viewModel = galleryViewModel,
                 onBack = { navController.popBackStack() },
             )
