@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.ScrollableState
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -85,6 +86,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 import androidx.compose.ui.Alignment
@@ -698,6 +702,8 @@ fun GalleryScreen(
                                             isDragSelecting = { isDragSelecting },
                                             setDragSelecting = { isDragSelecting = it },
                                             viewModel = viewModel,
+                                            scrollableState = gridState,
+                                            viewportHeightPx = { gridState.layoutInfo.viewportSize.height.toFloat() },
                                         ) { position ->
                                             itemIndexAt(gridState, position)
                                                 ?.let { folderOrMediaAt(it, currentFolders.value, currentMedia.value) }
@@ -973,6 +979,8 @@ fun GalleryScreen(
                                             isDragSelecting = { isDragSelecting },
                                             setDragSelecting = { isDragSelecting = it },
                                             viewModel = viewModel,
+                                            scrollableState = listState,
+                                            viewportHeightPx = { listState.layoutInfo.viewportSize.height.toFloat() },
                                         ) { position ->
                                             folderOrMediaAtListPosition(
                                                 listState, position, size.width.toFloat(), clearancePx,
@@ -1308,52 +1316,117 @@ private fun applyDragHover(
  * Box kept reading positions relative to the Box. That mismatch (not anything about which
  * direction is "up" or "down") is what made hovering resolve to the wrong tile, or no tile at all,
  * specifically for a folder short enough to shrink-wrap while pinned to the bottom.
+ *
+ * Also auto-scrolls [scrollableState] while the finger is held in the top/bottom edge zone of
+ * [viewportHeightPx] during an active drag-select -- without this, extending a selection past
+ * whatever's already on screen was impossible, since userScrollEnabled is turned off for the
+ * whole grid/list the instant drag-select starts (so this gesture is the only thing that can move
+ * the list at all while dragging). The scrolling runs on its own background ticker alongside the
+ * pointer-event loop below, rather than being driven by the events themselves, so it keeps
+ * scrolling -- and keeps extending the selection to whatever scrolls into the last known finger
+ * position -- even while the finger is held perfectly still at the edge, which on its own
+ * produces no further pointer events to react to.
  */
 private suspend fun PointerInputScope.dragSelectGesture(
     isDragSelecting: () -> Boolean,
     setDragSelecting: (Boolean) -> Unit,
     viewModel: GalleryViewModel,
+    scrollableState: ScrollableState,
+    viewportHeightPx: () -> Float,
     hitTest: (Offset) -> Pair<FolderNode?, MediaItem?>?,
 ) {
-    awaitEachGesture {
-        val down = awaitFirstDown(requireUnconsumed = false)
-        var pointerId = down.id
-        // Path of items visited by this drag so far, oldest first -- see applyDragHover's own doc
-        // comment for how it turns "hover back onto an earlier item" into "un-select everything
-        // since then". Seeded (along with the pre-existing-selection snapshot) the first time
-        // isDragSelecting is observed true, i.e. right after the long-press that started this
-        // drag already selected the anchor tile.
-        var dragStarted = false
-        val dragPath = mutableListOf<DragItemKey>()
-        var preExistingFolders = emptySet<String>()
-        var preExistingMedia = emptySet<Long>()
-        while (true) {
-            // Read (without consuming, unless already drag-selecting) on the Initial pass --
-            // parent-to-child, i.e. before each tile's own combinedClickable (a descendant) sees
-            // this event on its default Main pass. That ordering is what lets us extend the
-            // selection by consuming move events once a long-press has already won, without ever
-            // needing to fight the grid/list's own scrollable for the tap itself.
-            val event = awaitPointerEvent(PointerEventPass.Initial)
-            val change = event.changes.firstOrNull { it.id == pointerId } ?: break
-            if (!change.pressed) {
-                if (isDragSelecting()) change.consume()
-                setDragSelecting(false)
-                break
-            }
-            if (isDragSelecting()) {
-                if (!dragStarted) {
-                    dragStarted = true
-                    preExistingFolders = viewModel.selectedFolderPaths.value
-                    preExistingMedia = viewModel.selectedMediaIds.value
-                    dragItemKeyOf(hitTest(change.position))?.let { dragPath.add(it) }
+    val edgeZonePx = DRAG_AUTOSCROLL_EDGE_ZONE.toPx()
+    val maxScrollPxPerTick = DRAG_AUTOSCROLL_MAX_SPEED.toPx()
+    coroutineScope {
+        var autoScrollPxPerTick = 0f
+        var lastPointerPosition = Offset.Zero
+        // Non-null only while a drag-select is actually in progress -- the SAME path/pre-existing-
+        // selection snapshot the pointer-event loop below is building, so the ticker extends that
+        // one path as it scrolls instead of starting a separate one of its own.
+        var activeDragPath: MutableList<DragItemKey>? = null
+        var activePreExistingFolders = emptySet<String>()
+        var activePreExistingMedia = emptySet<Long>()
+
+        val autoScrollJob = launch {
+            while (isActive) {
+                if (autoScrollPxPerTick != 0f) {
+                    scrollableState.scrollBy(autoScrollPxPerTick)
+                    activeDragPath?.let { path ->
+                        applyDragHover(hitTest(lastPointerPosition), path, activePreExistingFolders, activePreExistingMedia, viewModel)
+                    }
                 }
-                applyDragHover(hitTest(change.position), dragPath, preExistingFolders, preExistingMedia, viewModel)
-                change.consume()
+                delay(16)
             }
-            pointerId = change.id
+        }
+        try {
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                var pointerId = down.id
+                // Path of items visited by this drag so far, oldest first -- see applyDragHover's
+                // own doc comment for how it turns "hover back onto an earlier item" into
+                // "un-select everything since then". Seeded (along with the pre-existing-selection
+                // snapshot) the first time isDragSelecting is observed true, i.e. right after the
+                // long-press that started this drag already selected the anchor tile.
+                var dragStarted = false
+                val dragPath = mutableListOf<DragItemKey>()
+                var preExistingFolders = emptySet<String>()
+                var preExistingMedia = emptySet<Long>()
+                while (true) {
+                    // Read (without consuming, unless already drag-selecting) on the Initial pass
+                    // -- parent-to-child, i.e. before each tile's own combinedClickable (a
+                    // descendant) sees this event on its default Main pass. That ordering is what
+                    // lets us extend the selection by consuming move events once a long-press has
+                    // already won, without ever needing to fight the grid/list's own scrollable
+                    // for the tap itself.
+                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                    val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+                    if (!change.pressed) {
+                        if (isDragSelecting()) change.consume()
+                        setDragSelecting(false)
+                        autoScrollPxPerTick = 0f
+                        activeDragPath = null
+                        break
+                    }
+                    if (isDragSelecting()) {
+                        if (!dragStarted) {
+                            dragStarted = true
+                            preExistingFolders = viewModel.selectedFolderPaths.value
+                            preExistingMedia = viewModel.selectedMediaIds.value
+                            dragItemKeyOf(hitTest(change.position))?.let { dragPath.add(it) }
+                            activeDragPath = dragPath
+                            activePreExistingFolders = preExistingFolders
+                            activePreExistingMedia = preExistingMedia
+                        }
+                        applyDragHover(hitTest(change.position), dragPath, preExistingFolders, preExistingMedia, viewModel)
+                        change.consume()
+                        lastPointerPosition = change.position
+                        val viewportHeight = viewportHeightPx()
+                        autoScrollPxPerTick = when {
+                            change.position.y < edgeZonePx ->
+                                -maxScrollPxPerTick * ((edgeZonePx - change.position.y) / edgeZonePx).coerceIn(0f, 1f)
+                            change.position.y > viewportHeight - edgeZonePx ->
+                                maxScrollPxPerTick * ((change.position.y - (viewportHeight - edgeZonePx)) / edgeZonePx).coerceIn(0f, 1f)
+                            else -> 0f
+                        }
+                    } else {
+                        autoScrollPxPerTick = 0f
+                    }
+                    pointerId = change.id
+                }
+            }
+        } finally {
+            autoScrollJob.cancel()
         }
     }
 }
+
+/** How close to the top/bottom edge of the viewport the finger needs to be, while drag-selecting,
+ * before [dragSelectGesture] starts auto-scrolling. */
+private val DRAG_AUTOSCROLL_EDGE_ZONE = 72.dp
+
+/** The fastest [dragSelectGesture] will auto-scroll (reached right at the very edge of the
+ * viewport) -- per ~16ms tick, so roughly this many dp/sec at the top speed. */
+private val DRAG_AUTOSCROLL_MAX_SPEED = 24.dp
 
 /**
  * The mixed grid/list branch's equivalent of [itemIndexAt] + [folderOrMediaAt]: maps a drag/long-

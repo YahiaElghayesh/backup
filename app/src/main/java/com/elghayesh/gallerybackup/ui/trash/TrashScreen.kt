@@ -57,6 +57,10 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.elghayesh.gallerybackup.data.media.MediaItem
 import com.elghayesh.gallerybackup.ui.gallery.GalleryViewModel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -257,6 +261,15 @@ private fun trashItemIdAt(gridState: LazyGridState, position: Offset): Long? {
  * moves, every tile it passes over gets folded into the selection via [onHover]. Attached directly
  * to the [LazyVerticalGrid]'s own modifier chain (not a separate ancestor Box) so hit positions are
  * always in the same coordinate frame [gridState]'s own layoutInfo reports them in.
+ *
+ * Also auto-scrolls [gridState] while the finger is held in the top/bottom edge zone of the
+ * viewport during an active drag-select -- the grid's own userScrollEnabled is turned off the
+ * instant drag-select starts, so this is the only thing that can move it at all while dragging,
+ * and without it there'd be no way to extend a selection past whatever's already on screen. Runs
+ * on its own background ticker alongside the pointer-event loop below (not driven by the events
+ * themselves), so it keeps scrolling -- and keeps calling [onHover] for whatever scrolls into the
+ * last known finger position -- even while the finger is held perfectly still at the edge, which
+ * on its own produces no further pointer events to react to.
  */
 private suspend fun PointerInputScope.trashDragSelectGesture(
     gridState: LazyGridState,
@@ -264,25 +277,65 @@ private suspend fun PointerInputScope.trashDragSelectGesture(
     setDragSelecting: (Boolean) -> Unit,
     onHover: (Long?) -> Unit,
 ) {
-    awaitEachGesture {
-        val down = awaitFirstDown(requireUnconsumed = false)
-        var pointerId = down.id
-        while (true) {
-            val event = awaitPointerEvent(PointerEventPass.Initial)
-            val change = event.changes.firstOrNull { it.id == pointerId } ?: break
-            if (!change.pressed) {
-                if (isDragSelecting()) change.consume()
-                setDragSelecting(false)
-                break
+    val edgeZonePx = DRAG_AUTOSCROLL_EDGE_ZONE.toPx()
+    val maxScrollPxPerTick = DRAG_AUTOSCROLL_MAX_SPEED.toPx()
+    coroutineScope {
+        var autoScrollPxPerTick = 0f
+        var lastPointerPosition = Offset.Zero
+
+        val autoScrollJob = launch {
+            while (isActive) {
+                if (autoScrollPxPerTick != 0f) {
+                    gridState.scrollBy(autoScrollPxPerTick)
+                    onHover(trashItemIdAt(gridState, lastPointerPosition))
+                }
+                delay(16)
             }
-            if (isDragSelecting()) {
-                onHover(trashItemIdAt(gridState, change.position))
-                change.consume()
+        }
+        try {
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                var pointerId = down.id
+                while (true) {
+                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                    val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+                    if (!change.pressed) {
+                        if (isDragSelecting()) change.consume()
+                        setDragSelecting(false)
+                        autoScrollPxPerTick = 0f
+                        break
+                    }
+                    if (isDragSelecting()) {
+                        onHover(trashItemIdAt(gridState, change.position))
+                        change.consume()
+                        lastPointerPosition = change.position
+                        val viewportHeight = gridState.layoutInfo.viewportSize.height.toFloat()
+                        autoScrollPxPerTick = when {
+                            change.position.y < edgeZonePx ->
+                                -maxScrollPxPerTick * ((edgeZonePx - change.position.y) / edgeZonePx).coerceIn(0f, 1f)
+                            change.position.y > viewportHeight - edgeZonePx ->
+                                maxScrollPxPerTick * ((change.position.y - (viewportHeight - edgeZonePx)) / edgeZonePx).coerceIn(0f, 1f)
+                            else -> 0f
+                        }
+                    } else {
+                        autoScrollPxPerTick = 0f
+                    }
+                    pointerId = change.id
+                }
             }
-            pointerId = change.id
+        } finally {
+            autoScrollJob.cancel()
         }
     }
 }
+
+/** How close to the top/bottom edge of the viewport the finger needs to be, while drag-selecting,
+ * before auto-scrolling kicks in (shared by both the main gallery grid and the trash grid). */
+private val DRAG_AUTOSCROLL_EDGE_ZONE = 72.dp
+
+/** The fastest auto-scroll ever reaches (right at the very edge of the viewport) -- per ~16ms
+ * tick, so roughly this many dp/sec at the top speed. */
+private val DRAG_AUTOSCROLL_MAX_SPEED = 24.dp
 
 /**
  * Folds a newly-hovered tile into the current drag's path. Hovering onto a tile not yet in
